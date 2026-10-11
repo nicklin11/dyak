@@ -63,6 +63,7 @@ bundle contains and who wrote each file: [`docs/artefacts.md`](docs/artefacts.md
 | 4 | quality gate failed; note written, report says why |
 | 5 | audit found errors above threshold; note written and flagged |
 | 6 | required artefacts could not be verified on disk |
+| 7 | model-written note is incomplete or degraded; review its warnings |
 | 130 | interrupted by the user; work dir kept |
 
 ## Where the rest is

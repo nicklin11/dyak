@@ -14,6 +14,7 @@ code. See [`artefacts.md`](artefacts.md) for where each record lands.
 | 4 | quality gate failed; note written, report says why |
 | 5 | audit found errors above threshold; note written and flagged |
 | 6 | required artefacts could not be verified on disk |
+| 7 | model-written note is incomplete or degraded; review its warnings |
 | 130 | interrupted; work dir kept |
 
 The source of truth is `exitcodes.DESCRIPTIONS`; [`tests/test_claims.py`](../tests/test_claims.py)

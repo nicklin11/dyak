@@ -380,12 +380,19 @@ def _process(args: argparse.Namespace) -> int:
     if result.note.degraded:
         for warning in result.note.notes:
             print(f"dyak: synthesis: {warning}", file=sys.stderr)
+        if result.note.synthesizer == "template":
+            print(
+                "dyak: the note was produced by the template synthesizer, not by a model. "
+                "Set DYAK_LLM_ENDPOINT and re-run for a synthesised note.",
+                file=sys.stderr,
+            )
+            return ec.USAGE
         print(
-            f"dyak: the note was produced by '{result.note.synthesizer}', not by a "
-            f"model. Set DYAK_LLM_ENDPOINT and re-run for a synthesised note.",
+            f"dyak: the model-written note from '{result.note.synthesizer}' is incomplete; "
+            "review the synthesis warnings above and the note before relying on it.",
             file=sys.stderr,
         )
-        return ec.USAGE
+        return ec.INCOMPLETE_NOTE
     if not result.report.ok:
         for entry in result.report.missing:
             print(

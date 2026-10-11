@@ -32,6 +32,9 @@ AUDIT_FINDINGS = 5
 # 6 — the pipeline ran, but required artefacts could not be verified on disk (ADR-0001 D3).
 ARTEFACT_VERIFICATION_FAILED = 6
 
+# 7 — a model ran, but its note is degraded/incomplete and needs user attention.
+INCOMPLETE_NOTE = 7
+
 # 130 — interrupted (Ctrl-C), the shell convention of 128 + SIGINT(2). Not a
 # pipeline failure: the work dir is retained and its path printed, because an
 # aborted 73-minute transcribe is exactly the run worth inspecting. Declared
@@ -50,5 +53,6 @@ DESCRIPTIONS: dict[int, str] = {
     QUALITY_GATE_FAILED: "quality gate failed; note written, report says why",
     AUDIT_FINDINGS: "audit found errors above threshold; note written and flagged",
     ARTEFACT_VERIFICATION_FAILED: "required artefacts could not be verified",
+    INCOMPLETE_NOTE: "model-written note is incomplete or degraded",
     INTERRUPTED: "interrupted by the user; work dir kept",
 }
