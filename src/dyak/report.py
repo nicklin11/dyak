@@ -70,6 +70,29 @@ OPTIONAL: dict[str, str] = {
 }
 
 
+#: Which registry key holds each artefact this stage verifies is *not* fixed: stage 3 registers
+#: `json` / `txt` / `raw`, stage 4 `manifest`, stage 9 `audit/audit.json`, stage 10
+#: `repair/repair.json`, while this stage verifies by bundle-root name.
+#:
+#: Resolution used to be `artefacts.get(name) or (root / name)`. For every entry whose key
+#: differs, the lookup missed and the check fell through to "a file with this name is sitting
+#: in the bundle root" -- which a *previous* run's file satisfies just as well as this one's.
+#: `audit.json` and `repair.json` did exactly that for eight runs. The fallback was
+#: load-bearing, not defensive: it was the only thing resolving six of the eight (#88).
+#:
+#: So the lookup is over the registry twice -- by key, then by the name the registered path
+#: has in the bundle -- and never over the filesystem. A name that matches nothing a stage
+#: registered is a failure with a reason, which is the whole of the change.
+def registered_by_root_name(artefacts: dict[str, Path]) -> dict[str, Path]:
+    """Registered artefacts keyed by the name they carry in the bundle root.
+
+    `Bundle.publish` names the destination after the source basename, so a registered path's
+    name *is* its bundle-root name. This is what lets `audit/audit.json` answer for
+    `audit.json` without anyone guessing from the directory listing.
+    """
+    return {Path(path).name: Path(path) for path in artefacts.values()}
+
+
 @dataclass
 class Report:
     verified: list[dict] = field(default_factory=list)
@@ -105,6 +128,12 @@ class Report:
     #: (`finish_reason == "length"`). Gated, because the text is real and its ending is not:
     #: a truncated derivation passes lint and audit as finished content (#124, #128).
     sections_truncated: tuple[int, ...] = ()
+    #: Which run this verification belongs to (#88). Carried from `pipeline.run`, so the
+    #: verdict can be attributed to a run rather than to "a bundle": `Bundle.open` merges into
+    #: an existing directory, so two runs of one lecture leave overlapping file sets and,
+    #: before this, nothing said which run wrote which file.
+    run_id: str = ""
+    started_at: str = ""
 
     @property
     def checked(self) -> int:
@@ -151,6 +180,8 @@ class Report:
     def as_dict(self) -> dict:
         return {
             "ok": self.ok,
+            "run_id": self.run_id,
+            "started_at": self.started_at,
             "verified": self.verified,
             "absent": self.absent,
             "missing": self.missing,
@@ -297,20 +328,40 @@ def run(
     synth_note: Path,
     artefacts: dict[str, Path],
     superseded: list[str] | None = None,
+    run_id: str = "",
+    started_at: str = "",
     stream=None,
 ) -> Report:
     out = stream if stream is not None else sys.stdout
     root = Path(bundle_root)
-    report = Report(superseded=list(superseded or []))
+    report = Report(
+        superseded=list(superseded or []),
+        run_id=run_id,
+        started_at=started_at,
+    )
     checked_paths: set[Path] = set()
 
     published, promoted = promote_note(root, final_note, synth_note)
     report.promoted = promoted
     artefacts = dict(artefacts)
     artefacts["note"] = published
+    by_root_name = registered_by_root_name(artefacts)
 
     for name, reason in REQUIRED.items():
-        path = artefacts.get(name) or (root / name)
+        path = artefacts.get(name) or by_root_name.get(name)
+        if path is None:
+            # No stage registered it. Deliberately *not* a fallback to `root / name`: that is
+            # how a previous run's `audit.json` came to satisfy this run's verification, which
+            # is the failure #88 exists to name. A name this stage cannot resolve is a failure
+            # with a reason, not a stat of whatever is lying around.
+            report.missing.append(
+                {
+                    "artefact": name,
+                    "why": reason,
+                    "detail": "no stage registered an artefact with this name",
+                }
+            )
+            continue
         ok, detail = _check(Path(path))
         entry = {"artefact": name, "why": reason, "detail": detail}
         if ok:
@@ -320,8 +371,10 @@ def run(
             report.missing.append(entry)
 
     for name, reason in OPTIONAL.items():
-        path = artefacts.get(name) or (root / name)
-        if not Path(path).is_file():
+        # Absence is the expected outcome here, so an unregistered name is simply absent --
+        # no reason to fail a run over an artefact that is allowed not to exist.
+        path = artefacts.get(name) or by_root_name.get(name)
+        if path is None or not Path(path).is_file():
             report.absent.append({"artefact": name, "why_absent": reason})
 
     report.frames_expected, report.frames_found = count_frames(root)
@@ -404,6 +457,12 @@ def provenance(report: Report) -> str:
             "files_in_bundle_excluding_this_stage": report.bundle_files,
             "superseded_by_this_run": report.superseded,
             "not_checked": report.unchecked,
+            "run_id": report.run_id,
+            "started_at": report.started_at,
+            "run_id_source": (
+                "from pipeline.run (#88). The bundle root is merged into, not replaced, so "
+                "without this two runs of one lecture are indistinguishable in the directory."
+            ),
             "transcript_coverage": (None if report.coverage is None else round(report.coverage, 4)),
             "transcript_coverage_threshold": report.coverage_threshold,
             "transcript_coverage_source": (

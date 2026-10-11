@@ -380,7 +380,7 @@ input is the thing to report first.
 All three are read back from `synth.json` rather than recomputed. Stage 12 measures; a second
 implementation of stage 7's arithmetic here would be a second thing to keep true.
 
-### Amendment 2026-10-11 — the bundle records its own run (#92)
+### Amendment 2026-10-11 — the bundle records its own run, and verifies its own artefacts (#92, #88)
 
 D9 makes the bundle the artefact root, and the exit code is the project's headline promise.
 Both were claims about a run that the run did not record.
@@ -407,9 +407,25 @@ of a stage, and it is written after stage 12 has already verified the artefacts.
 `RUN_ARTEFACTS` so the next run clears it — a stale `completed` beside a fresh bundle is the
 one file a reader would mistake for this run's.
 
-This closes the "nothing says when the run happened" half of #88 as well. The other half —
-that three of the eight `REQUIRED` entries resolve through a filesystem fallback rather than
-the registry — is not addressed here.
+This closes the "nothing says when the run happened" half of #88 as well.
+
+**The other half of #88 is the same defect one level down.** `REQUIRED` names are bundle-root
+names, but the registry keys are not: stage 3 registers `json` / `txt` / `raw`, stage 4
+`manifest`, stage 9 `audit/audit.json`, stage 10 `repair/repair.json`. Resolution was
+`artefacts.get(name) or (root / name)`, so for every entry whose key differs the lookup missed
+and the check fell through to "a file with this name is sitting in the bundle root" — which a
+previous run's file satisfies just as well as this one's. #88 recorded this as three of the
+eight; it is **six**, because the three transcript entries miss the same way. The fallback was
+load-bearing, not defensive: it was the only thing resolving them.
+
+Resolution is now over the registry twice — by key, then by the name the registered path
+carries in the bundle — and never over the filesystem. A name that matches nothing a stage
+registered is a failure with a reason. Two consequences are worth stating. The property no
+longer depends on `clear_root` having run: a stale `audit.json` is not found even when the
+clear is deliberately skipped, which is a stronger claim than #99 could make. And the
+`_stub_stt_write` in `test_stages` was naming its files `t.raw.json` / `t.txt`, so the three
+REQUIRED transcript entries could not resolve in the one test that drives the real
+`pipeline.run` — #88's subject was invisible there precisely because the fake was unfaithful.
 
 ## Amendment 2026-10-02 — stages 0-3 shipped, and two corrections
 

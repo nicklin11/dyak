@@ -2692,7 +2692,12 @@ dyp.stt.transcribe = lambda wav, *, audio_duration: dyst.Transcript(
 # The stub writes the files it returns. It used to name `t.raw.json` and `t.txt` without
 # creating them, and that passed only because `Bundle.publish` returned a dangling path
 # silently; now that it raises (#89) a fake has to produce what it claims to have produced.
-order_transcript = tmp / "order_transcript.json"
+#
+# The names are the real ones (`stt/core.py` writes `transcript.raw.json`, `transcript.json`,
+# `transcript.txt`). While the stub used `t.raw.json` / `t.txt` / `order_transcript.json`, the
+# three REQUIRED transcript entries could not resolve against the registry in this test and
+# nothing said so -- #88's subject was invisible here precisely because the fake was unfaithful.
+order_transcript = tmp / "transcript.json"
 order_transcript.write_text(
     json.dumps(
         {
@@ -2707,12 +2712,12 @@ order_transcript.write_text(
 def _stub_stt_write(tr, dest):  # noqa: ANN001, ANN202, ARG001
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
-    (dest / "t.raw.json").write_text("{}", encoding="utf-8")
-    (dest / "t.txt").write_text("hello", encoding="utf-8")
+    (dest / "transcript.raw.json").write_text("{}", encoding="utf-8")
+    (dest / "transcript.txt").write_text("hello", encoding="utf-8")
     return {
-        "raw": dest / "t.raw.json",
+        "raw": dest / "transcript.raw.json",
         "json": order_transcript,
-        "txt": dest / "t.txt",
+        "txt": dest / "transcript.txt",
     }
 
 
@@ -2748,6 +2753,51 @@ check(
     "the frames still reach the bundle afterwards",
     len(list((tmp / "order_bundle" / "images").glob("*.png"))) == 2,
     str(sorted(q.name for q in (tmp / "order_bundle" / "images").glob("*"))),
+)
+
+
+# --- #88: stage 12 verifies this run's artefacts, not files that happen to be named so -----
+# The registry keys are not the bundle-root names -- stage 3 registers `json`/`txt`/`raw`,
+# stage 4 `manifest`, stage 9 `audit/audit.json`, stage 10 `repair/repair.json` -- and
+# resolution used to be `artefacts.get(name) or (root / name)`. For six of the eight REQUIRED
+# entries the lookup missed and the check stat'd whatever file had that name in the root.
+# Asserted on the real run above, because that is the only place the real keys exist.
+check(
+    "#88: every REQUIRED artefact resolves from the real registry, not from the root listing",
+    {e["artefact"] for e in _r.report.verified} == set(dyro.REQUIRED) if _r is not None else False,
+    f"verified={sorted(e['artefact'] for e in _r.report.verified) if _r else None}; "
+    f"required={sorted(dyro.REQUIRED)}",
+)
+check(
+    "#88: and the six whose registry key differs are among them, not silently absent",
+    _r is not None
+    and all(
+        name in {e["artefact"] for e in _r.report.verified}
+        for name in (
+            "transcript.json",
+            "transcript.txt",
+            "transcript.raw.json",
+            dyau.REPORT_NAME,
+            dyrep.REPORT_NAME,
+            dyfr.MANIFEST,
+        )
+    ),
+    f"verified={sorted(e['artefact'] for e in _r.report.verified) if _r else None}",
+)
+_r88_report_json = json.loads((tmp / "order_bundle" / dyro.REPORT_NAME).read_text(encoding="utf-8"))
+check(
+    "#88: the verification record names the run it belongs to",
+    bool(_r88_report_json.get("run_id"))
+    and _r88_report_json.get("run_id") == (_r.report.run_id if _r else None)
+    and bool(_r88_report_json.get("started_at")),
+    f"report.json run_id={_r88_report_json.get('run_id')!r} "
+    f"started_at={_r88_report_json.get('started_at')!r}",
+)
+check(
+    "#88: and report-provenance.json says where that identity came from",
+    "from pipeline.run"
+    in (tmp / "order_bundle" / dyro.PROVENANCE_NAME).read_text(encoding="utf-8"),
+    "the provenance does not explain the run_id field",
 )
 
 
@@ -6602,8 +6652,8 @@ kept_dir = tmp / "stale-required-kept"
 kept_dir.mkdir(parents=True, exist_ok=True)
 (kept_dir / dyau.REPORT_NAME).write_text('{"stale": true}\n', encoding="utf-8")
 
-# Without the clear, stage 12 finds this file, `_check` accepts it -- it exists and is
-# non-empty -- and records the audit as verified for a run that never ran one. `verified` is
+# Without the clear, stage 12 used to find this file, `_check` accepted it -- it exists and is
+# non-empty -- and recorded the audit as verified for a run that never ran one. `verified` is
 # asserted per name, not as a non-empty list: with a bare `bool(missing)` the check still
 # passes with the stale file present, because seven other REQUIRED entries are absent anyway.
 kept = dyro.run(
@@ -6612,10 +6662,42 @@ kept = dyro.run(
     synth_note=kept_dir / "note.md",
     artefacts={"note": kept_dir / "note.md"},
 )
+# #88 made this property stop depending on the clear. The entry used to resolve as
+# `artefacts.get(name) or (root / name)`, so the fallback found the stale file and only
+# `clear_root` stood between it and `verified`. Resolution is registry-only now, so the stale
+# file is not found even with the clear deliberately skipped -- which is the stronger claim,
+# and the one that holds if a future path ever skips `clear_root` again.
 check(
-    "WITHOUT the clear, an earlier run's audit.json is accepted as this run's",
-    any(e["artefact"] == dyau.REPORT_NAME for e in kept.verified),
-    "the defect #99 describes is not reproducible here, so the fix below proves nothing",
+    "#88: without the clear, an earlier run's audit.json is still not accepted as this run's",
+    not any(e["artefact"] == dyau.REPORT_NAME for e in kept.verified)
+    and any(m["artefact"] == dyau.REPORT_NAME for m in kept.missing),
+    f"verified={[e['artefact'] for e in kept.verified]}, "
+    f"missing={[m['artefact'] for m in kept.missing]}",
+)
+
+# The mechanism itself, stated where it can be seen: a registry key that is not the root name
+# (`audit/audit.json`) whose value is not in the bundle root at all. A root-name fallback
+# cannot find it; the registry can. This is the half of #88 that `clear_root` never covered --
+# a stale file and a registered-but-elsewhere file are the same thing to `root / name`.
+_elsewhere = tmp / "registered-elsewhere"
+_elsewhere.mkdir(parents=True, exist_ok=True)
+(_elsewhere / dyau.REPORT_NAME).write_text('{"real": true}\n', encoding="utf-8")
+_elsewhere_bundle = tmp / "registered-elsewhere-bundle"
+_elsewhere_bundle.mkdir(parents=True, exist_ok=True)
+elsewhere_run = dyro.run(
+    _elsewhere_bundle,
+    final_note=_elsewhere_bundle / "note.linked.md",
+    synth_note=_elsewhere_bundle / "note.md",
+    artefacts={
+        "note": _elsewhere_bundle / "note.md",
+        f"audit/{dyau.REPORT_NAME}": _elsewhere / dyau.REPORT_NAME,
+    },
+)
+check(
+    "#88: an artefact registered under another key, elsewhere on disk, is still verified",
+    any(e["artefact"] == dyau.REPORT_NAME for e in elsewhere_run.verified),
+    f"verified={[e['artefact'] for e in elsewhere_run.verified]}, "
+    f"missing={[m['artefact'] for m in elsewhere_run.missing]}",
 )
 
 # A separate directory, because the run above writes its own report.json and
