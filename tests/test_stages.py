@@ -2284,10 +2284,38 @@ check(
 check("publish removes it from scratch", not src_dir.exists())
 check("publish records it", b_explicit.artefacts.get("transcript") == published)
 
-# A missing artefact must not be reported as published.
+# A missing artefact must not be reported as published. `publish` used to return the dangling
+# source path and record nothing, which is how stage 5's gate became a silent no-op (#82, #89).
 ghost = scratch / "ghost.json"
-check("publish of a missing file is a no-op", b_explicit.publish("ghost", ghost) == ghost)
+try:
+    b_explicit.publish("ghost", ghost)
+    _ghost_raised = None
+except FileNotFoundError as exc:
+    _ghost_raised = exc
+check(
+    "publish of a missing file raises, so a caller cannot receive a dangling path",
+    _ghost_raised is not None and "ghost" in str(_ghost_raised),
+    f"raised={_ghost_raised!r}",
+)
 check("a failed publish is not recorded", "ghost" not in b_explicit.artefacts)
+
+# The optional form says so in the return type: None, not a path that does not exist.
+check(
+    "publish_optional returns None for a missing source",
+    b_explicit.publish_optional("ghost", ghost) is None,
+)
+check(
+    "publish_optional records nothing for a missing source",
+    "ghost" not in b_explicit.artefacts,
+)
+_optional_real = scratch / "optional.json"
+_optional_real.write_bytes(b'{"b":2}')
+check(
+    "publish_optional still publishes a source that exists",
+    b_explicit.publish_optional("optional", _optional_real) == explicit / "optional.json"
+    and b_explicit.artefacts.get("optional") == explicit / "optional.json",
+    str(b_explicit.artefacts.get("optional")),
+)
 
 # overwrite replaces the run's own artefacts; it must not rmtree the directory (#119).
 # A user file in a directory they pointed --output-dir at has to survive --overwrite.
@@ -2592,11 +2620,10 @@ dyp.stt.transcribe = lambda wav, *, audio_duration: dyst.Transcript(
 # Keyed "json", not "transcript.json": `stt.write` returns short keys and stage 6 reads
 # `paths["json"]`. A stub with the wrong keys is how the first end-to-end run of this stage
 # died on a KeyError that no test could see.
-dyp.stt.write = lambda tr, dest: {
-    "raw": Path(dest) / "t.raw.json",
-    "json": Path(dest) / "t.json",
-    "txt": Path(dest) / "t.txt",
-}
+#
+# The stub writes the files it returns. It used to name `t.raw.json` and `t.txt` without
+# creating them, and that passed only because `Bundle.publish` returned a dangling path
+# silently; now that it raises (#89) a fake has to produce what it claims to have produced.
 order_transcript = tmp / "order_transcript.json"
 order_transcript.write_text(
     json.dumps(
@@ -2607,11 +2634,21 @@ order_transcript.write_text(
     ),
     encoding="utf-8",
 )
-dyp.stt.write = lambda tr, dest: {
-    "raw": Path(dest) / "t.raw.json",
-    "json": order_transcript,
-    "txt": Path(dest) / "t.txt",
-}
+
+
+def _stub_stt_write(tr, dest):  # noqa: ANN001, ANN202, ARG001
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "t.raw.json").write_text("{}", encoding="utf-8")
+    (dest / "t.txt").write_text("hello", encoding="utf-8")
+    return {
+        "raw": dest / "t.raw.json",
+        "json": order_transcript,
+        "txt": dest / "t.txt",
+    }
+
+
+dyp.stt.write = _stub_stt_write
 work_probe = tmp / "order_work"
 work_probe.mkdir(parents=True, exist_ok=True)
 _r = None
@@ -5823,9 +5860,17 @@ def _cap_stub_modules():
         extract=lambda src, wav: _Stub(duration=1.0, summary=lambda: "x"),
         check_coverage=lambda i, a: None,
     )
+
+    def _cap_stt_write(t, d):  # noqa: ANN001, ANN202, ARG001
+        # Writes the file it returns: `Bundle.publish` raises on a missing source now (#89),
+        # and a stub that only names a path would fail the run for the wrong reason.
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "transcript.json").write_text("{}", encoding="utf-8")
+        return {"json": d / "transcript.json"}
+
     dyp.stt = _Stub(
         transcribe=lambda wav, audio_duration: _Stub(anomalies=(), summary=lambda: "x"),
-        write=lambda t, d: {"json": d / "transcript.json"},
+        write=_cap_stt_write,
         RATE_RANGE=dysttc.RATE_RANGE,
         WARMUP_SECONDS=dysttc.WARMUP_SECONDS,
     )

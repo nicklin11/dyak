@@ -238,6 +238,14 @@ class Bundle:
     def publish(self, key: str, path: Path, *, name: str | None = None) -> Path:
         """Move a work-dir artefact into the bundle and remember it.
 
+        Raises `FileNotFoundError` when the source is not there. It used to return the
+        dangling source path, record nothing and raise nothing, and that is the mechanism
+        that shipped #82: stage 5 published `quality.json`, stage 6 read the work-dir path,
+        `align` read the missing file as "no gate information", so stage 5's gate was a
+        no-op for eight runs and no run reported it (#89).
+
+        A caller whose artefact may legitimately be absent calls `publish_optional` instead.
+
         `shutil.move` across filesystems is a copy plus an unlink; if the source is on
         another mount the copy can fail halfway, which is why the destination is verified
         afterwards rather than assumed. A 3.7 MB transcript is cheap to re-run; a
@@ -245,7 +253,10 @@ class Bundle:
         """
         source_path = Path(path)
         if not source_path.exists():
-            return source_path
+            raise FileNotFoundError(
+                f"cannot publish '{key}': {source_path} does not exist. If the artefact is "
+                "legitimately optional, publish it with `publish_optional`."
+            )
         destination = self.root / (name or source_path.name)
         try:
             shutil.move(str(source_path), str(destination))
@@ -254,6 +265,18 @@ class Bundle:
             shutil.copy2(str(source_path), str(destination))
         self.record(key, destination)
         return destination
+
+    def publish_optional(self, key: str, path: Path, *, name: str | None = None) -> Path | None:
+        """`publish` for an artefact a run may legitimately not have written.
+
+        Returns None and records nothing when the source is absent, so a caller can tell the
+        two outcomes apart without stat-ing a path that may be dangling (#89).
+        `synth-llm-transcript.json` is the standing example: the template synthesizer makes
+        no calls, so there is no transcript to record.
+        """
+        if not Path(path).exists():
+            return None
+        return self.publish(key, path, name=name)
 
     def summary(self) -> str:
         """Size of what is registered, which is not the same as what is on disk.
