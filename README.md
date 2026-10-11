@@ -65,6 +65,7 @@ bundle contains and who wrote each file: [`docs/artefacts.md`](docs/artefacts.md
 | 6 | required artefacts could not be verified on disk |
 | 7 | model-written note is incomplete or degraded; review its warnings |
 | 8 | less of the lecture reached the model than the coverage threshold allows; the note is missing part of it |
+| 9 | a section the model wrote was cut off at the output limit; its ending is missing |
 | 130 | interrupted by the user; work dir kept |
 
 ## Where the rest is

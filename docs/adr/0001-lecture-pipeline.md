@@ -323,6 +323,7 @@ one that is loud:
 | 6 | required artefacts could not be verified on disk (ADR-0001 D3) |
 | 7 | model-written note is incomplete or degraded; review its warnings |
 | 8 | less of the lecture reached the model than the coverage threshold allows; the note is missing part of it |
+| 9 | a section the model wrote was cut off at the output limit; its ending is missing |
 | 130 | interrupted (128 + SIGINT); work dir kept |
 
 An uncaught internal error — a bug in dyak — has no row on purpose: it
@@ -350,6 +351,34 @@ make `report.json`'s `ok` mean two different things, which is the confusion that
 this run exit 0 in the first place. Code 8 is checked before code 7 for the same reason:
 a shortened transcript also makes the note degraded, and returning 7 would report the
 symptom instead of the cause.
+
+### Amendment 2026-10-11 — code 9, and the two gates stage 12 was missing
+
+Stage 12's contract was presence-only: `_check` tested that a required file existed and was
+non-empty, and `ok` compared the frame count against the manifest. Nothing read the *content*
+of what stage 7 wrote, so the two failure classes this pipeline exists to catch both passed
+through it clean (#128).
+
+Three gates now, and they are deliberately not the same kind of gate:
+
+1. **Transcript coverage** — read back from `synth.json` and gated (code **8**, above).
+2. **Share of sections left as `в лекции не затрагивается`** — reported, never gated. The
+   skill's eight sections are an assumption about the lecture's shape. A humanities lecture
+   legitimately leaves 4-7 empty, and any threshold here would fail a correct note. The raw
+   numbers (`sections_total`, `sections_not_covered`, `sections_not_covered_share`) are in
+   `report.json` so a reader can judge them; the run does not.
+3. **Sections cut off at the model's output limit** (`finish_reason == "length"`) — gated,
+   with its own code, **9**. The text is there, it is real, and its ending is missing, which
+   is precisely the shape that passes lint and audit as finished content (#124).
+
+Code 9 is separate from 8 because they are opposite failures: 8 is about what reached the
+model, 9 is about what came back. It is separate from 7 for the reason 8 is — a truncated
+section also makes the note degraded, and 7 would name the symptom rather than the cause. It
+is checked *after* 8, because a shortened transcript can shorten the sections too, and the
+input is the thing to report first.
+
+All three are read back from `synth.json` rather than recomputed. Stage 12 measures; a second
+implementation of stage 7's arithmetic here would be a second thing to keep true.
 
 ## Amendment 2026-10-02 — stages 0-3 shipped, and two corrections
 

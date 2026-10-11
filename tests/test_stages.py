@@ -1266,6 +1266,42 @@ check(
 )
 
 
+# A section the endpoint cut off is the other half of #128, and the exit path has to be its
+# own: the truncated note is degraded too, so without a check ahead of the degraded branch
+# this would return 7 and name the symptom instead of the cause.
+def truncated_pipeline(source, work, **kw):
+    result = fake_pipeline(source, work, **kw)
+    result.report.sections_total = 8
+    result.report.sections_truncated = (3,)
+    # `synth.synthesise` appends a warning for a truncated section, so the note is degraded as
+    # well. Both flags together is the state a real run is in, and it is why the truncation
+    # check has to come *before* the degraded branch: 7 would name the symptom, not the cause.
+    result.note.degraded = True
+    return result
+
+
+dyp.run = truncated_pipeline
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    rc_trunc = dyc.main(["process", str(src)])
+dyp.run = fake_pipeline
+check(
+    "a note with a section cut off at the output limit does not exit 0 (#128)",
+    rc_trunc == ec.TRUNCATED_SECTIONS,
+    f"rc={rc_trunc} want={ec.TRUNCATED_SECTIONS}",
+)
+check(
+    "and the refusal names the sections and the limit, not the degraded path (#128)",
+    "output limit" in err.getvalue() and "sections 3" in err.getvalue(),
+    err.getvalue()[-300:],
+)
+check(
+    "truncation is not coverage, not the missing-artefact code and not the degraded note (#128)",
+    len({rc_trunc, rc_low, ec.ARTEFACT_VERIFICATION_FAILED, ec.INCOMPLETE_NOTE}) == 4,
+    f"trunc={rc_trunc} low={rc_low}",
+)
+
+
 # --- 7z. stage 7's LLM transcript reaches the bundle -----------------------
 # The note is written by 8 model calls. `synth.py` has recorded all 8 since #38, and
 # `pipeline.py` promoted 3 files from that directory without naming the transcript, so it
@@ -6692,6 +6728,81 @@ check(
     "a bundle with no synth.json leaves coverage unknown, not zero (#117)",
     dysy.coverage_of(_covdir / "definitely-absent.json") is None,
     str(dysy.coverage_of(_covdir / "definitely-absent.json")),
+)
+
+# --- #128: stage 12's other two semantic gates ------------------------------------------
+# Coverage was the first (#117). These are the remaining two, and they are deliberately not
+# the same kind of gate. A section left as `в лекции не затрагивается` is *reported*: the
+# skill's eight sections are an assumption about the lecture's shape, and a humanities lecture
+# legitimately leaves 4-7 empty, so a threshold there would fail a correct note. A section the
+# endpoint cut off is *gated*: its text reads as finished and its ending is not there, which is
+# the shape that passes lint and audit (#124).
+_tdir = tmp / "truncated-bundle"
+_tdir.mkdir(parents=True, exist_ok=True)
+for _name in dyro.REQUIRED:
+    (_tdir / ("note.md" if _name == "note" else _name)).write_text("x", encoding="utf-8")
+dysy.write(
+    dysy.Note(
+        markdown="# n",
+        coverage=1.0,
+        sections=[
+            {"number": 1, "title": "Паспорт лекции", "present": True, "finish_reason": "stop"},
+            {"number": 2, "title": "Организационный блок", "present": False},
+            {"number": 3, "title": "Термины", "present": True, "finish_reason": "length"},
+        ],
+    ),
+    _tdir / dysy.REPORT_NAME,
+)
+_t_report = dyro.run(
+    _tdir,
+    final_note=_tdir / "note.md",
+    synth_note=_tdir / "note.synth.md",
+    artefacts={n: _tdir / n for n in dyro.REQUIRED},
+    stream=io.StringIO(),
+)
+check(
+    "stage 12 reads the per-section record back out of synth.json (#128)",
+    _t_report.sections_total == 3 and _t_report.sections_not_covered == 1,
+    f"total={_t_report.sections_total} not_covered={_t_report.sections_not_covered}",
+)
+check(
+    "a section the model wrote and the endpoint cut off is named by number (#128)",
+    _t_report.sections_truncated == (3,),
+    str(_t_report.sections_truncated),
+)
+check(
+    "truncation is a gate with its own code, not coverage's and not the degraded path (#128)",
+    _t_report.truncated
+    and ec.TRUNCATED_SECTIONS
+    not in (ec.LOW_COVERAGE, ec.ARTEFACT_VERIFICATION_FAILED, ec.INCOMPLETE_NOTE)
+    and bool(ec.DESCRIPTIONS.get(ec.TRUNCATED_SECTIONS)),
+    f"truncated={_t_report.truncated} code={ec.TRUNCATED_SECTIONS}",
+)
+check(
+    "a note with no truncated section is not gated, and the empty-section share is not (#128)",
+    dyro.Report(coverage=1.0).truncated is False
+    and dyro.Report(sections_total=8, sections_not_covered=2).not_covered_share == 0.25
+    and dyro.Report(sections_total=8, sections_not_covered=2).truncated is False,
+    "the not-covered share is gated, or the truncation gate fires on an empty section",
+)
+check(
+    "report.json carries all three gates' raw numbers, so a reader can audit them (#128)",
+    {
+        "transcript_coverage",
+        "transcript_coverage_threshold",
+        "sections_total",
+        "sections_not_covered",
+        "sections_not_covered_share",
+        "sections_truncated",
+        "sections_truncated_numbers",
+    }
+    <= set(json.loads((_tdir / dyro.REPORT_NAME).read_text(encoding="utf-8"))),
+    "a gate's number is missing from report.json",
+)
+check(
+    "a bundle with no synth.json leaves the section gates unknown, not truncated (#128)",
+    dysy.gates_of(_tdir / "definitely-absent.json") is None,
+    str(dysy.gates_of(_tdir / "definitely-absent.json")),
 )
 
 _env.restore(SAVED_ENV)

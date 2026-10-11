@@ -847,6 +847,60 @@ def coverage_of(report_path: Path) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
+@dataclass(frozen=True)
+class SectionGates:
+    """What stage 7's own record says about the eight sections, read back by stage 12 (#128).
+
+    Two different failures, and they are not the same failure. `not_covered` is a section the
+    model left as `NOT_COVERED`; `truncated` is a section it wrote and then had cut off at the
+    endpoint's output cap. The first is reported and not gated -- on a lecture whose material
+    does not have the eight-section shape the skill assumes, sections 4-7 can be legitimately
+    empty, and any threshold there would fail a correct note. The second is gated: the text is
+    there, it is real, and its ending is missing, which is exactly the shape that passes lint
+    and audit as finished content (#124).
+    """
+
+    total: int = 0
+    not_covered: int = 0
+    truncated: tuple[int, ...] = ()
+
+    @property
+    def not_covered_share(self) -> float:
+        return self.not_covered / self.total if self.total else 0.0
+
+
+def gates_of(report_path: Path) -> SectionGates | None:
+    """The per-section numbers stage 7 recorded in `synth.json`, or None when unreadable.
+
+    Read back rather than recomputed, for the same reason `coverage_of` is: the note is stage
+    7's product, and a second implementation here would be a second thing to keep true. None
+    means the record is not there to read, not that every section is fine -- the
+    missing-artefact check is the place for files that are not there.
+    """
+    if not report_path.is_file():
+        return None
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    sections = payload.get("sections")
+    if not isinstance(sections, list):
+        return None
+    records = [s for s in sections if isinstance(s, dict)]
+    truncated = tuple(
+        sorted(
+            s["number"]
+            for s in records
+            if s.get("finish_reason") == "length" and isinstance(s.get("number"), int)
+        )
+    )
+    return SectionGates(
+        total=len(records),
+        not_covered=sum(1 for s in records if not s.get("present")),
+        truncated=truncated,
+    )
+
+
 def provenance(note: Note, config: llm.Config | None) -> str:
     return json.dumps(
         {
