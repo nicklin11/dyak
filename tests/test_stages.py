@@ -3978,6 +3978,83 @@ check(
 check("no alignments is no sections", dysy.build_sections([]) == [], "produced sections")
 
 
+# --- #110: empty HTTP 200 remains diagnosable and policy is recorded -------------
+_empty_test_env = {k: os.environ.get(k) for k in ("DYAK_VLM_ENDPOINT", "DYAK_VLM_MODEL")}
+os.environ["DYAK_VLM_ENDPOINT"] = "http://vision.invalid/v1"
+os.environ["DYAK_VLM_MODEL"] = "fake-vision"
+empty_calls: list[int] = []
+
+
+def _empty_reply(messages, config, **kwargs):
+    empty_calls.append(1)
+    return _caption_reply(text="")
+
+
+dyle.chat = _empty_reply
+try:
+    empty_dest = ctmp / "empty_out"
+    empty_report, empty_outcome = dycap.run(
+        cmanifest, ctrans, cquality, cimg, empty_dest, stream=io.StringIO()
+    )
+finally:
+    dyle.chat = _fake_vision_chat
+check(
+    "an empty 200 is recorded without a retry (#110)",
+    len(empty_calls) == len(empty_report.considered)
+    and all(a.caption_status == "EMPTY" and a.caption is None for a in empty_report.considered)
+    and empty_outcome.failed == len(empty_report.considered),
+    f"calls={len(empty_calls)} failed={empty_outcome.failed}",
+)
+empty_payload = json.loads((empty_dest / dycap.REPORT_NAME).read_text())
+check(
+    "empty caption trace records the one returned attempt (#110)",
+    all(
+        a["caption_trace"].get("attempts") == 1
+        for a in empty_payload["alignments"]
+        if a["caption_status"] != "GATED_OUT"
+    ),
+)
+
+persistent_empty_calls: list[int] = []
+
+
+def _always_empty(messages, config, **kwargs):
+    persistent_empty_calls.append(1)
+    return _caption_reply(text="")
+
+
+dyle.chat = _always_empty
+try:
+    persistent_dest = ctmp / "persistent_empty_out"
+    persistent_report, persistent_outcome = dycap.run(
+        cmanifest, ctrans, cquality, cimg, persistent_dest, stream=io.StringIO()
+    )
+finally:
+    dyle.chat = _fake_vision_chat
+check(
+    "persistent empty replies are one request per frame and remain EMPTY (#110)",
+    len(persistent_empty_calls) == len(persistent_report.considered)
+    and all(a.caption_status == "EMPTY" and a.caption is None for a in persistent_report.considered)
+    and persistent_outcome.failed == len(persistent_report.considered)
+    and all(a.caption_trace.get("attempts") == 1 for a in persistent_report.considered),
+    f"calls={len(persistent_empty_calls)} failed={persistent_outcome.failed}",
+)
+persistent_provenance = json.loads((persistent_dest / dycap.PROVENANCE_NAME).read_text())
+check(
+    "caption provenance records the measured no-retry policy (#110)",
+    persistent_provenance["empty_response_policy"]["retry_limit"] == 0
+    and "42 fresh captions" in persistent_provenance["empty_response_policy"]["measurement"]
+    and "3 frames previously reported EMPTY"
+    in persistent_provenance["empty_response_policy"]["measurement"]
+    and "do not retry" in persistent_provenance["empty_response_policy"]["description"],
+)
+for _key, _value in _empty_test_env.items():
+    if _value is None:
+        os.environ.pop(_key, None)
+    else:
+        os.environ[_key] = _value
+
+
 # --- 14. a refusal is a status, not a caption ---------------------------------------
 # #83. `NO NEW INFORMATION.` was `caption_status: OK` with a non-empty string, so a frame the
 # model declined to describe was indistinguishable from one it described. Three properties
