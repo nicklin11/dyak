@@ -34,3 +34,7 @@ images/
 
 # the zipapp the README's single-file build writes with `-o dyak`
 /dyak
+
+# graphify: the knowledge map is committed (STATUS.md points to it); the
+# AST/semantic cache inside it is regenerable and stays out
+graphify-out/cache/
