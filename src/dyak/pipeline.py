@@ -251,6 +251,11 @@ def run(
     # them on the `REQUIRED` set. Stage 12 would then verify the earlier run's `audit.json`
     # and exit 0. This is the root-level half of the rule `Bundle.clear_images` applies to
     # `images/`; see `Bundle.clear_root`.
+    # Stage 6 reuses the previous run's captions, and `clear_root` removes `captions.json`,
+    # so take a copy first. A missing cache is fine: stage 6 captions every frame then.
+    previous_captions = work.sub("previous-captions.json")
+    if (bundle.root / caption.REPORT_NAME).is_file():
+        shutil.copyfile(bundle.root / caption.REPORT_NAME, previous_captions)
     superseded = bundle.clear_root()
     if superseded:
         shown = ", ".join(superseded[:4])
@@ -411,7 +416,7 @@ def run(
         capdir,
         # The bundle's copy from the previous run, not `capdir`: `capdir` is scratch and
         # empty on every run, so caching from it re-called all 58 frames on run 10 (#83).
-        cache_source=bundle.root / caption.REPORT_NAME,
+        cache_source=previous_captions if previous_captions.is_file() else None,
         stream=out,
     )
     for extra in (caption.REPORT_NAME, caption.PROVENANCE_NAME):

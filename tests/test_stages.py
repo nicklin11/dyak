@@ -50,6 +50,7 @@ from dyak import quality as dyq  # noqa: E402
 from dyak import caption as dycap  # noqa: E402
 from dyak import llm as dyle  # noqa: E402
 from dyak import synth as dysy  # noqa: E402
+from dyak.stt import core as dysttc  # noqa: E402
 from dyak import lint as dyln  # noqa: E402
 from dyak import audit as dyau  # noqa: E402
 from dyak import link as dylk  # noqa: E402
@@ -5481,6 +5482,118 @@ with tempfile.TemporaryDirectory() as _td:
         "#120: no temp file is left behind",
         sorted(p.name for p in Path(_td).iterdir()) == ["Лекция 1.md"],
         str(sorted(p.name for p in Path(_td).iterdir())),
+    )
+
+
+# --- #121: stage 6 must read the previous run's caption cache -----------------------
+# `pipeline.run` calls `bundle.clear_root()` before stage 1. The cache lives in the root, so
+# stage 6 used to read a file that had just been deleted and re-captioned every frame. This
+# drives the real `pipeline.run` with stages 1-5 stubbed and records what stage 6 sees.
+class _StopAtCaption(Exception):
+    pass
+
+
+_cap_seen: dict = {}
+_cap_real = (dyp.probe, dyp.audio, dyp.stt, dyp.frames, dyp.quality, dyp.caption)
+
+
+def _cap_run_probe(*a, **kw):
+    # Stage 6 is the first thing that reads the cache, so record the file as it is there.
+    seen = kw.get("cache_source")
+    _cap_seen["cache_source"] = seen
+    _cap_seen["existed"] = bool(seen) and Path(seen).is_file()
+    _cap_seen["entries"] = (
+        len(json.loads(Path(seen).read_text(encoding="utf-8")).get("captions", {}))
+        if _cap_seen["existed"]
+        else 0
+    )
+    raise _StopAtCaption()
+
+
+class _Stub:
+    def __init__(self, **attrs):
+        self.__dict__.update(attrs)
+
+
+def _cap_stub_modules():
+    _info = _Stub(summary=lambda: "x")
+    dyp.probe = _Stub(
+        probe=lambda p: _info,
+        require_supported=lambda i: None,
+        provenance=lambda *a, **k: "{}",
+        PROVENANCE_NAME="source-provenance.json",
+    )
+    dyp.audio = _Stub(
+        extract=lambda src, wav: _Stub(duration=1.0, summary=lambda: "x"),
+        check_coverage=lambda i, a: None,
+    )
+    dyp.stt = _Stub(
+        transcribe=lambda wav, audio_duration: _Stub(anomalies=(), summary=lambda: "x"),
+        write=lambda t, d: {"json": d / "transcript.json"},
+        RATE_RANGE=dysttc.RATE_RANGE,
+        WARMUP_SECONDS=dysttc.WARMUP_SECONDS,
+    )
+
+    def _cap_frames_run(src, fd):
+        fd.mkdir(parents=True, exist_ok=True)
+        manifest = fd / "manifest.json"
+        manifest.write_text("{}", encoding="utf-8")
+        return manifest, []
+
+    dyp.frames = _Stub(
+        run=_cap_frames_run,
+        summary=lambda m, p: "0 frames",
+        ffmpeg_version=lambda: "stub",
+    )
+    dyp.quality = _Stub(
+        Settings=lambda: _Stub(),
+        resolve_estimator=lambda name: None,
+        run=lambda *a, **k: _Stub(passed=[], summary=lambda: "0/0", ok=True),
+        write=lambda report, target, settings: target.write_text("{}", encoding="utf-8"),
+        provenance=lambda qs, bbox_source: "{}",
+        REPORT_NAME=dyq.REPORT_NAME,
+        PROVENANCE_NAME=dyq.PROVENANCE_NAME,
+    )
+    dyp.caption = _Stub(
+        run=_cap_run_probe,
+        REPORT_NAME=dycap.REPORT_NAME,
+        PROVENANCE_NAME="caption-provenance.json",
+    )
+
+
+with tempfile.TemporaryDirectory() as _cap_td:
+    _cap_root = Path(_cap_td)
+    _cap_src = _cap_root / "lecture.mp4"
+    _cap_src.write_bytes(b"x")
+    _cap_out = _cap_root / "bundle"
+    _cap_out.mkdir()
+    (_cap_out / dycap.REPORT_NAME).write_text(
+        json.dumps({"captions": {"f_1.png": {"model": "vision-x", "caption": "cached"}}}),
+        encoding="utf-8",
+    )
+    _cap_bundle = dyb.Bundle.open(_cap_src, output_dir=str(_cap_out), overwrite=False)
+    _cap_work = dyw.WorkDir(keep=False, parent=_cap_root)
+    _cap_stub_modules()
+    try:
+        REAL_PIPELINE_RUN(_cap_src, _cap_work, bundle=_cap_bundle, stream=io.StringIO())
+    except _StopAtCaption:
+        pass
+    finally:
+        dyp.probe, dyp.audio, dyp.stt, dyp.frames, dyp.quality, dyp.caption = _cap_real
+    check(
+        "#121: stage 6 is reached through pipeline.run",
+        "cache_source" in _cap_seen,
+        str(_cap_seen),
+    )
+    check(
+        "#121: the previous captions.json still exists when stage 6 reads it",
+        _cap_seen.get("existed") is True,
+        str(_cap_seen),
+    )
+    check(
+        "#121: stage 6 sees the previous run's cached entries",
+        _cap_seen.get("entries") == 1,
+        str(_cap_seen),
     )
 
 # --- the CLI keeps dry-run as the default -------------------------------------------
