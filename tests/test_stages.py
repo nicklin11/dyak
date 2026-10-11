@@ -5484,6 +5484,7 @@ with tempfile.TemporaryDirectory() as _td:
         str(sorted(p.name for p in Path(_td).iterdir())),
     )
 
+
 # --- #121: stage 6 must read the previous run's caption cache -----------------------
 # `pipeline.run` calls `bundle.clear_root()` before stage 1. The cache lives in the root, so
 # stage 6 used to read a file that had just been deleted and re-captioned every frame. This
@@ -5532,6 +5533,7 @@ def _cap_stub_modules():
         RATE_RANGE=dysttc.RATE_RANGE,
         WARMUP_SECONDS=dysttc.WARMUP_SECONDS,
     )
+
     def _cap_frames_run(src, fd):
         fd.mkdir(parents=True, exist_ok=True)
         manifest = fd / "manifest.json"
