@@ -173,6 +173,8 @@ renders in full. #49 is the underlying measurement.
 | `unchecked` | the absolute list of files it did not check |
 | `frames_expected` / `frames_found` | frames against `manifest.tsv` |
 | `transcript_coverage` / `transcript_coverage_threshold` | how much of the transcript reached the model in stage 7, read back from `synth.json` rather than recomputed. Below the threshold the run does not exit 0 (#117) |
+| `sections_total` / `sections_not_covered` / `sections_not_covered_share` | how many of the eight sections stage 7 left as `в лекции не затрагивается`. Reported, never gated: a lecture without the skill's eight-section shape leaves some legitimately empty (#128) |
+| `sections_truncated` / `sections_truncated_numbers` | sections the model wrote that the endpoint then cut off at its output cap (`finish_reason == "length"`). Gated: a run with one does not exit 0 (#124, #128) |
 | `note_promoted` | whether the vault copy happened |
 
 Since `5c66731`, `verified ∪ unchecked = files_in_bundle_excluding_this_stage` holds on the

@@ -389,6 +389,20 @@ def _process(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return ec.LOW_COVERAGE
+    if result.report.truncated:
+        # Also before the degraded check, and for the same reason: a section cut off at the
+        # output limit makes the note degraded too, and the degraded branch would return 7 and
+        # hide the cause (#128). After the coverage check because a shortened transcript can
+        # shorten the sections too, and the input is the thing to report first.
+        numbers = ", ".join(str(n) for n in result.report.sections_truncated)
+        print(
+            f"dyak: {len(result.report.sections_truncated)} of "
+            f"{result.report.sections_total} sections hit the model's output limit and end "
+            f"mid-sentence (sections {numbers}); the note is missing the end of them. See "
+            f"{dysy.REPORT_NAME} in the bundle.",
+            file=sys.stderr,
+        )
+        return ec.TRUNCATED_SECTIONS
     if result.note.degraded:
         for warning in result.note.notes:
             print(f"dyak: synthesis: {warning}", file=sys.stderr)

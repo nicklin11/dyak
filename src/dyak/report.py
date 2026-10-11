@@ -95,11 +95,35 @@ class Report:
     #: (a bundle from before the metric existed): unknown is not the same as low.
     coverage: float | None = None
     coverage_threshold: float = synth.COVERAGE_THRESHOLD
+    #: How many of the eight sections stage 7 recorded, and how many it left as
+    #: `в лекции не затрагивается`. Reported, never gated: a lecture that does not have the
+    #: skill's eight-section shape legitimately leaves some empty, and a threshold here would
+    #: fail a correct note. The share is in `report.json` so a reader can judge it (#128).
+    sections_total: int = 0
+    sections_not_covered: int = 0
+    #: Section numbers the model wrote and the endpoint then cut off at its output cap
+    #: (`finish_reason == "length"`). Gated, because the text is real and its ending is not:
+    #: a truncated derivation passes lint and audit as finished content (#124, #128).
+    sections_truncated: tuple[int, ...] = ()
 
     @property
     def checked(self) -> int:
         """Files a check actually looked at. REQUIRED entries plus the counted frames."""
         return len(self.verified) + self.frames_found
+
+    @property
+    def not_covered_share(self) -> float:
+        return self.sections_not_covered / self.sections_total if self.sections_total else 0.0
+
+    @property
+    def truncated(self) -> bool:
+        """A section was cut off at the model's output limit (#128).
+
+        Separate from `low_coverage`: that one is about what reached the model, this one is
+        about what came back. Separate from `ok` for the same reason -- `ok` is a statement
+        about files on disk, and both of these are statements about what went into them.
+        """
+        return bool(self.sections_truncated)
 
     @property
     def ok(self) -> bool:
@@ -139,6 +163,11 @@ class Report:
             "superseded_by_this_run": self.superseded,
             "transcript_coverage": None if self.coverage is None else round(self.coverage, 4),
             "transcript_coverage_threshold": self.coverage_threshold,
+            "sections_total": self.sections_total,
+            "sections_not_covered": self.sections_not_covered,
+            "sections_not_covered_share": round(self.not_covered_share, 4),
+            "sections_truncated": len(self.sections_truncated),
+            "sections_truncated_numbers": list(self.sections_truncated),
         }
 
 
@@ -299,6 +328,13 @@ def run(
     # Read back, never recomputed: the coverage figure is stage 7's measurement of what it
     # actually sent, and a second implementation here would be a second thing to keep true.
     report.coverage = synth.coverage_of(root / synth.REPORT_NAME)
+    # The per-section half of the same read-back (#128). `None` when stage 7's record is not
+    # there to read: unknown is not the same as truncated.
+    gates = synth.gates_of(root / synth.REPORT_NAME)
+    if gates is not None:
+        report.sections_total = gates.total
+        report.sections_not_covered = gates.not_covered
+        report.sections_truncated = gates.truncated
     expected, _ = expected_frames(root)
     # Measured before this stage writes its own two files, so `bundle_files` is everything
     # under the root *except* `report.json` and `report-provenance.json`. Stated that way
@@ -337,6 +373,13 @@ def run(
             f"below the {report.coverage_threshold:.0%} threshold: the note is missing part of "
             f"the lecture\n"
         )
+    if report.truncated:
+        # Also not a `MISSING` line: every file is there and one section ends mid-sentence.
+        out.write(
+            f"           {len(report.sections_truncated)} of {report.sections_total} sections "
+            f"hit the model's output limit and are incomplete: "
+            f"{', '.join(str(n) for n in report.sections_truncated)}\n"
+        )
     return report
 
 
@@ -368,6 +411,18 @@ def provenance(report: Report) -> str:
                 "transcript that reached the model. Below the threshold the run does not exit "
                 "0 (#117), because every file can be present while the note is missing part "
                 "of the lecture."
+            ),
+            "sections_total": report.sections_total,
+            "sections_not_covered": report.sections_not_covered,
+            "sections_not_covered_share": round(report.not_covered_share, 4),
+            "sections_truncated": list(report.sections_truncated),
+            "sections_source": (
+                f"read from {synth.REPORT_NAME} too: per-section `present` and `finish_reason`. "
+                "A section the model left as 'в лекции не затрагивается' is reported and not "
+                "gated, because a lecture without the skill's eight-section shape leaves some "
+                "legitimately empty. A section with `finish_reason == 'length'` is gated: the "
+                "text is real and its ending is missing, and a run with one does not exit 0 "
+                "(#124, #128)."
             ),
             "coverage": (
                 f"{report.checked} of {report.bundle_files + 2} files were examined; the "

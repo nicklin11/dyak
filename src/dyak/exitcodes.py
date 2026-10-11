@@ -41,6 +41,13 @@ INCOMPLETE_NOTE = 7
 # present and verified, and the deliverable is still missing a third of the course.
 LOW_COVERAGE = 8
 
+# 9 — a section the model wrote was cut off at the endpoint's output limit (`finish_reason ==
+# "length"`), so its ending is missing while its text reads as finished (#124, #128). Separate
+# from 8, which is about what reached the model: here the whole transcript got there and the
+# answer came back short. Separate from 7, which is the general degraded path and would report
+# the symptom rather than the cause.
+TRUNCATED_SECTIONS = 9
+
 # 130 — interrupted (Ctrl-C), the shell convention of 128 + SIGINT(2). Not a
 # pipeline failure: the work dir is retained and its path printed, because an
 # aborted 73-minute transcribe is exactly the run worth inspecting. Declared
@@ -61,5 +68,6 @@ DESCRIPTIONS: dict[int, str] = {
     ARTEFACT_VERIFICATION_FAILED: "required artefacts could not be verified",
     INCOMPLETE_NOTE: "model-written note is incomplete or degraded",
     LOW_COVERAGE: "less of the lecture reached the model than the coverage threshold allows",
+    TRUNCATED_SECTIONS: "a section was cut off at the model's output limit; its ending is missing",
     INTERRUPTED: "interrupted by the user; work dir kept",
 }
