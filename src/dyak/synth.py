@@ -20,11 +20,23 @@ than a blank skeleton, the model is not earning its place in the pipeline.
 
 ## Why per-section, not one request
 
-A 4 500-second lecture is 152 000 characters of ASR. That does not fit a context window with
-room for instructions, and truncation from the wrong end loses the end of the lecture -- the
-part a student reads the night before the exam. Sections are cut on frame boundaries, so
-each request is bounded by something that means something visually rather than by a
-character count that means nothing.
+The eight sections are different *jobs*, not different stretches of the lecture. A passport, an
+exam-question set and a mathematics primer cannot be written by one prompt without one of them
+dominating the answer. So each request carries the section's own brief -- and **the whole
+lecture**, because the material for `Математический ликбез` is wherever the mathematics was
+spoken, not wherever a frame boundary happened to fall.
+
+This was not always so. Until #117 each request received one time slice, so `Вопросы для
+самопроверки` was written from whatever was said between 2695 and 3079 seconds, and on a
+58-frame lecture the last four slices reached no request at all: about 31% of the lecture was
+absent from a note stage 12 verified as complete. The prompt also named the section
+"Фрагмент 7" rather than its skill title, so the writer was never told what it was writing. A
+time window is not a topic, and a slice label is not a brief.
+
+`SECTION_BUDGET` bounds one request against a runaway, and it is not a cost control: stage 9
+already sends the whole transcript in every request. What the budget keeps out is recorded as
+reduced coverage (`Note.coverage`) and named in the run's warnings, so a shortened note is a
+reported fact rather than a smaller note.
 
 ## The eight sections are not negotiable
 
@@ -137,6 +149,21 @@ SECTIONS: tuple[tuple[int, str, str], ...] = (
 
 NOT_COVERED = "в лекции не затрагивается"
 
+#: How much lecture text one section request may carry, in characters.
+#:
+#: A guard against one unbounded request, not a token budget: stage 9 sends the whole
+#: transcript in every request already, so the 12 000 this replaces (#117) bought nothing and
+#: cost the note the tail of every slice. A 4 500-second lecture is about 152 000 characters of
+#: ASR and fits; a lecture that does not fit is reported as reduced coverage rather than
+#: silently shortened.
+SECTION_BUDGET = 200_000
+
+#: Fraction of the transcript that must reach the model for the note to count as complete.
+#: Below it stage 12 refuses exit 0 with its own code, separate from the missing-artefact code
+#: (#117). 0.95 rather than 1.0: a marker or a rounding boundary must not fail a run that sent
+#: essentially the whole lecture.
+COVERAGE_THRESHOLD = 0.95
+
 #: The skill's binding rules, condensed to what a per-section writer can act on. Every rule
 #: here names its skill counterpart: the boundary of trust (§ "Проход 1", "Граница доверия"),
 #: the math rules (§ "Проход 2. Правила математики"), the content rules (§ "Проход 2. Правила
@@ -175,7 +202,14 @@ SYSTEM = """\
 
 @dataclass(frozen=True)
 class Section:
-    """One slice of the lecture: the frames on screen while it was spoken."""
+    """One unit of writing work: what a single section request is given.
+
+    Two producers. `build_sections` cuts the lecture into time slices, on frame boundaries --
+    a frame boundary is where one thing stopped being on screen. `synthesise` then hands every
+    request the *whole* lecture, assembled by `gather` (#117). Only the second reaches a model
+    today; the slice survives because a frame boundary is worth keeping visible inside the
+    payload, and because it is what names a truncation.
+    """
 
     number: int
     title: str
@@ -218,6 +252,10 @@ class Note:
     model: str | None = None
     degraded: bool = False
     notes: list[str] = field(default_factory=list)
+    #: Words of the transcript that reached a request / words in the transcript. 1.0 when the
+    #: whole lecture fits `SECTION_BUDGET`, which is the normal case. Recorded because the note
+    #: can otherwise omit a third of the course while every stage reports success (#117).
+    coverage: float = 1.0
 
     @property
     def filled(self) -> int:
@@ -230,6 +268,8 @@ class Note:
             "degraded": self.degraded,
             "sections": self.sections,
             "notes": self.notes,
+            "coverage": round(self.coverage, 4),
+            "coverage_threshold": COVERAGE_THRESHOLD,
             "bytes": len(self.markdown.encode("utf-8")),
         }
 
@@ -335,6 +375,111 @@ def build_sections(alignments: list[dict], limit: int = 12) -> list[Section]:
     return out
 
 
+# --- the whole lecture as one payload -----------------------------------------------
+
+
+@dataclass(frozen=True)
+class Lecture:
+    """The whole lecture as one request payload, and how much of it the budget let through.
+
+    `text` is what every section request carries. `dropped` names the slices the budget kept
+    out, so a shortened payload is a reported fact rather than a quietly smaller note.
+    """
+
+    text: str
+    frames: tuple[str, ...] = ()
+    captions: tuple[tuple[str, str], ...] = ()
+    start_ms: int = 0
+    end_ms: int = 0
+    words_sent: int = 0
+    words_total: int = 0
+    dropped: tuple[str, ...] = ()
+
+    @property
+    def coverage(self) -> float:
+        """Words that reached a request / words in the transcript. 1.0 when nothing was cut."""
+        if not self.words_total:
+            return 1.0
+        return self.words_sent / self.words_total
+
+
+def _slice_label(section: Section) -> str:
+    """How a slice is named when it does not reach the model."""
+    return (
+        f"фрагмент {section.number} ({section.start_ms / 1000:.0f}–{section.end_ms / 1000:.0f} с)"
+    )
+
+
+def _lecture_block(section: Section) -> str:
+    """One slice's transcript under a marker naming it.
+
+    The marker is what lets a truncated payload say *which* slice it lost, and it hands the
+    writer the frame boundary the slice was cut on -- a frame boundary is where one thing
+    stopped being on screen, which is the one thing a time slice is good for.
+    """
+    frames = f"{section.frames[0]}–{section.frames[-1]}" if section.frames else "нет"
+    return (
+        f"[Фрагмент {section.number}: кадры {frames}, "
+        f"{section.start_ms / 1000:.0f}–{section.end_ms / 1000:.0f} с]\n{section.text}"
+    )
+
+
+def gather(sections: list[Section], *, budget: int = SECTION_BUDGET) -> Lecture:
+    """Every slice, in order, as the payload for one section request.
+
+    Slices are still cut on frame boundaries (`build_sections`) -- that is where one thing
+    stopped being on screen -- but they are *concatenated* here rather than indexed per
+    section, because the eight sections are semantic, not temporal (#117).
+
+    Slices are added while they fit. The first that does not is truncated at the boundary, so
+    the head of the lecture always reaches the model, and every slice from there on is named in
+    `dropped`. A lecture that fits is sent whole.
+    """
+    if not sections:
+        return Lecture(text="")
+
+    blocks: list[str] = []
+    frames: list[str] = []
+    captions: list[tuple[str, str]] = []
+    used = 0
+    words_sent = 0
+    dropped: list[str] = []
+
+    for section in sections:
+        block = _lecture_block(section)
+        if used + len(block) <= budget:
+            blocks.append(block)
+            used += len(block)
+            words_sent += section.word_count
+            continue
+        room = budget - used
+        if room > 0 and not dropped:
+            # A slice larger than the whole budget: keep its head rather than sending nothing.
+            blocks.append(block[:room] + "\n[…]\n")
+            words_sent += round(section.word_count * (room / len(block)))
+            # The budget is spent. Without this a later, smaller slice still passes the fit
+            # test and lands *after* the gap, so the payload reads slice 1 then slice 12 with
+            # nothing in between -- and that slice is then missing from `dropped`, which is the
+            # one thing this function exists to prevent.
+            used = budget
+        dropped.append(_slice_label(section))
+
+    for section in sections:
+        frames.extend(section.frames)
+        captions.extend(section.captions)
+
+    return Lecture(
+        text="\n\n".join(blocks),
+        frames=tuple(frames),
+        captions=tuple(captions),
+        start_ms=sections[0].start_ms,
+        end_ms=sections[-1].end_ms,
+        words_sent=words_sent,
+        words_total=sum(s.word_count for s in sections),
+        dropped=tuple(dropped),
+    )
+
+
 # --- template synthesizer -----------------------------------------------------------
 
 
@@ -380,20 +525,19 @@ class LLMSynthesizer:
         self.config = config
         self.transcript = transcript
 
-    def section(self, section: Section, transcript: str) -> str:
-        # Truncated from the front of this section's text, never the transcript: the tail
-        # of a slide is what a student needs, and a token limit that eats the end is a
-        # silent content loss.
-        budget = 12_000
-        body = transcript if len(transcript) <= budget else transcript[:budget] + "\n[…]\n"
+    def section(self, section: Section, transcript: str) -> SectionBody:
+        # `transcript` is the whole lecture, already trimmed to `SECTION_BUDGET` by `gather` --
+        # the only place that knows where the slice boundaries are, and so the only place that
+        # can name what a truncation dropped (#117). Truncating again here would be a second,
+        # unreported loss, which is what the previous `budget = 12_000` was.
         if section.captions:
-            # Before the transcript, not after it: `body` is the only thing `budget` bounds,
-            # so anything above it survives truncation. The alternative -- captions last --
-            # makes the captions the first thing a long section loses, which is the same
-            # defect #84 describes, reached from the other direction.
+            # Captions are not counted against the transcript budget: they are the smaller half
+            # of the material and the half a slide's term or formula lives in. Counting them
+            # would make the frames the first thing a long lecture loses -- #84 reached from
+            # the other direction.
             described = "\n".join(f"{name} — {text}" for name, text in section.captions)
             on_screen = (
-                "Описания кадров (стадия 6): что было на экране, пока шёл этот фрагмент.\n"
+                "Описания кадров (стадия 6): что было на экране в этой лекции.\n"
                 "Это не цитата лектора. Описание экрана не даёт права добавить в конспект "
                 "утверждение, которого нет в стенограмме: бери отсюда термин, формулу, "
                 "название или структуру слайда, а утверждения о том, что было сказано, "
@@ -409,9 +553,11 @@ class LLMSynthesizer:
                 "content": (
                     f"Раздел {section.number} из 8: «{section.title}».\n"
                     f"Что в нём должно быть: {section.brief}\n\n"
-                    f"Тайминг: {section.start_ms / 1000:.0f}–{section.end_ms / 1000:.0f} с.\n\n"
+                    f"Лекция целиком, {section.start_ms / 1000:.0f}–{section.end_ms / 1000:.0f} с. "
+                    f"Пиши только этот раздел, но опирайся на всю лекцию: материал для него "
+                    f"может быть сказан в любом её месте.\n\n"
                     f"{on_screen}"
-                    f"Стенограмма этого фрагмента:\n\n{body}\n"
+                    f"Стенограмма лекции:\n\n{transcript}\n"
                 ),
             },
         ]
@@ -504,8 +650,12 @@ def synthesise(
     *,
     title: str | None = None,
     model: str | None = None,
+    budget: int = SECTION_BUDGET,
 ) -> Note:
-    sections = build_sections(alignments)
+    slices = build_sections(alignments)
+    # Every section request carries the whole lecture (#117). The slices are not indexed per
+    # section: they exist to keep a frame boundary visible inside the payload, not to bound it.
+    lecture = gather(slices, budget=budget)
     note_title = title or f"Конспект — {Path(source).name}"
     bodies: dict[int, str] = {}
     reported: list[dict] = []
@@ -513,12 +663,15 @@ def synthesise(
     breaker = llm.Breaker()
     stopped = False
 
-    # The eight content sections map onto the numbered slices in order. A lecture with two
-    # frames cannot support eight sections and pretending otherwise would be the exact
-    # invention the skill forbids.
-    for index, (number, section_title, brief) in enumerate(SECTIONS):
-        payload = sections[index].text if index < len(sections) else ""
-        if not payload.strip():
+    if lecture.dropped:
+        warnings.append(
+            f"the transcript did not fit the {budget}-character budget: "
+            + ", ".join(lecture.dropped)
+            + f" did not reach the model; coverage {lecture.coverage:.0%}"
+        )
+
+    for number, section_title, brief in SECTIONS:
+        if not lecture.text.strip():
             reported.append(
                 {
                     "number": number,
@@ -528,6 +681,19 @@ def synthesise(
                 }
             )
             continue
+        # The skill's own number, title and brief -- not the slice's "Фрагмент N" (#117). A
+        # writer that is not told it is writing "Паспорт лекции" cannot write one.
+        target = Section(
+            number=number,
+            title=section_title,
+            brief=brief,
+            start_ms=lecture.start_ms,
+            end_ms=lecture.end_ms,
+            text=lecture.text,
+            frames=lecture.frames,
+            captions=lecture.captions,
+            word_count=lecture.words_sent,
+        )
         if stopped:
             # Seven more ladders against an endpoint already known to be down is the cost
             # #124 is about, and an unattempted section is not a failed synthesis.
@@ -546,7 +712,7 @@ def synthesise(
             continue
         finish_reason: str | None = None
         try:
-            outcome = synthesizer.section(sections[index], payload)
+            outcome = synthesizer.section(target, lecture.text)
         except llm.NotConfiguredError as exc:
             warnings.append(f"section {number}: {exc}")
             body = ""
@@ -584,12 +750,11 @@ def synthesise(
                 "title": section_title,
                 "present": bool(body.strip()),
                 "bytes": len(body.encode("utf-8")),
-                "source_section": sections[index].title,
                 "finish_reason": finish_reason,
             }
         )
 
-    markdown = assemble(note_title, bodies, sections)
+    markdown = assemble(note_title, bodies, slices)
     missing = [n for n, _, _ in SECTIONS if not bodies.get(n, "").strip()]
     name = getattr(synthesizer, "name", "unknown")
     # Falling back to the template is itself a degradation, independent of whether the
@@ -607,6 +772,7 @@ def synthesise(
         model=model,
         degraded=used_template or bool(warnings or missing),
         notes=warnings,
+        coverage=lecture.coverage,
     )
 
 
@@ -623,6 +789,7 @@ def run(
     *,
     config: llm.Config | None = None,
     title: str | None = None,
+    budget: int = SECTION_BUDGET,
     stream=None,
 ) -> Note:
     out = stream if stream is not None else sys.stdout
@@ -643,6 +810,7 @@ def run(
         synthesizer,
         title=title,
         model=config.model if config else None,
+        budget=budget,
     )
 
     (destination / NOTE_NAME).write_text(note.markdown, encoding="utf-8")
@@ -662,6 +830,23 @@ def write(note: Note, target: Path) -> None:
     )
 
 
+def coverage_of(report_path: Path) -> float | None:
+    """The coverage stage 7 recorded in `synth.json`, or None when it cannot be read.
+
+    None is not zero. A bundle from before this metric existed has no coverage figure, and
+    treating that as a bad note would report a missing measurement as a content failure; the
+    missing-artefact check is the place for files that are not there (#117, #87).
+    """
+    if not report_path.is_file():
+        return None
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = payload.get("coverage")
+    return float(value) if isinstance(value, (int, float)) else None
+
+
 def provenance(note: Note, config: llm.Config | None) -> str:
     return json.dumps(
         {
@@ -672,6 +857,8 @@ def provenance(note: Note, config: llm.Config | None) -> str:
             "model": note.model,
             "endpoint": config.redacted() if config else None,
             "degraded": note.degraded,
+            "coverage": round(note.coverage, 4),
+            "coverage_threshold": COVERAGE_THRESHOLD,
             "sections_required": [n for n, _, _ in SECTIONS],
             "sections_filled": [s["number"] for s in note.sections if s.get("present")],
             "why_two_implementations": (

@@ -35,6 +35,12 @@ ARTEFACT_VERIFICATION_FAILED = 6
 # 7 — a model ran, but its note is degraded/incomplete and needs user attention.
 INCOMPLETE_NOTE = 7
 
+# 8 — the note was written from less of the lecture than the coverage threshold allows: stage 7
+# handed the model a shortened transcript, so the note cannot be complete however clean it looks
+# (#117). Separate from 6, which is about files that are not on disk at all: here every file is
+# present and verified, and the deliverable is still missing a third of the course.
+LOW_COVERAGE = 8
+
 # 130 — interrupted (Ctrl-C), the shell convention of 128 + SIGINT(2). Not a
 # pipeline failure: the work dir is retained and its path printed, because an
 # aborted 73-minute transcribe is exactly the run worth inspecting. Declared
@@ -54,5 +60,6 @@ DESCRIPTIONS: dict[int, str] = {
     AUDIT_FINDINGS: "audit found errors above threshold; note written and flagged",
     ARTEFACT_VERIFICATION_FAILED: "required artefacts could not be verified",
     INCOMPLETE_NOTE: "model-written note is incomplete or degraded",
+    LOW_COVERAGE: "less of the lecture reached the model than the coverage threshold allows",
     INTERRUPTED: "interrupted by the user; work dir kept",
 }

@@ -19,6 +19,7 @@ from . import link as dylnk
 from . import pipeline as dyp
 from . import repair as dyr
 from . import runner
+from . import synth as dysy
 from .deps import PROCESS_REQUIRES, Check, run_all, worst_code
 from .workspace import WorkDir
 
@@ -377,6 +378,17 @@ def _process(args: argparse.Namespace) -> int:
         return ec.DEPENDENCY_FAILED
     if not result.quality.ok:
         return ec.QUALITY_GATE_FAILED
+    if result.report.low_coverage:
+        # Before the degraded check, deliberately. A truncated transcript also makes the note
+        # degraded, and the degraded branch would return 7 and hide the reason: that the note
+        # is missing part of the lecture (#117).
+        print(
+            f"dyak: stage 7 sent the model {result.report.coverage:.0%} of the transcript, "
+            f"below the {result.report.coverage_threshold:.0%} coverage threshold; the note is "
+            f"missing part of the lecture. See {dysy.REPORT_NAME} in the bundle.",
+            file=sys.stderr,
+        )
+        return ec.LOW_COVERAGE
     if result.note.degraded:
         for warning in result.note.notes:
             print(f"dyak: synthesis: {warning}", file=sys.stderr)
