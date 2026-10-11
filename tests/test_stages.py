@@ -1234,6 +1234,38 @@ check(
 check("and it says where the artefacts are", "verified" in text, text)
 
 
+# #117: a bundle can verify completely and still be missing a third of the lecture. Stage 7
+# records coverage in `synth.json`, stage 12 reads it back, and the run must not exit 0 -- and
+# must not use code 6 to say so: nothing is absent from disk, the *deliverable* is absent from
+# the note. This is the state the run in docs/stages.md was in while it exited 0.
+def low_coverage_pipeline(source, work, **kw):
+    result = fake_pipeline(source, work, **kw)
+    result.report.coverage = 0.5
+    return result
+
+
+dyp.run = low_coverage_pipeline
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    rc_low = dyc.main(["process", str(src)])
+dyp.run = fake_pipeline
+check(
+    "a note written from half the lecture does not exit 0 (#117)",
+    rc_low == ec.LOW_COVERAGE,
+    f"rc={rc_low} want={ec.LOW_COVERAGE}",
+)
+check(
+    "and the refusal names coverage, not a missing artefact (#117)",
+    "coverage" in err.getvalue() and "50%" in err.getvalue(),
+    err.getvalue()[-300:],
+)
+check(
+    "coverage is not the missing-artefact code (#117)",
+    rc_low != ec.ARTEFACT_VERIFICATION_FAILED and rc_low != ec.OK,
+    f"rc={rc_low}",
+)
+
+
 # --- 7z. stage 7's LLM transcript reaches the bundle -----------------------
 # The note is written by 8 model calls. `synth.py` has recorded all 8 since #38, and
 # `pipeline.py` promoted 3 files from that directory without naming the transcript, so it
@@ -4399,24 +4431,29 @@ check(
     "# Фрагмент" not in note.markdown,
     "a synthesized heading leaked into the note",
 )
-# Six frames cut one per slice, so six of ADR-0001 D5's eight sections have material and two cannot.
-# Filling more would be inventing content, which is the thing this pipeline exists not to do.
-check("only sections with source material are filled", note.filled == 6, str(note.filled))
+# #117: every section is written from the whole lecture, not from slice N. Six frames are
+# enough material for all eight sections -- and indexing slices per section meant a 58-frame
+# lecture silently dropped its last four slices while this test still passed.
+check("every section is written from the whole lecture", note.filled == 8, str(note.filled))
+# The original intent -- a section with no material is marked, not omitted -- now depends on
+# the lecture being empty rather than on the section's index (#117).
+_empty = dysy.synthesise([], "", src_path, FakeSynth())
 check(
-    "and the unfilled ones are marked, not omitted",
-    all(not note.sections[n]["present"] for n in (6, 7))
-    and note.markdown.count("в лекции не затрагивается") == 2,
-    str(note.sections[6:]),
+    "with no transcript every section is marked, not omitted",
+    _empty.filled == 0
+    and all(not s["present"] for s in _empty.sections)
+    and _empty.markdown.count("в лекции не затрагивается") == 8,
+    str(_empty.filled),
 )
-check("a note missing sections is degraded", note.degraded, "an incomplete note claimed complete")
+check("a note missing sections is degraded", _empty.degraded, "an incomplete note claimed complete")
 
 # Failure isolation: one dead section must not lose the seven that worked. ADR-0001 D5.
 partial = dysy.synthesise(
     json.loads(scaps.read_text())["alignments"], "текст", src_path, FakeSynth(fail_on={4})
 )
 check(
-    "one failed section does not lose the other five that had material",
-    partial.filled == 5 and partial.sections[3]["present"] is False,
+    "one failed section does not lose the other seven",
+    partial.filled == 7 and partial.sections[3]["present"] is False,
     f"filled={partial.filled} sections={[(x['number'], x['present']) for x in partial.sections]}",
 )
 check("and the note is still written", "## 4." in partial.markdown, "section 4 missing")
@@ -6336,6 +6373,133 @@ if real_vault_env is None:
 else:
     os.environ[dyd.VAULT_ENV] = real_vault_env
 shutil.rmtree(tmp, ignore_errors=True)
+
+# --- #117: the whole lecture reaches the model, and stage 12 refuses a partial one --------
+# Stage 7 mapped the eight required sections onto the first eight time slices, so a 58-frame
+# lecture (12 slices) sent slices 9-12 to no request at all: about 31% of the lecture, absent
+# from a note that stage 12 verified as complete while the run exited 0.
+_cov_calls: list[list[dict]] = []
+
+
+def _cov_chat(messages, config, **kw):
+    _cov_calls.append(messages)
+    return dyle.Reply(
+        text="тело",
+        model="m",
+        prompt_tokens=1,
+        completion_tokens=1,
+        seconds=0.0,
+        attempts=1,
+        finish_reason="stop",
+    )
+
+
+_cov_alignments = [
+    {
+        "frame": f"f_{i:04d}.png",
+        "text": f"кадрномер{i:04d}конец",
+        "caption_status": "OK",
+        "on_screen_ms": [i * 77000, (i + 1) * 77000],
+        "caption": f"слайд {i}",
+        "word_count": 3,
+    }
+    for i in range(58)
+]
+_cov_old_chat = dyle.chat
+dyle.chat = _cov_chat
+try:
+    _cov_note = dysy.synthesise(
+        _cov_alignments,
+        "текст",
+        src_path,
+        dysy.LLMSynthesizer(dyle.Config(endpoint="http://e/v1", model="m"), _WireTranscript()),
+    )
+finally:
+    dyle.chat = _cov_old_chat
+
+_cov_blob = "\n".join(m[1]["content"] for m in _cov_calls)
+_cov_absent = [i for i in range(58) if f"кадрномер{i:04d}конец" not in _cov_blob]
+check(
+    "every frame's transcript reaches at least one LLM request (#117)",
+    _cov_absent == [],
+    f"frames that reached no request: {_cov_absent}",
+)
+check(
+    "a lecture that fits the budget is sent whole, and the note is not degraded (#117)",
+    _cov_note.coverage == 1.0 and not _cov_note.degraded,
+    f"coverage={_cov_note.coverage} degraded={_cov_note.degraded}",
+)
+check(
+    "every request names the skill section it is writing, not a slice (#117)",
+    [m[1]["content"].splitlines()[0] for m in _cov_calls]
+    == [f"Раздел {n} из 8: «{t}»." for n, t, _ in dysy.SECTIONS],
+    str([m[1]["content"].splitlines()[0] for m in _cov_calls[:2]]),
+)
+
+# The budget is a guard against one unbounded request, not a cost control. What it keeps out
+# has to be named, and it has to show up in the coverage metric -- the two things that were
+# missing while the note lost its last twenty minutes in silence.
+_cut = dysy.synthesise(_cov_alignments, "текст", src_path, FakeSynth(), budget=120)
+check(
+    "a slice the budget kept out is named, with its timing (#117)",
+    any("фрагмент 1" in w and "385 с" in w for w in _cut.notes),
+    str(_cut.notes),
+)
+check(
+    "and every slice after it is named, including the last (#117)",
+    _cut.notes and "фрагмент 2" in _cut.notes[0] and "фрагмент 12" in _cut.notes[0],
+    str(_cut.notes),
+)
+check(
+    "the coverage metric records what was actually sent (#117)",
+    _cut.coverage < dysy.COVERAGE_THRESHOLD,
+    str(_cut.coverage),
+)
+
+# Stage 12 refuses exit 0 on a partial note with its own code. Every artefact can be present
+# and verified while the deliverable is missing a third of the course -- that is exactly the
+# state that exited 0 before this, so coverage must not be folded into `Report.ok`.
+_covdir = tmp / "coverage-bundle"
+_covdir.mkdir(parents=True, exist_ok=True)
+for _name in dyro.REQUIRED:
+    (_covdir / ("note.md" if _name == "note" else _name)).write_text("x", encoding="utf-8")
+dysy.write(dysy.Note(markdown="# n", coverage=0.5), _covdir / dysy.REPORT_NAME)
+
+_cov_report = dyro.run(
+    _covdir,
+    final_note=_covdir / "note.md",
+    synth_note=_covdir / "note.synth.md",
+    artefacts={n: _covdir / n for n in dyro.REQUIRED},
+    stream=io.StringIO(),
+)
+check(
+    "stage 12 reads stage 7's coverage back out of synth.json (#117)",
+    _cov_report.coverage == 0.5,
+    str(_cov_report.coverage),
+)
+check(
+    "the bundle still verifies: coverage is a separate failure (#117)",
+    _cov_report.ok,
+    _cov_report.summary(),
+)
+check(
+    "and stage 12 refuses it with its own code, not the missing-artefact code (#117)",
+    _cov_report.low_coverage
+    and ec.LOW_COVERAGE != ec.ARTEFACT_VERIFICATION_FAILED
+    and bool(ec.DESCRIPTIONS.get(ec.LOW_COVERAGE)),
+    f"low={_cov_report.low_coverage} code={ec.LOW_COVERAGE}",
+)
+check(
+    "unknown coverage is not low coverage (#117)",
+    dyro.Report(coverage=None).low_coverage is False
+    and dyro.Report(coverage=1.0).low_coverage is False,
+    "a missing measurement was read as a bad note",
+)
+check(
+    "a bundle with no synth.json leaves coverage unknown, not zero (#117)",
+    dysy.coverage_of(_covdir / "definitely-absent.json") is None,
+    str(dysy.coverage_of(_covdir / "definitely-absent.json")),
+)
 
 _env.restore(SAVED_ENV)
 

@@ -322,10 +322,34 @@ one that is loud:
 | 5 | audit found errors above threshold; note written and **flagged** |
 | 6 | required artefacts could not be verified on disk (ADR-0001 D3) |
 | 7 | model-written note is incomplete or degraded; review its warnings |
+| 8 | less of the lecture reached the model than the coverage threshold allows; the note is missing part of it |
 | 130 | interrupted (128 + SIGINT); work dir kept |
 
 An uncaught internal error — a bug in dyak — has no row on purpose: it
 propagates as a traceback. The work dir is retained and its path printed first.
+
+### Amendment 2026-10-11 — code 8, and why it is not code 6
+
+Stage 7 cut the lecture into time slices and mapped the eight required sections onto the
+first eight of them (`synth.py`, `synthesise`). On a 58-frame lecture that gave
+`Вопросы для самопроверки` the text spoken between 2695 and 3079 seconds and dropped
+slices 9-12 entirely: about 31% of the lecture reached no request, while stage 12
+verified every file and the run exited 0 (#117). The prompt also labelled each request
+with the slice name (`«Фрагмент 7»`) rather than the section's own title, so the writer
+was never told which of the eight sections it was writing.
+
+Both are now fixed in stage 7: every section request carries the whole lecture, and the
+skill's own number, title and brief. Stage 7 also records `coverage` in `synth.json` —
+words that reached the model over words in the transcript — and stage 12 reads it back
+and refuses exit 0 below `synth.COVERAGE_THRESHOLD` (0.95).
+
+That refusal gets its own code, **8**, and deliberately not 6. Code 6 is "an artefact
+could not be verified on disk"; here every artefact is present and verified and the
+*deliverable* is still missing a third of the course. Folding the two together would
+make `report.json`'s `ok` mean two different things, which is the confusion that let
+this run exit 0 in the first place. Code 8 is checked before code 7 for the same reason:
+a shortened transcript also makes the note degraded, and returning 7 would report the
+symptom instead of the cause.
 
 ## Amendment 2026-10-02 — stages 0-3 shipped, and two corrections
 

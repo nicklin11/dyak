@@ -90,6 +90,11 @@ class Report:
     #: them, `audit.json` and `repair.json`, did exactly that for eight runs. Recorded because
     #: a non-empty list is the evidence that what was verified belonged to this run.
     superseded: list[str] = field(default_factory=list)
+    #: Stage 7's own measurement of how much of the transcript reached the model, read back
+    #: from `synth.json` rather than recomputed. `None` when the figure is not there to read
+    #: (a bundle from before the metric existed): unknown is not the same as low.
+    coverage: float | None = None
+    coverage_threshold: float = synth.COVERAGE_THRESHOLD
 
     @property
     def checked(self) -> int:
@@ -100,6 +105,16 @@ class Report:
     def ok(self) -> bool:
         """Nothing required is missing, and the frame count agrees with the manifest."""
         return not self.missing and self.frames_found == self.frames_expected
+
+    @property
+    def low_coverage(self) -> bool:
+        """Stage 7 sent the model less of the lecture than the threshold allows (#117).
+
+        Deliberately *not* part of `ok`: `ok` is a statement about files on disk, and this is a
+        statement about what went into them. Merging the two is how a run that omitted a third
+        of the course came to exit 0, so they get separate exit codes.
+        """
+        return self.coverage is not None and self.coverage < self.coverage_threshold
 
     def summary(self) -> str:
         if not self.ok:
@@ -122,6 +137,8 @@ class Report:
             "files_in_bundle_excluding_this_stage": self.bundle_files,
             "unchecked": self.unchecked,
             "superseded_by_this_run": self.superseded,
+            "transcript_coverage": None if self.coverage is None else round(self.coverage, 4),
+            "transcript_coverage_threshold": self.coverage_threshold,
         }
 
 
@@ -279,6 +296,9 @@ def run(
             report.absent.append({"artefact": name, "why_absent": reason})
 
     report.frames_expected, report.frames_found = count_frames(root)
+    # Read back, never recomputed: the coverage figure is stage 7's measurement of what it
+    # actually sent, and a second implementation here would be a second thing to keep true.
+    report.coverage = synth.coverage_of(root / synth.REPORT_NAME)
     expected, _ = expected_frames(root)
     # Measured before this stage writes its own two files, so `bundle_files` is everything
     # under the root *except* `report.json` and `report-provenance.json`. Stated that way
@@ -309,6 +329,14 @@ def run(
             f"           frame count disagrees with {frames.MANIFEST}: "
             f"{report.frames_found} on disk, {report.frames_expected} listed\n"
         )
+    if report.low_coverage:
+        # Not a missing file, so not a `MISSING` line: the bundle is complete and the note is
+        # not. Printed here so the run says it before the exit code has to.
+        out.write(
+            f"           coverage {report.coverage:.0%} of the transcript reached the model, "
+            f"below the {report.coverage_threshold:.0%} threshold: the note is missing part of "
+            f"the lecture\n"
+        )
     return report
 
 
@@ -333,6 +361,14 @@ def provenance(report: Report) -> str:
             "files_in_bundle_excluding_this_stage": report.bundle_files,
             "superseded_by_this_run": report.superseded,
             "not_checked": report.unchecked,
+            "transcript_coverage": (None if report.coverage is None else round(report.coverage, 4)),
+            "transcript_coverage_threshold": report.coverage_threshold,
+            "transcript_coverage_source": (
+                f"read from {synth.REPORT_NAME}, which stage 7 wrote: the fraction of the "
+                "transcript that reached the model. Below the threshold the run does not exit "
+                "0 (#117), because every file can be present while the note is missing part "
+                "of the lecture."
+            ),
             "coverage": (
                 f"{report.checked} of {report.bundle_files + 2} files were examined; the "
                 "remainder are listed in report.json under 'unchecked'. `ok` is a statement "

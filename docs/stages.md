@@ -52,7 +52,7 @@ attempts, fingerprint, and whether the frame was called or taken from cache.
 | 4 | `frames` | `frames.py` | yes | **yes** — 58 frames, deterministic |
 | 5 | `quality` | `quality.py` — `GeometricEstimator` | yes | **yes** — 57/58 pass, threshold 37320 |
 | 6 | `caption` | `caption.py`, `llm.py` | yes | **yes** — 57 frames captioned, 16 refusals, per-frame `caption_trace` |
-| 7 | `synth` | `synth.py` | yes | **yes** — 8/8 sections, 8 LLM calls recorded, stage 6 captions in every prompt |
+| 7 | `synth` | `synth.py` | yes | **yes** — 8/8 sections, 8 LLM calls recorded, stage 6 captions in every prompt. Since #117 every request carries the whole lecture and `synth.json` records `coverage`; the run above predates that and its coverage was 0.69 |
 | 8 | `lint` | `lint.py` | yes | **yes** — 9 checks, clean |
 | 9 | `audit` | `audit.py` | yes | **yes** — 4 rules, tier 2 ran, 8 LLM calls recorded |
 | 10 | `repair` | `repair.py` | yes | **yes** — deterministic, nothing to repair |
@@ -172,6 +172,7 @@ renders in full. #49 is the underlying measurement.
 | `files_in_bundle_excluding_this_stage` | everything it could have checked (run 13: 144) |
 | `unchecked` | the absolute list of files it did not check |
 | `frames_expected` / `frames_found` | frames against `manifest.tsv` |
+| `transcript_coverage` / `transcript_coverage_threshold` | how much of the transcript reached the model in stage 7, read back from `synth.json` rather than recomputed. Below the threshold the run does not exit 0 (#117) |
 | `note_promoted` | whether the vault copy happened |
 
 Since `5c66731`, `verified ∪ unchecked = files_in_bundle_excluding_this_stage` holds on the
