@@ -42,7 +42,11 @@ Every stage writes a `*-provenance.json` recording what produced its output:
 | 4 | `detect.json` (see above) | the full filter chain, every setting, the ffmpeg version |
 | 5–12 | `quality`/`caption`/`synth`/`lint`/`audit`/`repair`/`link`/`report`-provenance.json | the tool, its rule set, and what it changed |
 | 6 | per-frame `caption_trace` in `captions.json` | which model captioned this frame, tokens, timing, called or cached |
-| 7, 9 | `synth-llm-transcript.json`, `audit-llm-transcript.json` | every call: full messages, model, tokens, seconds, attempts |
+| 7, 9 | `synth-llm-transcript.json`, `audit-llm-transcript.json` | every call: full messages, model, tokens, seconds, attempts, `finish_reason` |
+
+`finish_reason` is the endpoint saying why the model stopped. `length` means the output cap cut
+it off: the text is real but incomplete, and stage 7 marks that section degraded rather than
+letting a truncated derivation ship as finished content (#124).
 
 The three LLM stages keep different amounts on purpose. Stages 7 and 9 make 8 calls each and
 store the whole `messages` array — ~190 KiB per call, needed so the audit is checkable. Stage

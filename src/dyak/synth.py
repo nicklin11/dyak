@@ -234,13 +234,31 @@ class Note:
         }
 
 
+@dataclass(frozen=True)
+class SectionBody:
+    """One section's prose, and how the model stopped writing it.
+
+    A caller that sees only the string cannot tell a section that ended naturally from one the
+    endpoint cut off at its output cap. `finish_reason == "length"` is that second case: the
+    text is real but incomplete, and shipping it as a clean section is how a truncated
+    derivation passes lint and audit as finished content (#124).
+    """
+
+    text: str
+    finish_reason: str | None = None
+
+    @property
+    def truncated(self) -> bool:
+        return self.finish_reason == "length"
+
+
 @runtime_checkable
 class Synthesizer(Protocol):
     """What stage 7 needs from anything that can write prose."""
 
     name: str
 
-    def section(self, section: Section, transcript: str) -> str:
+    def section(self, section: Section, transcript: str) -> SectionBody:
         """The body of one of the skill's eight sections. No top-level heading."""
 
 
@@ -333,7 +351,7 @@ class TemplateSynthesizer:
         self.transcript = transcript
         self.sections = sections
 
-    def section(self, section: Section, _transcript: str) -> str:
+    def section(self, section: Section, _transcript: str) -> SectionBody:
         # The template does not invent content. It reports what it has, and says plainly
         # that the prose is missing. A reader can tell this is not a finished note.
         body = (
@@ -347,7 +365,7 @@ class TemplateSynthesizer:
             "> Синтез без модели не восстанавливает термины, не оформляет математику и "
             "не отделяет учебный материал от организационного. Это каркас, а не конспект."
         )
-        return body
+        return SectionBody(text=body)
 
 
 # --- llm synthesizer ----------------------------------------------------------------
@@ -399,7 +417,7 @@ class LLMSynthesizer:
         ]
         reply = llm.chat(messages, self.config)
         self.transcript.record(7, f"section {section.number}", messages, reply)
-        return reply.text
+        return SectionBody(text=reply.text, finish_reason=reply.finish_reason)
 
 
 # --- note assembly ------------------------------------------------------------------
@@ -492,6 +510,8 @@ def synthesise(
     bodies: dict[int, str] = {}
     reported: list[dict] = []
     warnings: list[str] = []
+    breaker = llm.Breaker()
+    stopped = False
 
     # The eight content sections map onto the numbered slices in order. A lecture with two
     # frames cannot support eight sections and pretending otherwise would be the exact
@@ -508,8 +528,25 @@ def synthesise(
                 }
             )
             continue
+        if stopped:
+            # Seven more ladders against an endpoint already known to be down is the cost
+            # #124 is about, and an unattempted section is not a failed synthesis.
+            warnings.append(
+                f"section {number}: not attempted; stage 7 stopped after "
+                f"{breaker.limit} consecutive connection failures"
+            )
+            reported.append(
+                {
+                    "number": number,
+                    "title": section_title,
+                    "present": False,
+                    "reason": "not attempted: stage 7 stopped after repeated connection failures",
+                }
+            )
+            continue
+        finish_reason: str | None = None
         try:
-            body = synthesizer.section(sections[index], payload)
+            outcome = synthesizer.section(sections[index], payload)
         except llm.NotConfiguredError as exc:
             warnings.append(f"section {number}: {exc}")
             body = ""
@@ -518,6 +555,19 @@ def synthesise(
             # survives a failed synthesis.
             warnings.append(f"section {number}: {exc}")
             body = ""
+            if exc.connection:
+                stopped = breaker.fail()
+            else:
+                breaker.ok()
+        else:
+            body = outcome.text
+            finish_reason = outcome.finish_reason
+            breaker.ok()
+            if outcome.truncated:
+                warnings.append(
+                    f"section {number}: model output hit the length limit; the section is "
+                    "truncated and its ending is missing"
+                )
         first = body.splitlines()[0] if body.splitlines() else ""
         if first and _TOC.match(first):
             # A model told "section 5 of 8" will sometimes answer with the contents of the
@@ -535,6 +585,7 @@ def synthesise(
                 "present": bool(body.strip()),
                 "bytes": len(body.encode("utf-8")),
                 "source_section": sections[index].title,
+                "finish_reason": finish_reason,
             }
         )
 

@@ -3898,6 +3898,57 @@ try:
         not routcome.ok and routcome.captioned == 0,
         routcome.as_dict(),
     )
+
+    # --- #124: stage 6 stops calling an endpoint that is not answering -----------------
+    #
+    # Each call has its own retry ladder on purpose, so 58 frames against a dead endpoint is
+    # 58 ladders -- about 5.8 min of sleeping before "0 captioned". The breaker is per-stage.
+    _bimg = ctmp / "breaker_images"
+    _bimg.mkdir(parents=True, exist_ok=True)
+    _frames = [f"b_{i:010d}.png" for i in range(6)]
+    for _name in _frames:
+        (_bimg / _name).write_bytes(_FAKE_FRAME)
+    _breport = dycap.Report(
+        alignments=[
+            dycap.Alignment(
+                frame=_name,
+                pts_ms=i * 1000,
+                image=_name,
+                enhanced=None,
+                on_screen_ms=(i * 1000, (i + 1) * 1000),
+                segment_indices=[0],
+                text="t",
+            )
+            for i, _name in enumerate(_frames)
+        ]
+    )
+    _dead_calls: list[int] = []
+
+    def _dead_chat(messages, config, **kwargs):  # noqa: ANN001, ANN202, ARG001
+        _dead_calls.append(1)
+        raise dyle.EndpointError("connection refused", connection=True)
+
+    dyle.chat = _dead_chat
+    try:
+        dycap.caption_frames(
+            _breport,
+            _bimg,
+            dyle.Config(endpoint="http://e/v1", model="m"),
+            stream=io.StringIO(),
+        )
+    finally:
+        dyle.chat = _real_chat
+    check(
+        "K consecutive connection failures stop stage 6's remaining calls",
+        len(_dead_calls) == dyle.BREAKER_MAX,
+        f"calls={len(_dead_calls)} of {len(_frames)} frames",
+    )
+    check(
+        "the frames never attempted say so, instead of each paying its own retry ladder",
+        sum(1 for a in _breport.considered if a.caption_status == "STOPPED")
+        == len(_frames) - dyle.BREAKER_MAX,
+        str([(a.frame, a.caption_status) for a in _breport.considered]),
+    )
 finally:
     dyle.chat = _real_chat
     for _k in (
@@ -3917,19 +3968,30 @@ class FakeSynth:
 
     name = "fake"
 
-    def __init__(self, body="текст раздела", fail_on=(), toc_on=()):
+    def __init__(
+        self, body="текст раздела", fail_on=(), toc_on=(), truncate_on=(), conn_fail_on=()
+    ):
         self.body = body
         self.fail_on = set(fail_on)
         self.toc_on = set(toc_on)
+        self.truncate_on = set(truncate_on)
+        self.conn_fail_on = set(conn_fail_on)
         self.seen = []
 
     def section(self, section, transcript):
         self.seen.append(section.number)
+        if section.number in self.conn_fail_on:
+            # Connection-level: the endpoint never answered. This is what the stage breaker
+            # counts (#124).
+            raise dyle.EndpointError("endpoint refused the connection", connection=True)
         if section.number in self.fail_on:
             raise dyle.EndpointError("endpoint said no")
         if section.number in self.toc_on:
-            return "# Содержание\n\n- раздел 1\n- раздел 2"
-        return f"{self.body} для фрагмента {section.number} ({len(transcript)} симв.)"
+            return dysy.SectionBody(text="# Содержание\n\n- раздел 1\n- раздел 2")
+        return dysy.SectionBody(
+            text=f"{self.body} для фрагмента {section.number} ({len(transcript)} симв.)",
+            finish_reason="length" if section.number in self.truncate_on else "stop",
+        )
 
 
 sdir = tmp / "synth"
@@ -4232,6 +4294,7 @@ def _wire_chat(messages, config):
         text = "тело"
         raw: dict = {}
         attempts = 1
+        finish_reason = "stop"
 
     return _R()
 
@@ -4334,6 +4397,109 @@ toc = dysy.synthesise(
 )
 check("a returned table of contents is discarded", "- раздел 1" not in toc.markdown, "ToC leaked")
 check("and the warning says so", any("table of contents" in w for w in toc.notes), str(toc.notes))
+
+# --- #124: a length-truncated section is degraded, not clean content ---------------
+#
+# The endpoint cut the model off at its output cap. The text is real, so it must survive --
+# but a reader (and stage 12) has to be able to tell it from a section that ended naturally.
+trunc = dysy.synthesise(
+    json.loads(scaps.read_text())["alignments"], "текст", src_path, FakeSynth(truncate_on={3})
+)
+check(
+    "a length-truncated section is reported as degraded, not as a clean note entry",
+    trunc.degraded and any("truncated" in w for w in trunc.notes),
+    str(trunc.notes),
+)
+check(
+    "the truncation warning names the section that was cut off",
+    any(w.startswith("section 3:") and "length limit" in w for w in trunc.notes),
+    str(trunc.notes),
+)
+check(
+    "the truncated text is kept, not discarded for being incomplete",
+    trunc.sections[2]["present"] and trunc.sections[2]["bytes"] > 0,
+    str(trunc.sections[2]),
+)
+check(
+    "synth.json records finish_reason per section, so the artefact says which were cut",
+    trunc.sections[2].get("finish_reason") == "length"
+    and trunc.sections[0].get("finish_reason") == "stop",
+    str([(s["number"], s.get("finish_reason")) for s in trunc.sections]),
+)
+
+# The end-to-end form: the real `_to_reply`, the real `LLMSynthesizer`, a mocked transport.
+# On pre-#124 code `_to_reply` drops finish_reason, so this section reads as clean content
+# and the note is not degraded -- which is the bug, and this is the assertion that catches it.
+_llm_chat_124 = dyle.chat
+
+
+def _truncating_chat(messages, config, **kwargs):  # noqa: ANN001, ANN202, ARG001
+    return dyle._to_reply(
+        {
+            "choices": [
+                {"message": {"content": "раздел обрывается на середине"}, "finish_reason": "length"}
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 1024},
+        },
+        config.model,
+        0.01,
+        1,
+    )
+
+
+dyle.chat = _truncating_chat
+try:
+    _cut_note = dysy.synthesise(
+        json.loads(scaps.read_text())["alignments"],
+        "текст",
+        src_path,
+        dysy.LLMSynthesizer(dyle.Config(endpoint="http://e/v1", model="m"), dyle.Transcript()),
+    )
+finally:
+    dyle.chat = _llm_chat_124
+check(
+    "a 200 with finish_reason=length through the real parser is a degraded section, not clean",
+    _cut_note.degraded and any("truncated" in w for w in _cut_note.notes),
+    f"degraded={_cut_note.degraded} notes={_cut_note.notes}",
+)
+
+# --- #124: K consecutive connection failures stop stage 7's remaining calls ---------
+#
+# 8 sections x a full retry ladder against a dead endpoint is the cost this is about. The
+# unattempted sections are reported as not attempted, not as failed synthesis.
+cut = FakeSynth(conn_fail_on=set(range(1, 9)))
+dead = dysy.synthesise(json.loads(scaps.read_text())["alignments"], "текст", src_path, cut)
+check(
+    "K consecutive connection failures stop the stage's remaining calls",
+    len(cut.seen) == dyle.BREAKER_MAX,
+    f"called={cut.seen}",
+)
+check(
+    "the note still exists and is degraded",
+    dead.degraded and "## 8." in dead.markdown,
+    f"degraded={dead.degraded}",
+)
+check(
+    "the sections never attempted are named as not attempted",
+    any("not attempted" in w for w in dead.notes),
+    str(dead.notes),
+)
+check(
+    "an unattempted section is not reported as a failed synthesis",
+    any(s.get("reason", "").startswith("not attempted") for s in dead.sections),
+    str([(s["number"], s.get("reason")) for s in dead.sections]),
+)
+
+# One non-connection refusal is a verdict, not a dead endpoint: it must not trip the breaker.
+control = FakeSynth()
+dysy.synthesise(json.loads(scaps.read_text())["alignments"], "текст", src_path, control)
+mixed = FakeSynth(fail_on={1}, conn_fail_on={2})
+dysy.synthesise(json.loads(scaps.read_text())["alignments"], "текст", src_path, mixed)
+check(
+    "an HTTP verdict does not count toward the connection breaker",
+    mixed.seen == control.seen,
+    f"mixed={mixed.seen} control={control.seen}",
+)
 
 # Heading demotion. The model reshapes the document; `assemble` must win.
 check(
