@@ -57,6 +57,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -125,7 +126,11 @@ def parse_frontmatter(text: str) -> tuple[dict, int]:
         if ":" in line:
             key, _, val = line.partition(":")
             key, val = key.strip(), val.strip()
-            if val:
+            if val.startswith("[") and val.endswith("]"):
+                # Inline flow list: `aliases: [a, b]`. Quotes around items are stripped.
+                items = [x.strip().strip("'\"") for x in val[1:-1].split(",")]
+                data[key] = [x for x in items if x]
+            elif val:
                 data[key] = val
             else:
                 data[key] = []
@@ -244,18 +249,34 @@ def build_index(terms: list[Term]) -> tuple[re.Pattern, dict[str, Term]]:
 # --- substitution --------------------------------------------------------------------
 
 
+#: A heading is not a link target: it becomes part of the link graph and renders as a link.
+HEADING = re.compile(r"^#{1,6}[ \t]")
+
+
 def substitute(text: str, rx: re.Pattern, owner: dict[str, Term]) -> tuple[str, dict[str, int]]:
-    """Wrap every match outside masked regions as `[[matched|canonical]]`."""
+    """Wrap every match outside masked regions as `[[matched|canonical]]`.
+
+    Frontmatter, headings are left untouched. A link produced inside a table row has its pipe
+    escaped as `\\|`, because an unescaped `|` splits the cell and shifts every later column.
+    """
     counts: dict[str, int] = {}
 
-    def repl(m: re.Match) -> str:
-        hit = m.group(0)
-        term = owner[hit.casefold()]
-        counts[term.canonical] = counts.get(term.canonical, 0) + 1
-        # A match that already is the canonical needs no pipe.
-        if hit.casefold() == term.canonical.casefold():
-            return f"[[{hit}]]"
-        return f"[[{hit}|{term.canonical}]]"
+    def make_repl(in_table: bool):
+        def repl(m: re.Match) -> str:
+            hit = m.group(0)
+            term = owner[hit.casefold()]
+            counts[term.canonical] = counts.get(term.canonical, 0) + 1
+            # A match that already is the canonical needs no pipe.
+            if hit.casefold() == term.canonical.casefold():
+                return f"[[{hit}]]"
+            sep = "\\|" if in_table else "|"
+            return f"[[{hit}{sep}{term.canonical}]]"
+
+        return repl
+
+    # Frontmatter is opaque: its keys and values are data, not prose.
+    _, head_end = parse_frontmatter(text)
+    head, body = text[:head_end], text[head_end:]
 
     store: list[str] = []
 
@@ -263,15 +284,19 @@ def substitute(text: str, rx: re.Pattern, owner: dict[str, Term]) -> tuple[str, 
         store.append(m.group(0))
         return f"{MULTILINE_MASK}{len(store) - 1}{MULTILINE_MASK}"
 
-    text = MULTILINE.sub(stash, text)
+    body = MULTILINE.sub(stash, body)
 
     out_lines: list[str] = []
-    for line in text.splitlines(keepends=True):
+    for line in body.splitlines(keepends=True):
+        if HEADING.match(line):
+            out_lines.append(line)
+            continue
         masked, store_line = mask(line)
-        masked = rx.sub(repl, masked)
+        in_table = line.lstrip().startswith("|")
+        masked = rx.sub(make_repl(in_table), masked)
         out_lines.append(unmask(masked, store_line))
 
-    out = "".join(out_lines)
+    out = head + "".join(out_lines)
     for index, chunk in enumerate(store):
         out = out.replace(f"{MULTILINE_MASK}{index}{MULTILINE_MASK}", chunk)
     return out, counts
@@ -364,9 +389,25 @@ def link_paths(paths: list[Path], terms: list[Term], *, write: bool) -> Report:
         report.links += found
         report.per_term.update(counts)
         if write and new != original:
-            path.write_text(new, encoding="utf-8")
+            write_atomic(path, new)
             report.written = True
     return report
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Write through a temp file in the same directory, then rename over the target.
+
+    A crash mid-write leaves the previous note intact rather than a truncated one.
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def index_report(lectures: list[Path], terms: list[Term], *, only_used: bool = False) -> str:
