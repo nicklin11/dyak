@@ -468,8 +468,20 @@ def caption_frames(
     reused = 0
     failed = 0
     refused = 0
+    breaker = llm.Breaker()
+    stopped = False
 
     for alignment in report.considered:
+        if stopped:
+            # The endpoint is down; the remaining frames cost a full retry ladder each
+            # (~6 s fast-refusing, 30 min hung) and buy nothing (#124).
+            alignment.caption_status = "STOPPED"
+            alignment.reason = (
+                f"not attempted: {breaker.limit} consecutive connection failures stopped stage 6"
+            )
+            alignment.caption_trace = {"source": "breaker"}
+            failed += 1
+            continue
         source = alignment.enhanced or alignment.image
         path = images / source
         if not path.is_file():
@@ -524,9 +536,16 @@ def caption_frames(
                 "detail": str(exc),
             }
             failed += 1
+            if exc.connection:
+                stopped = breaker.fail()
+            else:
+                # The endpoint answered, it just said no. It is up, so the run of
+                # connection failures is over.
+                breaker.ok()
             continue
 
         text = reply.text.strip()
+        breaker.ok()
         if not text:
             alignment.caption_status = "EMPTY"
             alignment.reason = "vision model returned nothing; empty completions are not retried"
@@ -563,6 +582,11 @@ def caption_frames(
         }
         out.write(f"         {alignment.frame}: {len(text)} chars\n")
 
+    if stopped:
+        out.write(
+            f"         stopped after {breaker.limit} consecutive connection failures; "
+            "the remaining frames were not attempted\n"
+        )
     out.write(
         f"         {len(produced)} captioned, {reused} from cache, {failed} failed, "
         f"{refused} refused\n"

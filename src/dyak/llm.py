@@ -68,6 +68,13 @@ RETRY_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
 RETRY_SLEEP = 2.0
 RETRY_MAX = 3
 
+#: Longest `Retry-After` this client will honour. The header is the endpoint's own opinion of
+#: when to come back; an hour-long hint would hang the run as surely as no breaker at all.
+RETRY_AFTER_CAP = 60.0
+
+#: Consecutive connection-level failures after which one stage stops issuing calls (#124).
+BREAKER_MAX = 3
+
 
 class NotConfiguredError(RuntimeError):
     """No endpoint, or an endpoint with no model id. Raised before any network call."""
@@ -75,6 +82,13 @@ class NotConfiguredError(RuntimeError):
 
 class EndpointError(RuntimeError):
     """The endpoint was reached and refused. Carries the status and the body it sent back."""
+
+    def __init__(self, message: str, *, connection: bool = False) -> None:
+        super().__init__(message)
+        #: True when the call never got a response -- refused, DNS, timeout. A stage breaker
+        #: counts these and not HTTP verdicts: a 400 repeated 58 times is a bad request, a
+        #: refused connection repeated 58 times is a dead endpoint (#124).
+        self.connection = connection
 
 
 @dataclass(frozen=True)
@@ -155,6 +169,10 @@ class Reply:
     #: What the endpoint said it served, or None when it said nothing. Recorded beside `model`
     #: rather than substituted for it; see the module docstring.
     served_model: str | None = None
+    #: Why the model stopped writing: `stop` (natural), `length` (the output cap), or None when
+    #: the endpoint said nothing. Without it a truncated section is indistinguishable from a
+    #: finished one in the transcript and in the note (#124).
+    finish_reason: str | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -164,7 +182,13 @@ class Reply:
             "completion_tokens": self.completion_tokens,
             "seconds": round(self.seconds, 3),
             "attempts": self.attempts,
+            "finish_reason": self.finish_reason,
         }
+
+    @property
+    def truncated(self) -> bool:
+        """True when the endpoint cut the model off at its output cap."""
+        return self.finish_reason == "length"
 
 
 #: Media types a frame may legitimately arrive as. Anything else is refused rather than
@@ -259,10 +283,16 @@ def chat(
             last = EndpointError(f"HTTP {exc.code} from {config.url}: {detail}")
             if exc.code not in RETRY_STATUS:
                 raise last from exc
+            if attempt < RETRY_MAX:
+                # The endpoint's own hint beats this client's ladder: a 429 that says "30 s"
+                # and is retried after 2 s is a request the endpoint has already refused (#124).
+                time.sleep(_retry_after(exc) or RETRY_SLEEP * attempt)
         except urllib.error.URLError as exc:
             # Connection refused, DNS failure, timeout. All transient as far as this code can
             # tell, and all indistinguishable to it -- so they are retried and then reported.
-            last = EndpointError(f"{config.url} unreachable: {exc.reason}")
+            last = EndpointError(f"{config.url} unreachable: {exc.reason}", connection=True)
+            if attempt < RETRY_MAX:
+                time.sleep(RETRY_SLEEP * attempt)
         except TimeoutError as exc:
             # **Not** a URLError, and this killed run 10. `urlopen` wraps connection failures
             # in URLError, but a timeout while the endpoint is still sending *headers* is
@@ -272,14 +302,37 @@ def chat(
             # The symptom was a Python traceback and a dead run, not exit 3. An endpoint that
             # is installed and hanging is exactly what exit 3 means, so the contract the README
             # states was broken by the one failure mode nobody writes a mock for.
-            last = EndpointError(f"{config.url} timed out after {config.timeout:g}s: {exc}")
+            last = EndpointError(
+                f"{config.url} timed out after {config.timeout:g}s: {exc}", connection=True
+            )
+            if attempt < RETRY_MAX:
+                time.sleep(RETRY_SLEEP * attempt)
         except json.JSONDecodeError as exc:
             # A body that is not JSON is a proxy or an error page, not a refusal. Retrying
             # cannot help and retrying a 500-shaped HTML page three times is worse.
             raise EndpointError(f"{config.url} returned non-JSON: {exc}") from exc
-        if attempt < RETRY_MAX:
-            time.sleep(RETRY_SLEEP * attempt)
     raise last if last else EndpointError("no attempt was made")
+
+
+def _retry_after(exc: urllib.error.HTTPError) -> float | None:
+    """The endpoint's own `Retry-After`, in seconds, or None when it gave none.
+
+    Only the delta-seconds form is honoured. The HTTP-date form needs the endpoint and this
+    host to agree on a clock, and a skewed `Date` header would turn a 30 s hint into a
+    multi-hour sleep; the static ladder is the safer answer to a form this client cannot
+    verify. Capped at `RETRY_AFTER_CAP` for the same reason.
+    """
+    headers = getattr(exc, "headers", None)
+    raw = headers.get("Retry-After") if headers else None
+    if not raw:
+        return None
+    try:
+        seconds = float(str(raw).strip())
+    except ValueError:
+        return None
+    if seconds < 0:
+        return None
+    return min(seconds, RETRY_AFTER_CAP)
 
 
 def _body(exc: urllib.error.HTTPError) -> str:
@@ -299,6 +352,7 @@ def _to_reply(data: dict, model: str, seconds: float, attempts: int) -> Reply:
         ) from exc
     usage = data.get("usage") or {}
     echoed = data.get("model")
+    reason = choice.get("finish_reason") if isinstance(choice, dict) else None
     return Reply(
         text=text.strip(),
         # The requested id, not the reported one. A gateway that routes by provider prefix
@@ -313,6 +367,7 @@ def _to_reply(data: dict, model: str, seconds: float, attempts: int) -> Reply:
         completion_tokens=usage.get("completion_tokens"),
         seconds=seconds,
         attempts=attempts,
+        finish_reason=str(reason) if reason else None,
     )
 
 
@@ -344,3 +399,31 @@ class Transcript:
         target.write_text(
             json.dumps(self.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
+
+
+class Breaker:
+    """Counts consecutive connection-level failures so one stage can stop early (#124).
+
+    The retry ladder is per-call on purpose: a single call should survive a blip. That makes
+    58 identical refusals 58 full ladders -- about 5.8 min of sleeping against a fast-refusing
+    endpoint before "0 captioned", and 30 min per call against a hung one. So the count is
+    per-stage, and only connection-level failures count: a 400 repeated is a bad request, a
+    refused connection repeated is a dead endpoint. Any answer at all resets it.
+    """
+
+    def __init__(self, limit: int = BREAKER_MAX) -> None:
+        self.limit = limit
+        self.consecutive = 0
+
+    def ok(self) -> None:
+        """A call that came back at all, even a refusal the endpoint had an opinion about."""
+        self.consecutive = 0
+
+    def fail(self) -> bool:
+        """Record a connection-level failure. True once the stage must stop calling."""
+        self.consecutive += 1
+        return self.consecutive >= self.limit
+
+    @property
+    def tripped(self) -> bool:
+        return self.consecutive >= self.limit

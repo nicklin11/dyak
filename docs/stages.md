@@ -28,8 +28,12 @@ constants, not provenance.
 | 5–12 | `*-provenance.json` | the tool, its rule set, and what it changed |
 | 6 | per-frame `caption_trace` in `captions.json` | which model captioned this frame, tokens, timing, called or cached |
 | 6 | `caption_status` per frame | `NO_NEW_INFORMATION` says the model declined; it is a success, not an error, and a high share means the screens went unread |
-| 7, 9 | `synth-`/`audit-llm-transcript.json` | every call: full messages, model, tokens, seconds, attempts |
+| 7, 9 | `synth-`/`audit-llm-transcript.json` | every call: full messages, model, tokens, seconds, attempts, `finish_reason` |
 | 1-12 | `timings.json` | wall clock per stage and the total. Written after stage 12, not registered as an artefact |
+
+`finish_reason` is why the model stopped. `length` means the endpoint's output cap cut it off:
+the section is real but incomplete, and stage 7 marks it degraded instead of letting a
+truncated derivation pass lint and audit as finished content (#124).
 
 The three LLM stages keep different amounts on purpose. Stages 7 and 9 make 8 calls each and
 store the whole `messages` array — ~190 KiB per call for stage 9, which needs the section text
@@ -98,6 +102,7 @@ The old code wrote `caption_status: NOT_CONFIGURED` into the artefact and exited
 | Endpoint configured but refusing | per-frame `ERROR` with the endpoint's message |
 | Every frame failed | exit 3, `DEPENDENCY_FAILED`, with the per-frame reasons |
 | Caption returned but empty | `EMPTY`, counted as a failure |
+| Endpoint not answering at all | after 3 consecutive connection failures the stage stops calling; the frames it never reached are `STOPPED`, not 55 more retry ladders (#124) |
 
 The first row follows the contract stage 7 already has: `TemplateSynthesizer` exists so the
 pipeline runs end to end with no model configured, and stage 6 must not be the stage that
