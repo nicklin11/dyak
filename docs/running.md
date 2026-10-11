@@ -30,7 +30,7 @@ Real per-layer precedence across all fields is ADR-0002 territory and tracked in
 | `DYAK_VLM_ENDPOINT` | `llm.py` | stage 6 frame captioning; unset falls back to `DYAK_LLM_ENDPOINT` |
 | `DYAK_VLM_MODEL` | `llm.py` | as above, falls back to `DYAK_LLM_MODEL` |
 | `DYAK_VLM_KEY` | `llm.py` | as above, falls back to `DYAK_LLM_KEY` |
-| `DYAK_VAULT` | `deps.py` | the Obsidian vault the note is exported into |
+| `DYAK_VAULT` | `deps.py` | the notes directory the note is exported into (any folder; Obsidian is recommended) |
 | `DYAK_SETTINGS` | `deps.py` | the settings *file*, overriding the XDG path |
 | `DYAK_TERMS_DIR` | `link.py` | atomic term notes for stage 11; default `<vault>/mscs/_terms` |
 | `DYAK_OUTPUT_DIR` | `bundle.py` | where the bundle goes; default `$XDG_STATE_HOME/dyak/<lecture>`, or `./output/<lecture>` when `XDG_STATE_HOME` is unset |

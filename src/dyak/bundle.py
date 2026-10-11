@@ -289,8 +289,8 @@ class Bundle:
 
         `subdir` is not decoration. A lecture bundle is ~138 artefacts, 23 of which land in
         the bundle root and 115 in `images/`, so exporting with `subdir=None` scatters ~138
-        files into the vault root -- which for an Obsidian vault is the directory holding the
-        user's own notes. The CLI therefore always passes a subdir; this default is the
+        files into the vault root -- which is the directory holding the user's own notes. The
+        CLI therefore always passes a subdir; this default is the
         fallback for direct callers, and it is a directory of its own for the same reason.
 
         `images` defaults to **False**, and the frames are 84% of the bytes. Measured on
@@ -298,8 +298,8 @@ class Bundle:
         9.5 MiB everything else. And the note refers to no frame at all -- zero `![[...]]`
         embeds, zero frame filenames, only time ranges like `### Фрагмент 1 (0–414 с)`.
 
-        So by default the export was copying 50 MiB per lecture into a directory that
-        Obsidian indexes and that obsidian-git synchronises, for files nothing reads. The
+        So by default the export was copying 50 MiB per lecture into the notes directory,
+        which an indexer or a sync tool would pick up, for files nothing reads. The
         frames are the pipeline's evidence and they stay in the bundle, which is where the
         audit and a later re-run both look for them. `--vault-images` copies them too, for
         someone who wants the frames beside the note.
