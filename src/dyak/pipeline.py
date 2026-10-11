@@ -201,8 +201,8 @@ def publishes_stage7_transcript(sdir: Path, bundle: Bundle) -> dict[str, Path]:
     """Publish stage 7's artefacts out of its work directory, into the bundle.
 
     `synth-llm-transcript.json` is conditional on the LLM synthesizer having run -- the
-    template one makes no calls and writes no transcript -- so the guard is `.is_file()`,
-    the same shape stage 9 uses for its equivalent.
+    template one makes no calls and writes no transcript -- so it is published with
+    `publish_optional`, which says so in the call rather than in a stat beside it.
 
     The transcript used to be missing from this list entirely. `synth.py` has written it
     since #38, into `work.dir("synth")`, and the list named three files, so the 8 calls that
@@ -213,9 +213,11 @@ def publishes_stage7_transcript(sdir: Path, bundle: Bundle) -> dict[str, Path]:
     caller record it in the run's artefact registry.
     """
     artefacts = {extra: bundle.publish(extra, sdir / extra) for extra in synth.STAGE7_ARTEFACTS}
-    transcript = sdir / synth.LLM_TRANSCRIPT_NAME
-    if transcript.is_file():
-        artefacts[synth.LLM_TRANSCRIPT_NAME] = bundle.publish(synth.LLM_TRANSCRIPT_NAME, transcript)
+    transcript = bundle.publish_optional(
+        synth.LLM_TRANSCRIPT_NAME, sdir / synth.LLM_TRANSCRIPT_NAME
+    )
+    if transcript is not None:
+        artefacts[synth.LLM_TRANSCRIPT_NAME] = transcript
     return artefacts
 
 
@@ -339,9 +341,9 @@ def run(
     # frame size". The unit tests could not see it because the stubbed pipeline never
     # moves anything -- only the end-to-end run did.
     for extra in ("detect.json",):
-        candidate = frames_dir / extra
-        if candidate.is_file():
-            artefacts[extra] = bundle.publish(extra, candidate)
+        published = bundle.publish_optional(extra, frames_dir / extra)
+        if published is not None:
+            artefacts[extra] = published
 
     # --- stage 5: quality -----------------------------------------------------
     # ADR-0001 D4. Runs on the frames stage 4 produced, not on the source, so the gate judges
@@ -401,9 +403,10 @@ def run(
     # stage 6 reads it. `align` treats a missing file as "no gate information", which makes
     # the guard `if alignment.quality_gate and ...` vacuously false -- stage 5's gate became a
     # no-op in the real pipeline, and all 58 frames were captioned including the one stage 5
-    # rejected. `publish` returns the source path unchanged when it does not exist rather than
-    # raising, so no run ever reported it. The signature in the artefact was `quality_gate: ""`
-    # on all 58 frames where stage 5 had recorded one FAIL. #82.
+    # rejected. `publish` used to return the source path unchanged when it did not exist
+    # rather than raising, so no run ever reported it. It raises now (#89), which is why the
+    # bundle's copies are the only ones this stage is handed. The signature in the artefact
+    # was `quality_gate: ""` on all 58 frames where stage 5 had recorded one FAIL. #82.
     began = time.monotonic()
     capdir = work.dir("caption")
     creport, coutcome = caption.run(
@@ -484,8 +487,9 @@ def run(
         stream=out,
     )
     for extra in audit.ALL_ARTEFACTS:
-        if (adir / extra).is_file():
-            artefacts[f"audit/{extra}"] = bundle.publish(f"audit/{extra}", adir / extra)
+        published = bundle.publish_optional(f"audit/{extra}", adir / extra)
+        if published is not None:
+            artefacts[f"audit/{extra}"] = published
     reports.append(StageReport(9, "audit", time.monotonic() - began, areport.summary()))
     out.write(reports[-1].line() + "\n")
 
@@ -525,8 +529,9 @@ def run(
         stream=out,
     )
     for extra in link.ALL_ARTEFACTS:
-        if (ldir2 / extra).is_file():
-            artefacts[f"link/{extra}"] = bundle.publish(f"link/{extra}", ldir2 / extra)
+        published = bundle.publish_optional(f"link/{extra}", ldir2 / extra)
+        if published is not None:
+            artefacts[f"link/{extra}"] = published
     reports.append(StageReport(11, "link", time.monotonic() - began, lreport2.summary()))
     out.write(reports[-1].line() + "\n")
     note_artefact = ldir2 / link.LINKED_NOTE
