@@ -92,6 +92,20 @@ jobs:
       - name: Doctor suite
         run: python tests/test_doctor.py
 
+      # The only step that leaves this process. Every other suite replaces functions in
+      # place -- `runner.run`, `urlopen`, `llm.chat` -- which is exactly why the bugs
+      # this one exists for were found by a human doing a real run and by nothing here:
+      # a stage that reads a work-dir path it already published (#89), a frame directory
+      # cleared after the stage that reads it, a caption cache wired to the scratch dir
+      # instead of the bundle (#121). This runs `dyak process` as a subprocess with
+      # `DYAK_*` scrubbed, against three loopback `http.server` fakes (whisper.cpp, the
+      # vision model, the text model, each on its own port so a request reaching the
+      # wrong endpoint fails a check) and an 8-second fixture generated with ffmpeg, then
+      # asserts the exit code and the bundle on disk. No network, no key, no host state.
+      # It skips cleanly when ffmpeg is absent, so the no-ffmpeg guarantee above holds.
+      - name: End-to-end run (#122)
+        run: python tests/test_e2e.py
+
 # Branch protection is a repository setting and cannot be set from a workflow file.
 # Until "Require status checks to pass" names `check` on main, this workflow reports
 # but does not gate -- and a red build on a PR is advisory rather than blocking.
