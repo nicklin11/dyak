@@ -1488,7 +1488,9 @@ dyc.run_all = isolated_run_all
 before = len(list(work_root.glob("dyak-*")))
 out, err = io.StringIO(), io.StringIO()
 with redirect_stdout(out), redirect_stderr(err):
-    rc = dyc.main(["process", str(src), "--keep-workdir", "--output-dir", str(outdir)])
+    # `--no-llm`: a dead endpoint is fatal without it (#126). This section tests the vault
+    # and degraded-run behaviour, so it opts in to the template path explicitly.
+    rc = dyc.main(["process", str(src), "--keep-workdir", "--output-dir", str(outdir), "--no-llm"])
 after = len(list(work_root.glob("dyak-*")))
 check(
     # A dead model endpoint costs the synthesis stages, not the run. It must not turn a
