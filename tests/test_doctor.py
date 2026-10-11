@@ -372,6 +372,44 @@ check(
     f"size while running={size_while_running}B, after SIGKILL={len(landed)}B",
 )
 
+# --- settings file is TOML: comments, quotes and escapes mean what TOML says ---
+# Issue #129: a flat line scanner read `vault = "/x"  # note` as the value
+# `/x"  # note`, and wrote paths unescaped. Both halves are pinned here.
+settings_file = tmp / "toml-settings.toml"
+os.environ[dyd.SETTINGS_PATH_ENV] = str(settings_file)
+settings_file.write_text('vault = "/home/u/notes"  # my vault\n', encoding="utf-8")
+check(
+    "a trailing comment after a quoted value is not part of the value",
+    dyd.read_settings().get("vault") == "/home/u/notes",
+    repr(dyd.read_settings()),
+)
+
+tricky = '/home/u/"quoted" \\ back\ttab/notes'
+written = dyd.write_settings(Path(tricky))
+check(
+    "a path with quotes, backslashes and tabs round-trips through write -> read",
+    dyd.read_settings().get("vault") == tricky,
+    repr(dyd.read_settings().get("vault")),
+)
+check("write_settings returns the file it wrote", written == settings_file)
+
+settings_file.write_text('vault = "/ok"\nvault = = broken\n', encoding="utf-8")
+err_buf = io.StringIO()
+with redirect_stderr(err_buf):
+    malformed = dyd.read_settings()
+check(
+    "malformed settings yield nothing and name the file on stderr",
+    malformed == {} and str(settings_file) in err_buf.getvalue(),
+    f"read={malformed!r} stderr={err_buf.getvalue()!r}",
+)
+
+settings_file.write_text("vault = 42\nother = \"x\"\n", encoding="utf-8")
+check(
+    "non-string values are dropped, not stringified",
+    dyd.read_settings() == {"other": "x"},
+    repr(dyd.read_settings()),
+)
+
 _env.restore(SAVED_ENV)
 
 print()
