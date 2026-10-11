@@ -20,7 +20,9 @@ import os
 import shutil
 import sys
 import time
+import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import (
@@ -165,6 +167,76 @@ def write_timings(bundle: Bundle, reports: list[StageReport]) -> Path:
     return target
 
 
+#: The run's own state, written in a `finally` so it exists on runs that did *not* finish.
+#:
+#: Without it an interrupted run leaves a bundle holding `note.md`, `captions.json`,
+#: `quality.json` and `lint.json` -- everything stage 7 had published -- and no `report.json`
+#: and no `timings.json`, because both were written at the end. To a reader opening the
+#: directory that is a successful run whose verification artefacts happen to be missing. The
+#: pipeline could not tell its own incomplete bundle from a complete one, and neither could
+#: anyone else (#92).
+#:
+#: `timings.json` is written from the same place, for the same reason: it existed only on runs
+#: that completed, which are exactly the runs that were not slow and not broken (#92).
+#:
+#: A sidecar like `timings.json`, and unregistered for the same reason: it records the run
+#: rather than being a product of a stage, and it is written after stage 12 has already
+#: verified the artefacts. It is in `bundle.RUN_ARTEFACTS`, so a later run clears it.
+RUN_STATE_NAME = "run-state.json"
+
+
+def run_id_of(source: Path, started_at: str) -> str:
+    """A name for one run. Unique per invocation, and readable enough to quote in a bug report."""
+    return f"{started_at}-{uuid.uuid4().hex[:8]}-{Path(source).stem[:24]}"
+
+
+def write_run_state(
+    bundle: Bundle,
+    *,
+    source: Path,
+    run_id: str,
+    started_at: str,
+    reports: list[StageReport],
+    outcome: str,
+    detail: str,
+) -> Path:
+    """The run's identity and outcome, into the bundle. Best effort, like `write_timings`.
+
+    `stage_reached` is the stage that was *running* when the run ended, not the last one that
+    finished: `reports` holds completed stages, so on an interrupt during stage 9 the last
+    entry is stage 8 and the run reached 9. Recording only `stages_completed` would read as
+    "the run stopped after 8", which is true but not the useful half.
+    """
+    target = bundle.root / RUN_STATE_NAME
+    completed = [r.index for r in reports]
+    try:
+        target.write_text(
+            json.dumps(
+                {
+                    "tool": "dyak-run-state-v1",
+                    "run_id": run_id,
+                    "started_at": started_at,
+                    "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                    "outcome": outcome,
+                    "detail": detail,
+                    "stages_completed": completed,
+                    "stage_reached": min(
+                        (completed[-1] + 1) if completed else 1, stages.IMPLEMENTED
+                    ),
+                    "stages_implemented": stages.IMPLEMENTED,
+                    "source": str(source),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+    return target
+
+
 def _interval(lo: float, hi: float) -> str:
     """One unit for the whole interval.
 
@@ -232,7 +304,7 @@ def run(
     terms_dir: str | Path | None = None,
     vault_path: str | Path | None = None,
 ) -> RunResult:
-    """Stages 1-4 on `source`.
+    """Stages 1-12 on `source`, with the run's own state recorded either way.
 
     Intermediate artefacts land in `work`, which is scratch and is removed on success.
     Anything worth keeping is published into `bundle` as it is produced, so deleting the
@@ -242,11 +314,69 @@ def run(
     Raises runner.DependencyError for a missing or failed dependency, and
     runner.DependencyError with code 1 for an input the pipeline cannot use.
     Both are reported by the caller, which owns exit codes and rendering.
+
+    The run's identity and outcome go into `RUN_STATE_NAME` from a `finally`, and so do the
+    per-stage seconds. Before #92 both were written only on the last line of a successful
+    run, which meant a bundle left by an interrupt held everything stage 7 had published and
+    nothing saying the run had not finished -- indistinguishable, to a reader, from a
+    complete run whose verification artefacts happened to be missing.
     """
     out = stream if stream is not None else sys.stdout
     bundle = bundle if bundle is not None else Bundle.open(source, overwrite=False)
     reports: list[StageReport] = []
+    started_at = datetime.now(UTC).isoformat(timespec="seconds")
+    run_id = run_id_of(source, started_at)
+    outcome, detail = "failed", "the run ended without recording an outcome"
+    try:
+        result = _stages(
+            source,
+            work,
+            out=out,
+            bundle=bundle,
+            reports=reports,
+            note_title=note_title,
+            glossary_path=glossary_path,
+            terms_dir=terms_dir,
+            vault_path=vault_path,
+        )
+    except KeyboardInterrupt as exc:
+        # Ctrl-C is not a failure of the pipeline, and the exit code says so (130). The
+        # bundle still has to say the run stopped, or the next reader cannot tell.
+        outcome, detail = "interrupted", type(exc).__name__
+        raise
+    except BaseException as exc:
+        # Every other exception, recorded and re-raised unchanged: the caller owns exit codes.
+        outcome, detail = "failed", type(exc).__name__
+        raise
+    else:
+        outcome, detail = "completed", ""
+        return result
+    finally:
+        write_timings(bundle, reports)
+        write_run_state(
+            bundle,
+            source=Path(source),
+            run_id=run_id,
+            started_at=started_at,
+            reports=reports,
+            outcome=outcome,
+            detail=detail,
+        )
 
+
+def _stages(
+    source: Path,
+    work: WorkDir,
+    *,
+    out,
+    bundle: Bundle,
+    reports: list[StageReport],
+    note_title: str | None = None,
+    glossary_path: str | None = None,
+    terms_dir: str | Path | None = None,
+    vault_path: str | Path | None = None,
+) -> RunResult:
+    """The stages. `run` owns the run state; this owns the work."""
     # Before anything is written. `Bundle.open` only removes the root when `overwrite=True`,
     # so without this a run merges into the previous run's bundle: measured mid-run on
     # lecture 1, 12 files from the last run sat beside the 17 this one had written, two of
@@ -562,8 +692,6 @@ def run(
     # lines it exists to justify. A second line would repeat the stage and carry the same
     # seconds. Stage 12 is therefore the one stage whose seconds reach `timings.json` and not
     # the terminal -- it takes under 0.1 s, and `report.json` carries its verdict. #97.
-
-    write_timings(bundle, reports)
 
     return RunResult(
         source=Path(source),

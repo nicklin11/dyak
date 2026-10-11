@@ -380,6 +380,37 @@ input is the thing to report first.
 All three are read back from `synth.json` rather than recomputed. Stage 12 measures; a second
 implementation of stage 7's arithmetic here would be a second thing to keep true.
 
+### Amendment 2026-10-11 — the bundle records its own run (#92)
+
+D9 makes the bundle the artefact root, and the exit code is the project's headline promise.
+Both were claims about a run that the run did not record.
+
+`write_timings` was the last statement before `return RunResult(...)`, so `timings.json`
+existed only on runs that completed — exactly the runs that were not slow and not broken. And
+nothing in the bundle marked run state at all. Stage 7 publishes `note.md` into the bundle, so
+an interrupt during stage 9 left a directory holding `note.md`, `captions.json`,
+`quality.json` and `lint.json`, with no `report.json`, no `timings.json`, and nothing saying
+the run had stopped. To a reader that is a successful run whose verification artefacts happen
+to be missing. The pipeline could not tell its own incomplete bundle from a complete one, and
+neither could anyone else.
+
+The decision is that a run writes `run-state.json` — a run id, `started_at`/`finished_at`, the
+stages completed, the stage reached, and `completed` / `interrupted` / `failed` with the
+exception type — and that it does so from a `finally`, together with the timings. `run` is now
+a thin wrapper around the stages for this reason and no other: the state has to be written on
+the paths that do not return.
+
+Two details are deliberate. `stage_reached` is the stage that was *running*, not the last one
+that finished, because "the run stopped after 8" is true but not the useful half. And the file
+is a sidecar, unregistered like `timings.json`: it records the run rather than being a product
+of a stage, and it is written after stage 12 has already verified the artefacts. It is in
+`RUN_ARTEFACTS` so the next run clears it — a stale `completed` beside a fresh bundle is the
+one file a reader would mistake for this run's.
+
+This closes the "nothing says when the run happened" half of #88 as well. The other half —
+that three of the eight `REQUIRED` entries resolve through a filesystem fallback rather than
+the registry — is not addressed here.
+
 ## Amendment 2026-10-02 — stages 0-3 shipped, and two corrections
 
 Recorded because the decision text above described a pipeline whose stage 3 was

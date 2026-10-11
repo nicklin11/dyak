@@ -30,6 +30,7 @@ constants, not provenance.
 | 6 | `caption_status` per frame | `NO_NEW_INFORMATION` says the model declined; it is a success, not an error, and a high share means the screens went unread |
 | 7, 9 | `synth-`/`audit-llm-transcript.json` | every call: full messages, model, tokens, seconds, attempts, `finish_reason` |
 | 1-12 | `timings.json` | wall clock per stage and the total. Written after stage 12, not registered as an artefact |
+| 1-12 | `run-state.json` | the run id, `started_at`/`finished_at`, the stage reached, and `completed`/`interrupted`/`failed`. Written in a `finally`, so an interrupted run's bundle says so (#92) |
 
 `finish_reason` is why the model stopped. `length` means the endpoint's output cap cut it off:
 the section is real but incomplete, and stage 7 marks it degraded instead of letting a

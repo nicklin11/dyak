@@ -27,6 +27,14 @@ Produced by run 13, `1_lecture_OCS.mp4` (4520 s): 30 entries in the root, 58 fra
 | `note.linked.md` | stage 11 `link` | the note after linking |
 | `report.json` | stage 12 `report` | what stage 12 verified, and what it did not find |
 | `timings.json` | `pipeline` | wall clock per stage and the total; written after stage 12, not a registered artefact |
+| `run-state.json` | `pipeline` | the run's id, `started_at`/`finished_at`, the stage reached, and whether the run **completed**, was **interrupted**, or **failed**; written in a `finally`, so it exists on the runs that did not finish |
+
+`timings.json` and `run-state.json` are the two sidecars written by `pipeline.run` itself
+rather than by a stage. Both are written from the same `finally`, so a run that raised still
+has its per-stage seconds and still says how it ended (#92). Neither is registered through
+`Bundle.record`, so neither travels to the vault; both are in `bundle.RUN_ARTEFACTS`, so the
+next run clears them. A stale `outcome: completed` left beside a fresh bundle is exactly the
+file a reader would mistake for this run's.
 
 `note.synth.md` does not exist: `Bundle.publish` names published files by their source
 basename, and stage 7 publishes `note.md` plus `synth.json`.
