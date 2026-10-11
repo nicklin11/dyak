@@ -11,6 +11,7 @@ information a user needs: whether to install something or fix something.
 
 from __future__ import annotations
 
+import difflib
 import os
 import shutil
 import subprocess
@@ -36,6 +37,13 @@ SETTINGS_KEY = "vault"
 #: Written by `write_settings`, read by `resolve_vault`. One key, one file.
 SETTINGS_TEMPLATE = "# dyak settings. Written on first run; edit by hand.\n"
 
+#: The settings keys the tool honours. ONE place, and it is a claim about the code: the key a
+#: reader consults and the key named here must be the same, or `read_settings` warns about a
+#: key the tool actually uses (or stays silent about one it does not). `tests/test_deps.py`
+#: derives the keys the source reads and fails if the two sets drift (#156).
+#: `vault` is the only key today; #52 grows this set rather than replacing it.
+HONOURED_SETTINGS: frozenset[str] = frozenset({SETTINGS_KEY})
+
 
 def settings_path() -> Path:
     """The settings file: `$DYAK_SETTINGS` if set, else `$XDG_CONFIG_HOME/dyak/settings.toml`.
@@ -54,6 +62,119 @@ def settings_path() -> Path:
     return base / "dyak" / "settings.toml"
 
 
+def _parse_settings(path: Path) -> dict[str, object] | None:
+    """The settings file parsed as TOML; `None` when it is unreadable or malformed.
+
+    Never raises, and reports both unreadable states to stderr itself with the path: a typo
+    in a config file must not take the pipeline down at stage 0, and must not be read as a
+    garbage value either. `None` is deliberately distinct from `{}` so `check_settings` can
+    tell "the file is empty" from "the file could not be parsed" -- the message has already
+    gone to stderr, but `doctor` should not report a file it could not read as empty.
+
+    The parse error is reported once per file per process. `read_settings` runs several times
+    in one invocation -- stage 0's `check_vault`, `process`'s export and stage 11's terms
+    lookup all resolve the vault -- and the same error repeated three times reads as three
+    problems. A CLI invocation cannot edit the file mid-run, so a process-lifetime memo is
+    the same lifetime as the fact.
+    """
+    if not path.is_file():
+        return {}
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        _report_once(path, f"cannot read settings {path}: {exc}")
+        return None
+    except tomllib.TOMLDecodeError as exc:
+        _report_once(path, f"ignoring malformed settings {path}: {exc}")
+        return None
+
+
+#: Settings files whose parse failure has already been reported in this process (#156).
+_REPORTED_SETTINGS: set[str] = set()
+
+
+def _report_once(path: Path, message: str) -> None:
+    """Print `dyak: {message}` on stderr the first time this file's failure is seen."""
+    key = str(path)
+    if key in _REPORTED_SETTINGS:
+        return
+    _REPORTED_SETTINGS.add(key)
+    print(f"dyak: {message}", file=sys.stderr)
+
+
+def _toml_type(value: object) -> str:
+    """The TOML type of a parsed value, named for a diagnostic (#156)."""
+    # bool before int: `isinstance(True, int)` is True, and "a boolean" is the useful word.
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, int):
+        return "a number"
+    if isinstance(value, float):
+        return "a number"
+    if isinstance(value, list):
+        return "an array"
+    if isinstance(value, dict):
+        return "a table"
+    return f"a {type(value).__name__}"
+
+
+#: How close a key must be to an honoured one to be reported as a likely typo rather than as
+#: plain inert. 0.6 is what catches `vault_path` (0.67) without matching unrelated keys.
+_TYPO_CUTOFF = 0.6
+
+
+def settings_warnings(path: Path, data: dict[str, object]) -> list[str]:
+    """One line per key in `data` that `read_settings` will not honour (#156).
+
+    Three silent behaviours, all of them the same defect -- a hand-edited file with no
+    feedback loop:
+
+      * a key no setting reads (`stt = "whispercpp"` is inert and said nothing);
+      * a value dropped for not being a string (`stt = 1` vanished, not even ignored aloud);
+      * a typo'd key, which is indistinguishable from "not configured" (`vault_path` fell
+        back to the default vault, and the only evidence was a path in the output).
+
+    Pure: `report_settings` prints these, so the acceptance criterion "a correct file
+    produces no warning" is a property of this function rather than of whichever caller
+    happens to run it. A key whose value is not a string is reported for its type first:
+    that is the more specific defect, and one line per key is enough.
+    """
+    lines: list[str] = []
+    known = ", ".join(sorted(HONOURED_SETTINGS))
+    for key, value in data.items():
+        if not isinstance(value, str):
+            lines.append(f"settings: {path}: '{key}' is {_toml_type(value)}, not a string; ignored")
+            continue
+        if key in HONOURED_SETTINGS:
+            continue
+        near = difflib.get_close_matches(key, HONOURED_SETTINGS, n=1, cutoff=_TYPO_CUTOFF)
+        if near:
+            lines.append(f"settings: {path}: '{key}' is not a setting; did you mean '{near[0]}'?")
+        else:
+            lines.append(
+                f"settings: {path}: '{key}' is not a setting; nothing reads it "
+                f"(known keys: {known})"
+            )
+    return lines
+
+
+def report_settings() -> None:
+    """Print what the settings file holds that will not be honoured. Silent when it is clean.
+
+    Called once per invocation from `cli.main`, not from `read_settings`: `resolve_vault` is
+    consulted by stage 0, by `process` and by stage 11's terms lookup, so a warning emitted
+    by the reader would repeat three times in one run. One warning per key per run is
+    feedback; three is noise. Unreadable and malformed files are reported by
+    `_parse_settings`, which `read_settings` also calls, so this adds nothing for them.
+    """
+    path = settings_path()
+    data = _parse_settings(path)
+    if data is None:
+        return
+    for line in settings_warnings(path, data):
+        print(f"dyak: {line}", file=sys.stderr)
+
+
 def read_settings() -> dict[str, str]:
     """Top-level `key = "value"` string pairs from the settings file. Never raises.
 
@@ -62,19 +183,17 @@ def read_settings() -> dict[str, str]:
     is reported once to stderr with its path and yields nothing: a typo in a config file must
     not take the pipeline down at stage 0, and must not be read as a garbage value either.
     Non-string values are dropped rather than stringified.
+
+    Keys no setting reads, values dropped for not being a string and likely typos are named
+    on stderr by `report_settings` (#156). They are not reported here: this function is the
+    reader, it runs several times per invocation, and the report belongs to the command, not
+    to each read.
     """
-    path = settings_path()
-    if not path.is_file():
-        return {}
-    try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError) as exc:
-        print(f"dyak: cannot read settings {path}: {exc}", file=sys.stderr)
-        return {}
-    except tomllib.TOMLDecodeError as exc:
-        print(f"dyak: ignoring malformed settings {path}: {exc}", file=sys.stderr)
-        return {}
-    return {key: value for key, value in data.items() if isinstance(value, str)}
+    return {
+        key: value
+        for key, value in (_parse_settings(settings_path()) or {}).items()
+        if isinstance(value, str)
+    }
 
 
 def _toml_string(value: str) -> str:
@@ -326,6 +445,39 @@ def check_vault() -> Check:
     )
 
 
+def check_settings() -> Check:
+    """The settings file as `doctor` reports it: where it is, and what it did with its keys.
+
+    #156: `read_settings` had no feedback loop, so a key that no setting reads was
+    indistinguishable from no config at all, and a typo in the one key that does work was
+    indistinguishable from "not configured". This is the always-on half of the report --
+    `doctor` prints it whether or not anything is wrong -- while `report_settings` warns only
+    when there is something to warn about.
+
+    Non-fatal and always `ok`. An unhonoured key is a fact to report, not a missing
+    dependency, and a warning must not move an exit code (ADR-0001 D4): `worst_code` reads
+    `Check.failed`, which needs `not ok and fatal`.
+    """
+    path = settings_path()
+    if not path.is_file():
+        return Check(name="settings", ok=True, fatal=False, detail="absent", path=str(path))
+    data = _parse_settings(path)
+    if data is None:
+        return Check(
+            name="settings",
+            ok=True,
+            fatal=False,
+            detail="present, but unreadable or malformed (reported on stderr)",
+            path=str(path),
+        )
+    honoured = sorted(k for k, v in data.items() if isinstance(v, str) and k in HONOURED_SETTINGS)
+    ignored = sorted(k for k in data if k not in honoured)
+    detail = f"present — honoured: {', '.join(honoured) or 'none'}"
+    if ignored:
+        detail += f"; ignored: {', '.join(ignored)}"
+    return Check(name="settings", ok=True, fatal=False, detail=detail, path=str(path))
+
+
 def check_numpy() -> Check:
     """Stage 5's array backend. A declared dependency, so absence is a packaging fault."""
     try:
@@ -419,6 +571,7 @@ def run_all(*, required: frozenset[str] | None = None) -> list[Check]:
         check_stt(),
         check_llm(),
         check_vault(),
+        check_settings(),
     ]
     if required is None:
         return checks
