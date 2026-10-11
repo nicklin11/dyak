@@ -321,6 +321,7 @@ one that is loud:
 | 4 | quality gate failed — note written, audit report says why |
 | 5 | audit found errors above threshold; note written and **flagged** |
 | 6 | required artefacts could not be verified on disk (ADR-0001 D3) |
+| 7 | model-written note is incomplete or degraded; review its warnings |
 | 130 | interrupted (128 + SIGINT); work dir kept |
 
 An uncaught internal error — a bug in dyak — has no row on purpose: it

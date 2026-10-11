@@ -5970,6 +5970,53 @@ check(
     str(dyq.Report(frames=[white, good_frame]).failed_fatal),
 )
 
+
+# Degradation has two distinct user-facing meanings: an incomplete model note, and
+# a template skeleton that never had a model behind it.
+def _run_degraded_note(synthesizer: str) -> tuple[int, str]:
+    def degraded_pipeline(source, work, **kw):
+        result = fake_pipeline(source, work, **kw)
+        result.note = SimpleNamespace(
+            degraded=True,
+            synthesizer=synthesizer,
+            notes=["section 4 was not filled"],
+        )
+        return result
+
+    saved_pipeline = dyp.run
+    dyp.run = degraded_pipeline
+    output = io.StringIO()
+    with redirect_stdout(output), redirect_stderr(output):
+        rc = dyc.main(["process", str(src), "--no-vault-export"])
+    dyp.run = saved_pipeline
+    return rc, output.getvalue()
+
+
+llm_degraded_rc, llm_degraded_output = _run_degraded_note("llm")
+check(
+    "an incomplete LLM note does not claim no model wrote it (#109)",
+    "not by a model" not in llm_degraded_output and "DYAK_LLM_ENDPOINT" not in llm_degraded_output,
+    llm_degraded_output,
+)
+check(
+    "an incomplete LLM note reports its degradation and has its own exit code (#109)",
+    "section 4 was not filled" in llm_degraded_output and llm_degraded_rc == ec.INCOMPLETE_NOTE,
+    f"rc={llm_degraded_rc}\n{llm_degraded_output}",
+)
+
+template_degraded_rc, template_degraded_output = _run_degraded_note("template")
+check(
+    "a template note clearly says it was not written by a model (#109)",
+    "not by a model" in template_degraded_output
+    and "DYAK_LLM_ENDPOINT" in template_degraded_output,
+    template_degraded_output,
+)
+check(
+    "a template note keeps its explicit opt-in exit code (#109)",
+    template_degraded_rc == ec.USAGE,
+    f"rc={template_degraded_rc}\n{template_degraded_output}",
+)
+
 # A template note is not a synthesised note.
 check(
     "the template reports itself degraded even with every section filled",
