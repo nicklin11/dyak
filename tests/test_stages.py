@@ -5403,10 +5403,7 @@ ix_terms = [
 ]
 ix_rx, ix_owner = dylk.build_index(ix_terms)
 
-fm_note = (
-    "---\ntitle: Конспект про фильтр Калмана\naliases: [калман]\n---\n\n"
-    "Текст про калман.\n"
-)
+fm_note = "---\ntitle: Конспект про фильтр Калмана\naliases: [калман]\n---\n\nТекст про калман.\n"
 fm_out, _ = dylk.substitute(fm_note, ix_rx, ix_owner)
 check(
     "#120: frontmatter is byte-identical after substitute",
@@ -5426,7 +5423,11 @@ check(
 check(
     "#120: table column count is unchanged",
     # GFM: an escaped \\| is a literal pipe inside a cell, so only bare pipes split columns.
-    all(len(re.findall(r"(?<!\\)\|", line)) == 4 for line in tbl_out.splitlines() if line.startswith("|")),
+    all(
+        len(re.findall(r"(?<!\\)\|", line)) == 4
+        for line in tbl_out.splitlines()
+        if line.startswith("|")
+    ),
     repr(tbl_out),
 )
 
@@ -5437,7 +5438,11 @@ check(
     head_out.startswith("## Фильтр Калмана: краткая теория\n"),
     repr(head_out),
 )
-check("#120: heading match is not counted", "Фильтр Калмана" not in head_counts or head_counts["Фильтр Калмана"] == 1, str(head_counts))
+check(
+    "#120: heading match is not counted",
+    "Фильтр Калмана" not in head_counts or head_counts["Фильтр Калмана"] == 1,
+    str(head_counts),
+)
 
 inline_list = dylk.parse_frontmatter("---\ntype: term\naliases: [a, b]\n---\n")[0]
 check(
@@ -5448,9 +5453,13 @@ check(
 
 _atomic_calls = []
 _real_replace = os.replace
+
+
 def _spy_replace(src, dst):
     _atomic_calls.append((str(src), str(dst)))
     return _real_replace(src, dst)
+
+
 with tempfile.TemporaryDirectory() as _td:
     _note = Path(_td) / "Лекция 1.md"
     _note.write_text("калман\n", encoding="utf-8")
@@ -5464,8 +5473,15 @@ with tempfile.TemporaryDirectory() as _td:
         any(dst == str(_note) for _, dst in _atomic_calls),
         str(_atomic_calls),
     )
-    check("#120: written note is linked", "[[калман|Фильтр Калмана]]" in _note.read_text(encoding="utf-8"))
-    check("#120: no temp file is left behind", sorted(p.name for p in Path(_td).iterdir()) == ["Лекция 1.md"], str(sorted(p.name for p in Path(_td).iterdir())))
+    check(
+        "#120: written note is linked",
+        "[[калман|Фильтр Калмана]]" in _note.read_text(encoding="utf-8"),
+    )
+    check(
+        "#120: no temp file is left behind",
+        sorted(p.name for p in Path(_td).iterdir()) == ["Лекция 1.md"],
+        str(sorted(p.name for p in Path(_td).iterdir())),
+    )
 
 # --- the CLI keeps dry-run as the default -------------------------------------------
 cbuf = io.StringIO()
