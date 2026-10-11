@@ -410,6 +410,60 @@ check(
     repr(dyd.read_settings()),
 )
 
+# --- #126: preflight must not treat a missing LLM as benign, and must not crash on STT ---
+# Isolated: no STT endpoint reachable, no LLM configured, a vault that does not exist.
+os.environ.pop("DYAK_STT", None)
+os.environ.pop(dyd.LLM_ENV, None)
+os.environ[dyd.VAULT_ENV] = str(Path(tempfile.mkdtemp()) / "no-vault")
+
+# (a) with DYAK_STT unset and nothing reachable, run_all must return a Check, not raise.
+try:
+    stt_checks = dyd.run_all(required=dyd.PROCESS_REQUIRES)
+    stt_raised = None
+except Exception as exc:  # noqa: BLE001 -- the regression is exactly "it raises"
+    stt_checks, stt_raised = [], exc
+stt_check = next((c for c in stt_checks if c.name == "stt"), None)
+check(
+    "no STT endpoint reachable -> run_all returns a Check, does not raise (#126)",
+    stt_raised is None and stt_check is not None and stt_check.failed,
+    f"raised={stt_raised!r}",
+)
+check(
+    "the STT refusal carries exit 2 and a remediation line (#126)",
+    stt_check is not None
+    and stt_check.code == ec.MISSING_DEPENDENCY
+    and bool(stt_check.remediation),
+    f"code={getattr(stt_check, 'code', None)!r}",
+)
+
+# (b) an unconfigured LLM refuses by default, before any STT or frame cost.
+llm_check = next(c for c in dyd.run_all(required=dyd.PROCESS_REQUIRES | {"llm"}) if c.name == "llm")
+check(
+    "an unconfigured LLM is fatal for process by default (#126)",
+    llm_check.failed,
+    f"ok={llm_check.ok} fatal={llm_check.fatal}",
+)
+
+# (c) --no-llm is the explicit consent: an unconfigured LLM is a note, not a refusal.
+saved_run_all = dyc.run_all
+dyc.run_all = lambda *, required=None: [
+    dyd.Check(name="llm", ok=False, detail="not configured", fatal=False)
+]
+err_buf = io.StringIO()
+with redirect_stderr(err_buf):
+    rc_no_llm = dyc._preflight(no_llm=True)
+dyc.run_all = saved_run_all
+check(
+    "--no-llm lets the run proceed to the template skeleton (#126)",
+    rc_no_llm == ec.OK,
+    f"rc={rc_no_llm}",
+)
+check(
+    "the --no-llm note names the stages that need the endpoint, not 0-12 (#126)",
+    "stages 6, 7 and 9" in err_buf.getvalue() and "0-12" not in err_buf.getvalue(),
+    err_buf.getvalue(),
+)
+
 _env.restore(SAVED_ENV)
 
 print()

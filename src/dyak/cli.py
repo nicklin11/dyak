@@ -74,27 +74,36 @@ def _doctor(_args: argparse.Namespace) -> int:
     return worst_code(checks)
 
 
-def _preflight() -> int:
+def _preflight(no_llm: bool = False) -> int:
     """Stage 0 as a gate: return the exit code, or OK if the run may start.
 
-    Only the dependencies stages 0-4 actually invoke are fatal here. The vault
-    and the gateway are reported but not enforced: stage 12 and stage 5 need
-    them, and neither runs yet. Refusing to transcribe because the vision
-    gateway happens to be down would make the gate broader than the run it
-    guards.
+    The stage 0-4 dependencies are always fatal. The LLM endpoint is fatal too, because
+    stages 7, 9 and 10 need it and a run without it spends its STT and frame time before
+    failing (#126). `no_llm` is the explicit consent to the template skeleton instead. The
+    vault and the vision gateway are reported but not enforced.
     """
-    checks = run_all(required=PROCESS_REQUIRES)
+    required = PROCESS_REQUIRES if no_llm else PROCESS_REQUIRES | {"llm"}
+    checks = run_all(required=required)
     failed = [c for c in checks if c.failed]
     degraded = [c for c in checks if not c.ok and not c.failed]
 
     for c in degraded:
-        # Printed before the early return below: a gateway that is down is not a
-        # reason to refuse this run, but it is still a fact the user wants
-        # before stage 5 rather than after it.
-        print(
-            f"dyak: note: {c.name} is unavailable, but stages 0-{dyp.IMPLEMENTED} do not use it",
-            file=sys.stderr,
-        )
+        # Printed before the early return below: a dependency that is down is not a
+        # reason to refuse this run, but it is still a fact the user wants before the
+        # stage that needs it.
+        if c.name == "llm":
+            # Reached only under --no-llm: the note is the template skeleton, and the
+            # stages that need the endpoint (6 as the vision fallback, 7 and 9) fall back.
+            print(
+                "dyak: note: no LLM endpoint (--no-llm): the note will be the template "
+                "skeleton; stages 6, 7 and 9 use the endpoint",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"dyak: note: {c.name} is unavailable, but stages 0-{dyp.IMPLEMENTED} do not use it",
+                file=sys.stderr,
+            )
     if not failed:
         return ec.OK
 
@@ -133,7 +142,7 @@ def _process(args: argparse.Namespace) -> int:
         print("dyak:   usage: dyak process PATH", file=sys.stderr)
         return ec.USAGE
 
-    code = _preflight()
+    code = _preflight(no_llm=args.no_llm)
     if code != ec.OK:
         return code
 
@@ -549,6 +558,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "replace a vault note that was edited by hand after the last export "
             "(default: refuse, and report which file)"
+        ),
+    )
+    p_process.add_argument(
+        "--no-llm",
+        action="store_true",
+        help=(
+            "run without an LLM endpoint: the note is the template skeleton, not a model's. "
+            "Without this flag, `process` refuses to start when no endpoint is configured"
         ),
     )
     p_process.add_argument(

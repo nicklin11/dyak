@@ -225,7 +225,17 @@ def check_stt() -> Check:
     OpenAI-compatible endpoint does not -- and an operator should not have to read the README
     to learn that their recording left the host.
     """
-    engine = stt.backend()
+    # `resolve` raises when nothing answers (#126). That is this check's verdict, not a crash.
+    try:
+        engine = stt.backend()
+    except runner.DependencyError as exc:
+        return Check(
+            name="stt",
+            ok=False,
+            code=exc.code,
+            detail=exc.message,
+            remediation=exc.remediation,
+        )
     info = engine.info()
     try:
         engine.check()
@@ -334,8 +344,9 @@ def check_numpy() -> Check:
 def check_llm() -> Check:
     """The synthesis/audit model endpoint. Unconfigured is a state, not a fault.
 
-    Stages 6-12 exist; stages 7, 9's critic tier and 10 need this. Until it is set the
-    pipeline stops at stage 6 with exit 2 rather than writing a note nobody audited.
+    Stages 7, 9's critic tier and 10 need this, and stage 6 uses it as the vision fallback.
+    `process` treats an unconfigured or unreachable endpoint as fatal unless `--no-llm` is
+    given (#126), so a run never writes a template note by accident.
     """
     url = os.environ.get(LLM_ENV, "").strip()
     if not url:
