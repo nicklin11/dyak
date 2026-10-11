@@ -29,8 +29,7 @@ from .. import runner
 from .backends import DEFAULT_ENDPOINTS, BackendInfo, _env_endpoint
 
 REMEDIATION = (
-    "set DYAK_OPENAI_URL to an OpenAI-compatible endpoint "
-    f"(default {DEFAULT_ENDPOINTS['openai']})"
+    f"set DYAK_OPENAI_URL to an OpenAI-compatible endpoint (default {DEFAULT_ENDPOINTS['openai']})"
 )
 
 ENV_KEY = "DYAK_OPENAI_KEY"
