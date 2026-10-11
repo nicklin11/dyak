@@ -43,6 +43,21 @@ The eight sections are **not** defined by any ADR. They come from the synthesize
 References to "the skill" throughout this module mean that file. The skill uses no `D<n>`
 notation of its own, so a section reference can never be resolved to a numbered decision —
 which is why they are named by name rather than by number.
+## Where the two passes of the skill live
+
+The skill is organised as pass 1 (clean the ASR against `glossary.md`) and pass 2 (synthesize),
+and forbids mixing them. Stage 7 is pass 2 and receives raw ASR on purpose: it does not clean,
+because a paraphrase written in the wrong request is unverifiable prose. What pass 1 covers
+falls where it can be **checked** rather than trusted: `audit.py` finds glossary variants in
+the finished note and `repair.py` substitutes the canonical term, deterministically, against
+the same glossary file -- so a term that was cleaned is cleaned because a rule fired, not
+because a model said it had cleaned it.
+
+The system prompt below carries the skill's binding rules -- boundary of trust, LaTeX notation,
+the dimension check, `[реконструкция]`, the per-family "why works / where breaks / trade-off"
+requirement, and the organisational-content separation -- condensed to what a per-section
+writer can act on. A rule with no counterpart in the skill does not belong in that prompt;
+that is what keeps the two contracts from drifting apart again.
 """
 
 from __future__ import annotations
@@ -69,32 +84,90 @@ STAGE7_ARTEFACTS = (NOTE_NAME, REPORT_NAME, PROVENANCE_NAME)
 
 #: the skill's document structure. `(number, title, one line on what belongs here)`. The lint stage checks
 #: the note against this list, so a section title that drifts here drifts in two places.
+#:
+#: The titles are the skill's own headings, `SKILL.md` § "Структура выходного документа",
+#: **verbatim**. The first generation here paraphrased four of them ("Карта источников",
+#: "Теоретический конспект и методы", "Математический фундамент", "Вопросы для
+#: самопроверки"), and the lint stage then certified a document whose headings did not match
+#: the skill it claims to implement: the check passed because both places carried the same
+#: drift. The briefs are the skill's per-section requirements, compressed to what a
+#: per-section request can state -- the full wording lives in the skill, not here.
 SECTIONS: tuple[tuple[int, str, str], ...] = (
-    (1, "Паспорт лекции", "предмет, тема, лектор, executive summary"),
-    (2, "Организационный блок", "требования, дедлайны, формат экзамена"),
-    (3, "Карта источников", "упомянутые курсы, авторы, инструменты"),
-    (4, "Понятийный аппарат и постановка задачи", "термины, формализация, ограничения"),
-    (5, "Теоретический конспект и методы", "классификация, идея, границы, trade-off"),
-    (6, "Математический фундамент", "формулы и их инженерный смысл"),
-    (7, "Численная реализация и инструменты", "сравнение подходов, библиотеки, ловушки"),
-    (8, "Вопросы для самопроверки", "вопросы на понимание, с критериями"),
+    (
+        1,
+        "Паспорт лекции",
+        "предмет, тема, лектор/курс, номер пары; Executive Summary — 2–3 предложения: о чём лекция и какую инженерную задачу она решает",
+    ),
+    (
+        2,
+        "Организационный блок",
+        "требования, формат сдачи, дедлайны, лабораторные, специфика экзамена, позиция лектора — весь организационный материал только здесь",
+    ),
+    (
+        3,
+        "Карта источников и литературы",
+        "всё упомянутое — курсы, авторы, книги, репозитории, статьи, инструменты — таблицей «Источник | Контекст в лекции | Зачем»; недостающие характеристики помечать, не додумывать",
+    ),
+    (
+        4,
+        "Понятийный аппарат и постановка задачи",
+        "термины с определениями; математическая формализация: состояние, управление, наблюдение, цель — с явными размерностями; ограничения; критерии качества с явным «максимизируется/минимизируется»",
+    ),
+    (
+        5,
+        "Теоретический конспект и систематизация методов",
+        "классификация методов; по каждому семейству: идея → формулировка → плюсы → минусы → границы применимости → trade-off; где кончается зона гарантий",
+    ),
+    (
+        6,
+        "Математический ликбез / фундамент",
+        "формулы, разложения, линеаризация, свойства матриц — каждая конструкция с практическим смыслом для инженера, а не только вывод",
+    ),
+    (
+        7,
+        "Численная реализация и инструменты",
+        "сравнение подходов к вычислениям, библиотеки с их ролью в задаче, код или псевдокод, ловушки реализации",
+    ),
+    (
+        8,
+        "Вопросы для самопроверки и подготовки к экзамену",
+        "5–7 вопросов на понимание, каждый с кратким критерием правильного ответа — экзаменационная формулировка, не пересказ параграфа",
+    ),
 )
 
 NOT_COVERED = "в лекции не затрагивается"
 
+#: The skill's binding rules, condensed to what a per-section writer can act on. Every rule
+#: here names its skill counterpart: the boundary of trust (§ "Проход 1", "Граница доверия"),
+#: the math rules (§ "Проход 2. Правила математики"), the content rules (§ "Проход 2. Правила
+#: содержания") and the organisational-content separation.
 SYSTEM = """\
-Ты — конспектор инженерной лекции. Пиши конспект на русском, в разметке Markdown.
+Ты — конспектор инженерной лекции (навык academic-lecture-synthesizer, проход 2: синтез).
+Пиши на русском, в разметке Markdown.
 
-ЖЁСТКИЕ ПРАВИЛА:
-1. Только то, что прозвучало в транскрипте. Ничего не добавляй от себя. Если нужно
-   пояснить -- помечай [инженерная заметка].
-2. Фрагмент, который не восстанавливается однозначно, помечай
+ТЕРМИНЫ И ГРАНИЦА ДОВЕРИЯ:
+1. Только то, что прозвучало в транскрипте. Ничего не добавляй от себя. Пояснение
+   от себя помечай [инженерная заметка].
+2. Формулу, продиктованную словами и не восстановленную однозначно, дай в
+   стандартной форме и помечай [реконструкция].
+3. Фрагмент, который не восстанавливается однозначно, помечай
    ⚠️ [неразборчиво: <буквально что услышали>]. Выдуманная формула хуже пропуска.
-3. Вся математика в LaTeX: $...$ строчная, $$...$$ выключная. Векторы \\mathbf{x},
-   матрицы \\mathbf{A}, скаляры без выделения.
-4. Не выдумывай то, чего в лекции не было. Если раздел пуст -- напиши одну строку
-   «в лекции не затрагивается».
-5. Не пересказывай структуру этого документа. Не пиши воду.
+4. Если раздел пуст — напиши одну строку «в лекции не затрагивается».
+   Не выдумывай то, чего в лекции не было.
+
+МАТЕМАТИКА:
+5. Вся математика в LaTeX: $...$ строчная, $$...$$ выключная. Векторы
+   \\mathbf{x}, матрицы \\mathbf{A}, скаляры без выделения — один стиль на весь текст.
+6. Проверь размерности каждого равенства: скаляр не складывается с матрицей, вектор
+   с вектором — только через inner product или покомпонентно, индексы произведения
+   согласованы по всем вхождениям. Размерности и области определения укажи явно:
+   $\\mathbf{x} \\in \\mathbb{R}^n$, $\\mathbf{A} \\in \\mathbb{R}^{m \\times n}$.
+
+СОДЕРЖАНИЕ:
+7. Каждому семейству методов нужны три вещи: почему работает, где ломается,
+   чем жертвуем (trade-off). Требования, дедлайны, экзамен — не сюда: их пишет
+   организационный блок (раздел 2).
+8. Не пересказывай структуру этого документа. Не пиши воду.
 
 ФОРМАТ: ответ — только тело раздела, без заголовка верхнего уровня и без обращений
 к читателю. Разговорную речь («ну», «как бы», «вы поняли») вычисти."""

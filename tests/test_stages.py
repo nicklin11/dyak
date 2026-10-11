@@ -4333,6 +4333,19 @@ def note(*bodies: str) -> str:
 
 
 clean = note(*["содержимое раздела"] * 8)
+
+
+def sec(n: int) -> str:
+    """The canonical heading of section `n`, derived from `dysy.SECTIONS` rather than
+    typed here. The first generation of these fixtures hard-coded four paraphrased
+    titles ("Карта источников", "Теоретический конспект и методы", "Математический
+    фундамент", "Вопросы для самопроверки"), which let the lint stage and the
+    synthesizer certify each other's drift against the skill file they both name: the
+    structure check passed because both places carried the same wrong string. Deriving
+    here re-links stage 8 to `synth.py` instead of to a second copy of it."""
+    return f"## {n}. {next(t for i, t, _ in dysy.SECTIONS if i == n)}"
+
+
 r = dyln.lint(clean, limg)
 check("a well-formed note lints clean", r.ok and not r.findings, r.summary() + str(r.findings))
 check("every rule ran", r.checked == 9, str(r.checked))
@@ -4346,20 +4359,18 @@ def rules(text, rule):
 
 
 # Structure.
-drop = clean.replace("## 5. Теоретический конспект и методы\n\nсодержимое раздела\n", "")
+drop = clean.replace(f"{sec(5)}\n\nсодержимое раздела\n", "")
 check("a missing section is an error", rules(drop, "structure/missing-section"), "no finding")
-renamed = clean.replace("## 6. Математический фундамент", "## 6. Формулы")
+renamed = clean.replace(sec(6), "## 6. Формулы")
 check("a renamed section is an error", rules(renamed, "structure/renamed-section"), "no finding")
-extra = clean.replace("## 8. Вопросы для самопроверки", "## 9. Вопросы для самопроверки")
+extra = clean.replace(sec(8), f"## 9. {dysy.SECTIONS[7][1]}")
 check(
     "a section ADR-0001 D5 does not define is an error",
     rules(extra, "structure/unknown-section"),
     "no finding",
 )
 swapped = (
-    clean.replace("## 5. Теоретический конспект и методы", "## 5. @@TMP@@")
-    .replace("## 6. Математический фундамент", "## 5. Теоретический конспект и методы")
-    .replace("## 5. @@TMP@@", "## 6. Математический фундамент")
+    clean.replace(sec(5), "## 5. @@TMP@@").replace(sec(6), sec(5)).replace("## 5. @@TMP@@", sec(6))
 )
 check("out-of-order sections are an error", rules(swapped, "structure/order"), "no finding")
 
@@ -4405,22 +4416,20 @@ check(
 check(
     "a section heading that appears twice is a warning",
     rules(
-        clean + "\n## 6. Математический фундамент\n\nещё раз то же самое\n",
+        clean + f"\n{sec(6)}\n\nещё раз то же самое\n",
         "structure/duplicate-heading",
     ),
-    str(dyln.lint(clean + "\n## 6. Математический фундамент\n\nещё раз\n", limg).findings),
+    str(dyln.lint(clean + f"\n{sec(6)}\n\nещё раз\n", limg).findings),
 )
 check(
     "and it is a warning, not an error -- the note is still structurally complete",
     [
         f.severity
-        for f in dyln.lint(
-            clean + "\n## 6. Математический фундамент\n\nещё раз то же самое\n", limg
-        ).findings
+        for f in dyln.lint(clean + f"\n{sec(6)}\n\nещё раз то же самое\n", limg).findings
         if f.rule == "structure/duplicate-heading"
     ]
     == [dyln.WARN],
-    str(dyln.lint(clean + "\n## 6. Математический фундамент\n\nещё раз\n", limg).findings),
+    str(dyln.lint(clean + f"\n{sec(6)}\n\nещё раз\n", limg).findings),
 )
 check(
     "a well-formed note has no duplicate heading to report",
