@@ -61,7 +61,8 @@ dyak process [path] [options]
 | `--vault-path DIR` | copy the finished bundle into this vault; never a pipeline blocker. Defaults to the configured vault, and the run writes into it either way — use `--no-vault-export` to keep the note in the bundle only |
 | `--no-vault-export` | finish the bundle without copying it into the vault |
 | `--vault-images` | also copy `images/` into the vault. Off by default: the frames are most of the bytes (50 of 59 MiB on lecture 1) and the note refers to none of them, so they stay in the bundle as the pipeline's evidence |
-| `--vault-subdir REL` | where inside the vault the bundle lands, relative to it (default: `<vault>/dyak/`). Not optional in practice: a bundle is ~188 files, and the vault root holds the user's own notes |
+| `--vault-subdir REL` | where inside the vault the bundle lands, relative to it (default: `<vault>/dyak/<lecture>/`, one directory per lecture, #118). Not optional in practice: a bundle is ~188 files, and the vault root holds the user's own notes |
+| `--force-export` | replace a vault note that was edited by hand after the last export. Default: refuse, and name the file (#118) |
 | `--keep-workdir` | keep the work dir even when the run succeeds |
 | `--glossary FILE` | ASR term glossary for stages 9 and 10, in the `\| variant \| canonical \| domain \| date \|` format. Without it the term-drift rule finds nothing and the audit says so |
 | `--terms-dir DIR` | atomic term notes for stage 11. Default: `$DYAK_TERMS_DIR`, then `<vault-path>/mscs/_terms`. Without it the note is written unlinked and the stage says so |

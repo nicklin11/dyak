@@ -19,6 +19,8 @@ checked.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -83,6 +85,22 @@ RUN_ARTEFACTS: frozenset[str] = frozenset(
 #: Where a bundle lands inside a vault unless told otherwise. Its own directory, because the
 #: alternative is writing ~188 files into the directory the user's own notes live in.
 DEFAULT_EXPORT_SUBDIR = "dyak"
+#: digests of what the last export wrote, so a hand edit in the vault is detectable (#118).
+EXPORT_LEDGER = "vault-export.json"
+
+
+def _digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _read_ledger(path: Path) -> dict[str, str]:
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
 
 
 def state_root() -> Path:
@@ -257,7 +275,12 @@ class Bundle:
         return f"{len(self.artefacts)} artefacts registered, {total / 1_048_576:.1f} MiB"
 
     def export_to_vault(
-        self, vault: Path, *, subdir: str | None = None, images: bool = False
+        self,
+        vault: Path,
+        *,
+        subdir: str | None = None,
+        images: bool = False,
+        force: bool = False,
     ) -> list[Path]:
         """Copy finished files into the vault, verifying each one arrived.
 
@@ -281,8 +304,12 @@ class Bundle:
         audit and a later re-run both look for them. `--vault-images` copies them too, for
         someone who wants the frames beside the note.
         """
-        subdir = subdir or DEFAULT_EXPORT_SUBDIR
+        # #118: the default is one directory per lecture. A shared `dyak/` made every
+        # lecture write `dyak/note.md`, so the second export silently replaced the first.
+        subdir = subdir or f"{DEFAULT_EXPORT_SUBDIR}/{self.root.name}"
         root = Path(vault).expanduser() / subdir
+        ledger_path = self.root / EXPORT_LEDGER
+        ledger = _read_ledger(ledger_path)
         copied: list[Path] = []
         for key, source in sorted(self.artefacts.items()):
             if not source.is_file():
@@ -293,10 +320,25 @@ class Bundle:
             target_dir = root / IMAGES if is_image else root
             target_dir.mkdir(parents=True, exist_ok=True)
             target = target_dir / source.name
+            # #118: a vault file edited by hand since our last export is not ours to replace.
+            # The ledger holds the digest we wrote; a different digest on disk means an edit.
+            recorded = ledger.get(str(target))
+            if (
+                not force
+                and target.is_file()
+                and recorded is not None
+                and _digest(target) != recorded
+            ):
+                raise OSError(
+                    f"refusing to overwrite {target}: it was edited after the last export "
+                    "(pass --force to replace it)"
+                )
             shutil.copy2(str(source), str(target))
             if not target.is_file() or target.stat().st_size != source.stat().st_size:
                 raise OSError(
                     f"export of {key} did not verify: {target} is missing or a different size"
                 )
+            ledger[str(target)] = _digest(target)
             copied.append(target)
+        ledger_path.write_text(json.dumps(ledger, indent=2, sort_keys=True), encoding="utf-8")
         return copied
