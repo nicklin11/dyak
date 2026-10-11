@@ -7,12 +7,12 @@ merely installed.
 ## The model, unchanged by the port
 
 A term is an atomic note `mscs/_terms/<Canonical>.md` whose frontmatter lists every ASR
-variant under `aliases:`. The filename is the canonical, so Obsidian resolves `[[МПЦ]]`
-itself and collects the backlinks. This stage only finds a variant in the body of a lecture
+variant under `aliases:`. The filename is the canonical, so a wikilink resolver (Obsidian,
+or any tool that follows `[[...]]`) finds `[[МПЦ]]` by name and collects the backlinks. This stage only finds a variant in the body of a lecture
 and wraps it as `[[variant|canonical]]`; when the text already *is* the canonical, no pipe
 is emitted, because `[[Open loop]]` reads better than `[[Open loop|Open loop]]` in source.
 
-No index note is generated on the way through. Obsidian's backlinks panel is the index; a
+No index note is generated on the way through. The notes app's backlinks view is the index; a
 generated `_index.md` is a second thing that can be stale, and it is only written on
 explicit request.
 

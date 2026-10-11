@@ -1,8 +1,12 @@
 # dyak
 
-Turns a lecture recording into a structured, **independently audited** Markdown note for an
-Obsidian vault. Every stage of the pipeline records *provenance* — which model, which
-parameters, how many tokens, what changed — so a note is accounted for, not just produced.
+Turns a lecture recording into a structured, **independently audited** Markdown note.
+Every stage of the pipeline records *provenance* — which model, which parameters, how many
+tokens, what changed — so a note is accounted for, not just produced.
+
+The output is plain Markdown with `[[wikilinks]]`, so it works in any notes app. We recommend
+[Obsidian](https://obsidian.md) for managing the notes: its backlinks and graph view pick up
+the terms and cross-links the pipeline writes.
 
 ## Install
 
@@ -31,7 +35,7 @@ transcription backend (local whisper.cpp preferred when it answers).
 ```
 DYAK_LLM_ENDPOINT=http://127.0.0.1:8317/v1
 DYAK_LLM_MODEL=<model>
-DYAK_VAULT=/path/to/Obsidian-vault          # where the note is copied
+DYAK_VAULT=/path/to/notes                   # optional: where the note is copied
 ```
 
 With `DYAK_STT=auto` (the default) the local whisper.cpp endpoint keeps the recording on

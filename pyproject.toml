@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dyak"
 version = "0.1.0"
-description = "One-command lecture pipeline: video/audio -> audited Obsidian note"
+description = "One-command lecture pipeline: video/audio -> audited Markdown note"
 readme = "README.md"
 requires-python = ">=3.11"
 # numpy: stage 5 measures MEGE at the frame's native resolution. In pure Python that is a
