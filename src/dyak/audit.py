@@ -104,6 +104,10 @@ class Report:
     tier2: str = "NOT_CONFIGURED"
     tier2_findings: int = 0
     tier2_coverage: dict = field(default_factory=dict)
+    #: Sections the critic was sent only in part, by heading. A section above `SECTION_CHARS`
+    #: can pass a review of the part that was sent, so the cut is named here and in the run
+    #: line rather than left in the request (#123).
+    tier2_truncated: list[str] = field(default_factory=list)
     #: Critic findings discarded for want of a citation, each with the reason. ADR-0001 D5 makes
     #: this a logged outcome, not a silent one: a filter that hides its own discards is a
     #: filter nobody can audit.
@@ -132,6 +136,7 @@ class Report:
             "tier2": self.tier2,
             "tier2_findings": self.tier2_findings,
             "tier2_coverage": self.tier2_coverage,
+            "tier2_truncated": self.tier2_truncated,
             "dropped": self.dropped,
             "ok": self.ok,
             "findings": [f.as_dict() for f in self.findings],
@@ -538,6 +543,12 @@ def parse_critic_findings(
     return kept, dropped
 
 
+#: Characters of one section sent to the tier-2 critic. A section longer than this is audited
+#: only in part -- that is a real limit, not an accident -- and which sections hit it is
+#: reported (`Report.tier2_truncated`), never applied silently (#123).
+SECTION_CHARS = 6000
+
+
 def tier2_critic(
     markdown: str,
     transcript_text: str,
@@ -557,6 +568,7 @@ def tier2_critic(
     """
     sections = re.split(r"^## ", markdown, flags=re.M)[1:]
     reviewed: list[str] = []
+    truncated: list[str] = []
     skipped = 0
     out: list[Finding] = []
     all_dropped: list[dict] = []
@@ -573,13 +585,22 @@ def tier2_critic(
             skipped += 1
             continue
         reviewed.append(heading.strip())
+        section_text = body.strip()
+        if len(section_text) > SECTION_CHARS:
+            # Reported, not silent. A section audited only in part can pass a review of the
+            # part that was sent, which is a clean bill of health for text nobody read (#123).
+            truncated.append(heading.strip())
         messages = [
             {"role": "system", "content": CRITIC_SYSTEM},
             {
                 "role": "user",
                 "content": (
-                    f"## КОНСПЕКТ — {heading.strip()}\n\n{body.strip()[:6000]}"
-                    f"\n\n## СТЕНОГРАММА ЛЕКЦИИ\n\n{transcript_text.strip()}"
+                    # The transcript first and the section last (#123). All eight requests then
+                    # share the transcript as a common prefix, which is the condition a
+                    # provider prefix-cache is built for; section-first made every request's
+                    # prefix unique, so none of them could share anything.
+                    f"## СТЕНОГРАММА ЛЕКЦИИ\n\n{transcript_text.strip()}"
+                    f"\n\n## КОНСПЕКТ — {heading.strip()}\n\n{section_text[:SECTION_CHARS]}"
                 ),
             },
         ]
@@ -621,6 +642,8 @@ def tier2_critic(
             "capped": skipped > 0 and findings_so_far >= limit,
             "dropped": len(all_dropped),
             "transcript_chars": len(transcript_text.strip()),
+            "section_chars": SECTION_CHARS,
+            "truncated": truncated,
             "enforced": "quote verbatim in note, citation verbatim in transcript, confidence stated",
         },
     )
@@ -667,6 +690,14 @@ def audit(
                 report.tier2 += f" (capped at {tier2_limit} findings)"
             report.tier2_findings = len(found)
             report.tier2_coverage = coverage
+            report.tier2_truncated = list(coverage.get("truncated", []))
+            if report.tier2_truncated:
+                # In the run line, not only in the artefact: a section reviewed in part reads
+                # as reviewed, and the line is where that would be believed (#123).
+                report.tier2 += (
+                    f" ({len(report.tier2_truncated)} section(s) truncated at "
+                    f"{SECTION_CHARS} chars)"
+                )
             report.dropped.extend(dropped)
             report.findings.extend(found)
 
@@ -679,6 +710,12 @@ def audit(
         out.write(
             f"           note: {len(report.dropped)} critic findings were discarded for "
             "want of a verbatim citation; they are listed in audit.json under `dropped`\n"
+        )
+    if report.tier2_truncated:
+        out.write(
+            f"           note: {len(report.tier2_truncated)} section(s) exceeded "
+            f"{SECTION_CHARS} characters and were audited only in part: "
+            f"{', '.join(report.tier2_truncated)}\n"
         )
     if report.tier2 == "NOT_CONFIGURED":
         out.write(

@@ -5472,6 +5472,81 @@ check(
     f"severity: {[f.severity for f in dead_findings]}",
 )
 
+# --- #123: the critic's request order, and the section it was cutting --------------------
+# Two faults in one message. The eight requests sent the section *before* the transcript, so
+# each request's prefix was unique and no provider prefix-cache could share anything across
+# them; and a section above 6000 characters was cut in the request with nothing said about it,
+# so a section audited only in part came back looking audited.
+_big_section = "строка конспекта\n" * 700  # ~11 900 chars: over the limit
+_short_section = "короткий раздел\n"
+_long_note = (
+    f"## Паспорт лекции\n\n{_short_section}\n"
+    f"## Организационный блок\n\n{_big_section}\n"
+    f"## Термины\n\n{_short_section}\n"
+)
+_order_stub = CriticStub(GOOD_LINE)
+_order_trace = dyle.Transcript()
+dyle.chat = _order_stub
+try:
+    _, _, _order_cov = dyau.tier2_critic(
+        _long_note, LECT, dyle.Config(endpoint="http://x/v1", model="m"), _order_trace
+    )
+finally:
+    dyle.chat = real_chat
+# Read from the recorded calls, not from the stub: `audit-llm-transcript.json` is the artefact
+# the claim is about, so the assertion is made against the same thing a reader would inspect.
+_requests = [c["messages"][1]["content"] for c in _order_trace.calls]
+check(
+    "every stage-9 request puts the transcript before the section (#123)",
+    len(_requests) == 3
+    and all(m.index("## СТЕНОГРАММА ЛЕКЦИИ") < m.index("## КОНСПЕКТ") for m in _requests),
+    str(_requests[:1])[:160],
+)
+check(
+    "so the transcript is the shared prefix, which is what a prefix-cache needs (#123)",
+    # The prefix must *contain* the transcript, not merely be equal across calls: with the old
+    # section-first order every prefix was the empty string, which is trivially shared and
+    # shares nothing a cache can use.
+    len({m.split("## КОНСПЕКТ")[0] for m in _requests}) == 1
+    and all("## СТЕНОГРАММА ЛЕКЦИИ" in m.split("## КОНСПЕКТ")[0] for m in _requests),
+    f"{len(_requests)} requests, "
+    f"{len({m.split('## КОНСПЕКТ')[0] for m in _requests})} distinct prefixes",
+)
+check(
+    "a section over the limit is reported, not silently cut (#123)",
+    _order_cov["truncated"] == ["Организационный блок"]
+    and _order_cov["section_chars"] == dyau.SECTION_CHARS,
+    str(_order_cov.get("truncated")),
+)
+check(
+    "and a section under the limit is not reported, so the gate is about the limit (#123)",
+    _order_cov["sections"] == 3 and len(_order_cov["reviewed"]) == 3,
+    str(_order_cov),
+)
+check(
+    "the truncation reaches the report, not only the coverage dict (#123)",
+    dyau.Report(tier2_truncated=["Организационный блок"]).as_dict()["tier2_truncated"]
+    == ["Организационный блок"],
+    "tier2_truncated is missing from Report.as_dict",
+)
+_cut_stub = CriticStub(GOOD_LINE)
+dyle.chat = _cut_stub
+try:
+    _cut_audit = dyau.audit(
+        _long_note,
+        LECT,
+        A,
+        config=dyle.Config(endpoint="http://x/v1", model="m"),
+        stream=io.StringIO(),
+    )
+finally:
+    dyle.chat = real_chat
+check(
+    "and it is named in the run line, where a part-audited section would be believed (#123)",
+    _cut_audit.tier2_truncated == ["Организационный блок"] and "truncated at" in _cut_audit.tier2,
+    f"tier2={_cut_audit.tier2}",
+)
+
 # --- stage 10: repair --------------------------------------------------------------
 bodies = ["содержимое"] * 8
 bodies[5] = "Формула $x = u + B$ и $y = \\mathbf{x}."

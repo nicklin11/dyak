@@ -35,6 +35,15 @@ constants, not provenance.
 the section is real but incomplete, and stage 7 marks it degraded instead of letting a
 truncated derivation pass lint and audit as finished content (#124).
 
+Stage 9's requests put the **transcript first and the section last** (#123). All eight calls
+then share the transcript as one common prefix, which is the condition a provider
+prefix-cache is built for; with the section first, every request's prefix was unique and
+nothing could be shared. This changes what `audit-llm-transcript.json` records, so the order
+is part of the artefact's shape rather than an implementation detail. A section above
+`audit.SECTION_CHARS` (6000) is still audited only in part, but which sections were cut is now
+named in `audit.json` under `tier2_truncated` and in the stage's run line, instead of being
+applied silently to the request.
+
 The three LLM stages keep different amounts on purpose. Stages 7 and 9 make 8 calls each and
 store the whole `messages` array — ~190 KiB per call for stage 9, which needs the section text
 to be auditable. Stage 6 makes 58 and stores a summary; the full form would be ~11 MiB per
