@@ -2237,10 +2237,22 @@ ghost = scratch / "ghost.json"
 check("publish of a missing file is a no-op", b_explicit.publish("ghost", ghost) == ghost)
 check("a failed publish is not recorded", "ghost" not in b_explicit.artefacts)
 
-# overwrite replaces rather than merging into a stale bundle.
+# overwrite replaces the run's own artefacts; it must not rmtree the directory (#119).
+# A user file in a directory they pointed --output-dir at has to survive --overwrite.
+user_dir = tmp / "user-owned"
+user_dir.mkdir()
+(user_dir / "thesis.txt").write_text("mine")
+(user_dir / "note.md").write_text("old run")
+(user_dir / "images").mkdir()
+(user_dir / "images" / "f_0001.jpg").write_bytes(b"old")
+dyb.Bundle.open(src, output_dir=str(user_dir), overwrite=True)
+check("#119: --overwrite keeps a user file", (user_dir / "thesis.txt").read_text() == "mine")
+check("#119: --overwrite removes a stale run artefact", not (user_dir / "note.md").exists())
+check("#119: --overwrite empties images/", not any((user_dir / "images").iterdir()))
+check("#119: --overwrite keeps the directory itself", user_dir.is_dir())
 check(
-    "overwrite=True replaced the directory",
-    dyb.Bundle.open(src, output_dir=str(explicit), overwrite=True).created,
+    "overwrite=True on a fresh path reports created",
+    dyb.Bundle.open(src, output_dir=str(tmp / "fresh-overwrite"), overwrite=True).created,
 )
 check(
     "a fresh bundle reports itself as created",
