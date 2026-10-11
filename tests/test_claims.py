@@ -593,6 +593,7 @@ PRODUCED: set[str] = (
         link.LINKED_NOTE,
         dyro.SYNTH_NOTE_NAME,
         dyp.TIMINGS_NAME,
+        dyp.RUN_STATE_NAME,
         # these five stages have no ALL_ARTEFACTS tuple, so their pair is named here
         caption.REPORT_NAME,
         caption.PROVENANCE_NAME,

@@ -75,10 +75,13 @@ RUN_ARTEFACTS: frozenset[str] = frozenset(
         "note.linked.md",
         "link.json",
         "link-provenance.json",
-        # stage 12, and the run's own timings
+        # stage 12, and the run's own timings and state
         "report.json",
         "report-provenance.json",
         "timings.json",
+        # The run's identity and outcome (#92). Cleared like the rest: a stale `completed`
+        # left by the previous run is exactly the file a reader would mistake for this one's.
+        "run-state.json",
     }
 )
 

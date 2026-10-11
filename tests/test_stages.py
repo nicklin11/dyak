@@ -2750,6 +2750,49 @@ check(
     str(sorted(q.name for q in (tmp / "order_bundle" / "images").glob("*"))),
 )
 
+
+# --- #92: the bundle says how the run ended ---------------------------------------------
+# Before this, the run's identity and its per-stage seconds were written on the last line of
+# `pipeline.run`, so a run that did not reach that line left a bundle holding everything stage
+# 7 had published and nothing saying the run had not finished. To a reader that is a
+# successful run whose verification artefacts happen to be missing.
+def _run_state(root: Path) -> dict:
+    """The run's state, or `{}` when it left none -- which is the failure being tested.
+
+    Read through a guard so a missing file fails the check with a readable message rather than
+    aborting the suite from inside a `read_text`.
+    """
+    target = root / dyp.RUN_STATE_NAME
+    return json.loads(target.read_text(encoding="utf-8")) if target.is_file() else {}
+
+
+_rs_done = _run_state(tmp / "order_bundle")
+check(
+    "a completed run leaves its identity in the bundle (#92)",
+    _rs_done.get("outcome") == "completed"
+    and bool(_rs_done.get("run_id"))
+    and bool(_rs_done.get("started_at"))
+    and bool(_rs_done.get("finished_at")),
+    str({k: _rs_done.get(k) for k in ("outcome", "run_id", "started_at", "finished_at")}),
+)
+check(
+    "and names the run id after the source, so a bug report can quote it (#92)",
+    _rs_done.get("run_id", "").endswith(Path(src).stem[:24]) and _rs_done.get("source") == str(src),
+    f"run_id={_rs_done.get('run_id')} source={_rs_done.get('source')}",
+)
+check(
+    "and records which stages ran, so a partial bundle is not read as a complete one (#92)",
+    _rs_done.get("stages_completed") == list(range(1, 13))
+    and _rs_done.get("stage_reached") == 12
+    and _rs_done.get("stages_implemented") == 12,
+    str(_rs_done.get("stages_completed")),
+)
+check(
+    "and the per-stage seconds are written by the same code path (#92)",
+    (tmp / "order_bundle" / dyp.TIMINGS_NAME).is_file(),
+    "timings.json is missing from a completed run",
+)
+
 # --- 14b. the bundle reaches the vault, and names what it leaves behind ----------------
 # #90: `export_to_vault` copies by registry, so a file written straight into `bundle.root`
 # never leaves the bundle. Stage 12 wrote `report.json` and `report-provenance.json` that
@@ -2764,9 +2807,9 @@ _r_registered = {Path(p).name for p in _r.bundle.artefacts.values()} if _r is no
 _r_root_files = (
     {p.name for p in _r.bundle.root.iterdir() if p.is_file()} if _r is not None else set()
 )
-#: The one declared exception. `TIMINGS_NAME` in `pipeline.py` says why it is not
-#: registered; if that decision is reversed, this list is what has to change with it.
-SIDECARS = {dyp.TIMINGS_NAME}
+#: The declared exceptions. `TIMINGS_NAME` and `RUN_STATE_NAME` in `pipeline.py` say why
+#: neither is registered; if either decision is reversed, this list changes with it.
+SIDECARS = {dyp.TIMINGS_NAME, dyp.RUN_STATE_NAME}
 
 check(
     "stage 12's artefacts are registered, so they can be exported",
@@ -6276,6 +6319,79 @@ with tempfile.TemporaryDirectory() as _vc_td:
         )
         >= 3,
         "the warm run lost the alignment",
+    )
+
+
+# --- #92: an interrupted run says so, instead of looking like a complete one -------------
+# The bundle left by an interrupt used to hold everything stage 7 had published -- note.md,
+# captions.json, quality.json, lint.json -- with no `report.json` and no `timings.json`,
+# because both were written on the last line of `run`. Nothing distinguished that from a
+# finished run whose verification artefacts happened to be missing.
+with tempfile.TemporaryDirectory() as _rs_td:
+    _rs_root = Path(_rs_td)
+    _rs_src = _rs_root / "lecture.mp4"
+    _rs_src.write_bytes(b"x")
+    _rs_out = _rs_root / "bundle"
+    _rs_out.mkdir()
+    _rs_env = {k: os.environ.get(k) for k in ("DYAK_VLM_ENDPOINT", "DYAK_VLM_MODEL")}
+    os.environ["DYAK_VLM_ENDPOINT"] = "http://vision.invalid/v1"
+    os.environ["DYAK_VLM_MODEL"] = "fake-vision"
+    _vc_stub_modules()
+    _rs_prev_chat = dyle.chat
+    dyle.chat = _vc_chat
+    # Interrupted during stage 7, which is where an interrupt costs the most: stages 1-6 have
+    # already been paid for, and the bundle must not read as a run that finished.
+    dyp.synth = _Stub(run=lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
+    try:
+        try:
+            REAL_PIPELINE_RUN(
+                _rs_src,
+                dyw.WorkDir(keep=False, parent=_rs_root),
+                bundle=dyb.Bundle.open(_rs_src, output_dir=str(_rs_out), overwrite=False),
+                stream=io.StringIO(),
+            )
+        except KeyboardInterrupt:
+            pass
+    finally:
+        dyle.chat = _rs_prev_chat
+        for _key, _value in _rs_env.items():
+            if _value is None:
+                os.environ.pop(_key, None)
+            else:
+                os.environ[_key] = _value
+        (
+            dyp.probe,
+            dyp.audio,
+            dyp.stt,
+            dyp.frames,
+            dyp.quality,
+            dyp.caption,
+            dyp.synth,
+        ) = _vc_real
+    _rs_state = _run_state(_rs_out)
+    check(
+        "#92: an interrupted run says it was interrupted, in the bundle it left",
+        _rs_state.get("outcome") == "interrupted"
+        and _rs_state.get("detail") == "KeyboardInterrupt",
+        str({k: _rs_state.get(k) for k in ("outcome", "detail")}),
+    )
+    check(
+        "#92: and names the stage it reached, not the last one that finished",
+        _rs_state.get("stage_reached") == 7
+        and _rs_state.get("stages_completed") == [1, 2, 3, 4, 5, 6],
+        f"reached={_rs_state.get('stage_reached')} completed={_rs_state.get('stages_completed')}",
+    )
+    _rs_timings = _rs_out / dyp.TIMINGS_NAME
+    check(
+        "#92: and still carries the per-stage seconds of the stages that did run",
+        _rs_timings.is_file()
+        and len(json.loads(_rs_timings.read_text(encoding="utf-8"))["stages"]) == 6,
+        "a run that did not finish has no timings, which is the run whose timings matter most",
+    )
+    check(
+        "#92: and it is not a report, so a reader cannot mistake it for verification",
+        not (_rs_out / dyro.REPORT_NAME).is_file() and _rs_state.get("outcome") != "completed",
+        f"report.json present={(_rs_out / dyro.REPORT_NAME).is_file()}",
     )
 
 # --- the CLI keeps dry-run as the default -------------------------------------------
