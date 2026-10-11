@@ -334,6 +334,8 @@ def run(
             out=out,
             bundle=bundle,
             reports=reports,
+            run_id=run_id,
+            started_at=started_at,
             note_title=note_title,
             glossary_path=glossary_path,
             terms_dir=terms_dir,
@@ -371,6 +373,8 @@ def _stages(
     out,
     bundle: Bundle,
     reports: list[StageReport],
+    run_id: str = "",
+    started_at: str = "",
     note_title: str | None = None,
     glossary_path: str | None = None,
     terms_dir: str | Path | None = None,
@@ -676,6 +680,11 @@ def _stages(
         synth_note=Path(artefacts[synth.NOTE_NAME]),
         artefacts=artefacts,
         superseded=superseded,
+        # #88: the verdict names the run it belongs to. `Bundle.open` merges into an existing
+        # directory, so two runs of one lecture leave overlapping file sets, and without this
+        # nothing said which run wrote which file.
+        run_id=run_id,
+        started_at=started_at,
         stream=out,
     )
     artefacts["note"] = bundle.root / synth.NOTE_NAME
