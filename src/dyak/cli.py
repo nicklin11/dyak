@@ -707,6 +707,11 @@ def main(argv: list[str] | None = None) -> int:
         if code in (0, None):
             return ec.OK
         return ec.USAGE
+    # #156: the settings file invites hand-editing, so a key it holds that no setting reads
+    # (or a value dropped for not being a string) is reported once here, before the command
+    # runs. `read_settings` cannot do it -- `resolve_vault` calls it several times per run,
+    # and the same warning three times is noise. Silent when the file is absent or correct.
+    dyd.report_settings()
     return args.fn(args)
 
 
