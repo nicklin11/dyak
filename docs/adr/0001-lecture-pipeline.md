@@ -320,6 +320,7 @@ one that is loud:
 | 3 | dependency failed (its stderr is reproduced verbatim) |
 | 4 | quality gate failed — note written, audit report says why |
 | 5 | audit found errors above threshold; note written and **flagged** |
+| 6 | required artefacts could not be verified on disk (ADR-0001 D3) |
 | 130 | interrupted (128 + SIGINT); work dir kept |
 
 An uncaught internal error — a bug in dyak — has no row on purpose: it

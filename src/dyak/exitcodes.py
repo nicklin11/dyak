@@ -29,6 +29,9 @@ QUALITY_GATE_FAILED = 4
 # 5 — the audit found errors above threshold. The note is written and FLAGGED.
 AUDIT_FINDINGS = 5
 
+# 6 — the pipeline ran, but required artefacts could not be verified on disk (ADR-0001 D3).
+ARTEFACT_VERIFICATION_FAILED = 6
+
 # 130 — interrupted (Ctrl-C), the shell convention of 128 + SIGINT(2). Not a
 # pipeline failure: the work dir is retained and its path printed, because an
 # aborted 73-minute transcribe is exactly the run worth inspecting. Declared
@@ -46,5 +49,6 @@ DESCRIPTIONS: dict[int, str] = {
     DEPENDENCY_FAILED: "dependency failed (stderr reproduced verbatim)",
     QUALITY_GATE_FAILED: "quality gate failed; note written, report says why",
     AUDIT_FINDINGS: "audit found errors above threshold; note written and flagged",
+    ARTEFACT_VERIFICATION_FAILED: "required artefacts could not be verified",
     INTERRUPTED: "interrupted by the user; work dir kept",
 }
