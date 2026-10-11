@@ -4,12 +4,17 @@ This file is the full reference. [`tests/test_claims.py`](../tests/test_claims.p
 every `DYAK_*` variable the code reads and every flag and subcommand `cli.py` registers
 appears here, so the table cannot rot silently.
 
-Three sources of configuration, in the order the code consults them:
+Two sources of configuration, in the order the code consults them:
 
 1. an explicit CLI flag (`--vault-path`, `--terms-dir`, ...)
 2. the corresponding `DYAK_*` environment variable
-3. the settings file: `$DYAK_SETTINGS`, else `$XDG_CONFIG_HOME/dyak/settings.toml`
-   (one key today, `vault`; written on a first run with nothing configured)
+
+The settings file (`$DYAK_SETTINGS`, else `$XDG_CONFIG_HOME/dyak/settings.toml`) is not a
+general third layer. It is read in one place, `deps.resolve_vault`, for the one key it holds,
+`vault`; an LLM endpoint, a VLM model or an STT backend put there has no effect. The vault is
+the only setting that consults it — `--vault-path`, then `$DYAK_VAULT`, then `vault` in the
+settings file, then the built-in default — and the file is written on a first run with nothing
+configured.
 
 Real per-layer precedence across all fields is ADR-0002 territory and tracked in
 [#52](https://github.com/nicklin11/dyak/issues/52).
@@ -33,9 +38,9 @@ Real per-layer precedence across all fields is ADR-0002 territory and tracked in
 | `DYAK_VAULT` | `deps.py` | the notes directory the note is exported into (any folder; Obsidian is recommended) |
 | `DYAK_SETTINGS` | `deps.py` | the settings *file*, overriding the XDG path |
 | `DYAK_TERMS_DIR` | `link.py` | atomic term notes for stage 11; default `<vault>/mscs/_terms` |
-| `DYAK_OUTPUT_DIR` | `bundle.py` | where the bundle goes; default `$XDG_STATE_HOME/dyak/<lecture>`, or `./output/<lecture>` when `XDG_STATE_HOME` is unset |
+| `DYAK_OUTPUT_DIR` | `bundle.py` | where the bundle goes; default `$XDG_STATE_HOME/dyak/<lecture>`, or `~/.local/state/dyak/<lecture>` when `XDG_STATE_HOME` is unset |
 | `DYAK_WORKDIR` | `workspace.py` | parent of the managed work dir (scratch: `audio.wav` etc.); default `$TMPDIR` |
-| `DYAK_BBOX_SOURCE` | `pipeline.py` | stage 5 estimator name; the only registered value is `geometric` (default) |
+| `DYAK_BBOX_SOURCE` | `pipeline.py` | stage 5 estimator name; the registry holds `geometric` (default) and `null` (`quality.ESTIMATORS`) |
 
 `DYAK_GATEWAY_URL` is not read anywhere: the check that read it was removed (see the
 comment in `deps.py`). Standard Python/XDG variables — `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
@@ -56,7 +61,7 @@ dyak process [path] [options]
 |---|---|
 | `path` | video or audio file |
 | `--workdir DIR` | parent directory for the managed work dir (default: `$TMPDIR`, or `DYAK_WORKDIR`) |
-| `--output-dir DIR` | where to write the output bundle (default: `$XDG_STATE_HOME/dyak/<lecture>`, or `./output/<lecture>` if unset) |
+| `--output-dir DIR` | where to write the output bundle (default: `$XDG_STATE_HOME/dyak/<lecture>`, or `~/.local/state/dyak/<lecture>` if unset) |
 | `--overwrite` | replace an existing output bundle instead of writing into it |
 | `--vault-path DIR` | copy the finished bundle into this vault; never a pipeline blocker. Defaults to the configured vault, and the run writes into it either way — use `--no-vault-export` to keep the note in the bundle only |
 | `--no-vault-export` | finish the bundle without copying it into the vault |
