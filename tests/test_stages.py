@@ -5974,6 +5974,199 @@ with tempfile.TemporaryDirectory() as _cap_td:
         str(_cap_seen),
     )
 
+
+# --- #121: a second run through pipeline.run makes zero vision calls --------------------
+# The two halves of this were tested apart: `caption.run` was shown to issue no request when a
+# `cache_source` is handed to it, and `pipeline.run` was shown to hand stage 6 a cache file that
+# still exists. Neither joins them, so a stage 6 that reads the cache and then ignores it would
+# pass both. That is the shape of every wiring bug in this file (#82, #89, #121): the unit is
+# right, the sequence is wrong, and only a run that executes the sequence can see it.
+class _StopAfterCaption(Exception):
+    pass
+
+
+_vc_calls: list = []
+_vc_real = (dyp.probe, dyp.audio, dyp.stt, dyp.frames, dyp.quality, dyp.caption, dyp.synth)
+
+
+def _vc_chat(messages, config, **kw):
+    _vc_calls.append(messages)
+    return _caption_reply()
+
+
+def _vc_stub_modules():
+    _info = _Stub(summary=lambda: "x")
+    dyp.probe = _Stub(
+        probe=lambda p: _info,
+        require_supported=lambda i: None,
+        provenance=lambda *a, **k: "{}",
+        PROVENANCE_NAME="source-provenance.json",
+    )
+    dyp.audio = _Stub(
+        extract=lambda src, wav: _Stub(duration=300.0, summary=lambda: "x"),
+        check_coverage=lambda i, a: None,
+    )
+
+    def _vc_stt_write(t, d):
+        d.mkdir(parents=True, exist_ok=True)
+        # The real transcript shape, so stage 6 aligns and captions the frames rather than
+        # gating them all out -- a warm run that captioned nothing would "pass" for the
+        # wrong reason. `txt` is written too: stage 7 reads it, and the arguments to
+        # `synth.run` are evaluated before the stub that stops the run.
+        (d / "transcript.txt").write_text("alpha beta gamma", encoding="utf-8")
+        target = d / "transcript.json"
+        target.write_text(json.dumps(transcript_payload), encoding="utf-8")
+        return {"json": target, "txt": d / "transcript.txt"}
+
+    dyp.stt = _Stub(
+        transcribe=lambda wav, audio_duration: _Stub(anomalies=(), summary=lambda: "x"),
+        write=_vc_stt_write,
+        RATE_RANGE=dysttc.RATE_RANGE,
+        WARMUP_SECONDS=dysttc.WARMUP_SECONDS,
+    )
+
+    def _vc_frames_run(src, fd):
+        fd.mkdir(parents=True, exist_ok=True)
+        produced = []
+        for name in ("f_0000000000.png", "f_0000100000.png", "f_0000200000.png"):
+            path = fd / name
+            # Byte-identical across both runs: the cache is keyed by frame fingerprint, so
+            # different bytes would invalidate it and the test would pass for the wrong
+            # reason.
+            path.write_bytes(_FAKE_FRAME)
+            produced.append(path)
+        manifest = fd / "manifest.tsv"
+        manifest.write_text(
+            "pts_ms\ttime\tfile\n0\t00:00:00\tf_0000000000.png\n"
+            "100000\t00:01:40\tf_0000100000.png\n200000\t00:03:20\tf_0000200000.png\n",
+            encoding="utf-8",
+        )
+        return manifest, produced
+
+    dyp.frames = _Stub(
+        run=_vc_frames_run,
+        summary=lambda m, p: "3 frames",
+        ffmpeg_version=lambda: "stub",
+    )
+
+    def _vc_quality_run(produced, workpath, **kw):
+        entries = [
+            _Stub(
+                name=p.name,
+                quality_gate="PASS",
+                content_type="white_document",
+                crop_state="cropped",
+            )
+            for p in produced
+        ]
+        return _Stub(passed=entries, failed=[], ok=True, summary=lambda: "3/3", explain=lambda: "")
+
+    def _vc_quality_write(report, target, settings):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(
+                {
+                    "threshold": 100.0,
+                    "frames": [
+                        {
+                            "name": e.name,
+                            "quality_gate": e.quality_gate,
+                            "content_type": e.content_type,
+                            "crop_state": e.crop_state,
+                        }
+                        for e in report.passed
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    dyp.quality = _Stub(
+        Settings=lambda: _Stub(),
+        resolve_estimator=lambda name: None,
+        run=_vc_quality_run,
+        write=_vc_quality_write,
+        provenance=lambda qs, bbox_source: "{}",
+        REPORT_NAME=dyq.REPORT_NAME,
+        PROVENANCE_NAME=dyq.PROVENANCE_NAME,
+        enhanced_name=dyq.enhanced_name,
+    )
+    # Stage 6 runs for real; stage 7 stops the run, because captions.json is published at the
+    # end of stage 6 and stages 7-12 are not what this test is about.
+    dyp.synth = _Stub(run=lambda *a, **k: (_ for _ in ()).throw(_StopAfterCaption()))
+
+
+with tempfile.TemporaryDirectory() as _vc_td:
+    _vc_root = Path(_vc_td)
+    _vc_src = _vc_root / "lecture.mp4"
+    _vc_src.write_bytes(b"x")
+    _vc_out = _vc_root / "bundle"
+    _vc_out.mkdir()
+    # The vision pair explicitly: earlier sections of this file add and remove these, and a
+    # stage 6 with no vision endpoint captions nothing -- which would make the "warm run makes
+    # zero calls" assertion below true for the wrong reason.
+    _vc_env = {k: os.environ.get(k) for k in ("DYAK_VLM_ENDPOINT", "DYAK_VLM_MODEL")}
+    os.environ["DYAK_VLM_ENDPOINT"] = "http://vision.invalid/v1"
+    os.environ["DYAK_VLM_MODEL"] = "fake-vision"
+    _vc_stub_modules()
+    _vc_prev_chat = dyle.chat
+    dyle.chat = _vc_chat
+
+    def _vc_pass() -> int:
+        _vc_calls.clear()
+        try:
+            REAL_PIPELINE_RUN(
+                _vc_src,
+                dyw.WorkDir(keep=False, parent=_vc_root),
+                bundle=dyb.Bundle.open(_vc_src, output_dir=str(_vc_out), overwrite=False),
+                stream=io.StringIO(),
+            )
+        except _StopAfterCaption:
+            pass
+        return len(_vc_calls)
+
+    try:
+        _vc_cold = _vc_pass()
+        # The bundle now holds captions.json. A second run clears the root first, which is
+        # exactly what used to take the cache away before stage 6 could read it.
+        _vc_warm = _vc_pass()
+    finally:
+        dyle.chat = _vc_prev_chat
+        for _key, _value in _vc_env.items():
+            if _value is None:
+                os.environ.pop(_key, None)
+            else:
+                os.environ[_key] = _value
+        (
+            dyp.probe,
+            dyp.audio,
+            dyp.stt,
+            dyp.frames,
+            dyp.quality,
+            dyp.caption,
+            dyp.synth,
+        ) = _vc_real
+    check(
+        "#121: a cold run through pipeline.run captions every frame",
+        _vc_cold == 3,
+        f"cold vision calls={_vc_cold}",
+    )
+    check(
+        "#121: a second run through pipeline.run makes zero vision calls",
+        _vc_warm == 0,
+        f"cold={_vc_cold} warm={_vc_warm}",
+    )
+    check(
+        "#121: and the warm run's captions.json still holds the frames",
+        len(
+            json.loads((_vc_out / dycap.REPORT_NAME).read_text(encoding="utf-8")).get(
+                "alignments", []
+            )
+        )
+        >= 3,
+        "the warm run lost the alignment",
+    )
+
 # --- the CLI keeps dry-run as the default -------------------------------------------
 cbuf = io.StringIO()
 with redirect_stdout(cbuf):
