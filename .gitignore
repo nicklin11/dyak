@@ -22,10 +22,11 @@ frames/
 *.opus
 *.wav
 
-# run outputs. `Bundle.open` falls back to `./output/<lecture>` when
-# $XDG_STATE_HOME is unset, so a run started in this working tree drops 29
-# artefacts and 58 PNGs into the repository with nothing ignoring them. A test
-# run with `--output-dir` puts the same flat set under any name given.
+# run outputs. The default bundle root is `$XDG_STATE_HOME/dyak/<lecture>`, else
+# `~/.local/state/dyak/<lecture>` (`bundle.state_root`, `Bundle.open`) -- outside
+# this repository, so a run started in this working tree drops nothing here. This
+# rule is defensive: it catches a run explicitly pointed into the tree with
+# `--output-dir output/...` or `DYAK_OUTPUT_DIR=output/...`.
 output/
 *.log
 
