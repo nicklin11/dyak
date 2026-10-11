@@ -1161,9 +1161,7 @@ out, err = io.StringIO(), io.StringIO()
 with redirect_stdout(out), redirect_stderr(err):
     rc = dyc.main(["process"])
 check("process without a path -> exit 1", rc == ec.USAGE, f"rc={rc}")
-check(
-    "process without a path shows usage", "dyak process PATH" in err.getvalue(), err.getvalue()
-)
+check("process without a path shows usage", "dyak process PATH" in err.getvalue(), err.getvalue())
 
 # The stub writes real files into the real work dir. Without this the directory
 # is always empty, and the listing assertions below match only the summary line
@@ -2259,6 +2257,38 @@ check(
     dyb.Bundle.open(src, output_dir=str(explicit)).created is False,
 )
 
+# --- #118: two lectures must not share one vault note; hand edits are not clobbered ---
+_v118 = tmp / "vault118"
+_v118.mkdir()
+_lec_a = dyb.Bundle.open(src, output_dir=str(tmp / "lecture-a"))
+(tmp / "lecture-a" / "note.md").write_text("# A\n")
+_lec_a.record("note", tmp / "lecture-a" / "note.md")
+_lec_b = dyb.Bundle.open(src, output_dir=str(tmp / "lecture-b"))
+(tmp / "lecture-b" / "note.md").write_text("# B\n")
+_lec_b.record("note", tmp / "lecture-b" / "note.md")
+_lec_a.export_to_vault(_v118)
+_lec_b.export_to_vault(_v118)
+check(
+    "#118: two lectures keep two notes (default subdir is per bundle)",
+    (_v118 / "dyak" / "lecture-a" / "note.md").read_text() == "# A\n"
+    and (_v118 / "dyak" / "lecture-b" / "note.md").read_text() == "# B\n",
+)
+(_v118 / "dyak" / "lecture-a" / "note.md").write_text("# A, hand-edited in Obsidian\n")
+try:
+    _lec_a.export_to_vault(_v118)
+    _refused = None
+except OSError as _exc:
+    _refused = _exc
+check(
+    "#118: a hand-edited vault note is refused, not replaced",
+    _refused is not None
+    and (_v118 / "dyak" / "lecture-a" / "note.md").read_text() == "# A, hand-edited in Obsidian\n",
+)
+_lec_a.export_to_vault(_v118, force=True)
+check(
+    "#118: --force replaces a hand-edited note",
+    (_v118 / "dyak" / "lecture-a" / "note.md").read_text() == "# A\n",
+)
 # The vault export is a copy, verified per file, and never consumes the bundle.
 b_export = dyb.Bundle.open(src, output_dir=str(tmp / "toexport"))
 (tmp / "toexport" / "note.md").write_text("# lecture\n")
@@ -2279,13 +2309,15 @@ check(
 )
 check(
     "the note is exported even though the frames are not",
-    (vault / dyb.DEFAULT_EXPORT_SUBDIR / "note.md").is_file(),
+    (vault / dyb.DEFAULT_EXPORT_SUBDIR / b_export.root.name / "note.md").is_file(),
     str(sorted(q.name for q in vault.iterdir())),
 )
 check(
     "--vault-images copies the frames too",
     len(b_export.export_to_vault(vault, images=True)) == 2
-    and (vault / dyb.DEFAULT_EXPORT_SUBDIR / "images" / "f_0001.jpg").is_file(),
+    and (
+        vault / dyb.DEFAULT_EXPORT_SUBDIR / b_export.root.name / "images" / "f_0001.jpg"
+    ).is_file(),
     str(copied),
 )
 b_export2 = dyb.Bundle.open(src, output_dir=str(tmp / "toexport2"))
@@ -2299,7 +2331,7 @@ check(
     # The subdir is not cosmetic. A lecture bundle is ~170 files; exporting into the vault
     # root puts 25 of them beside the user's own notes and creates `images/` next to them.
     "the export lands in its own directory, not the vault root",
-    (vault / dyb.DEFAULT_EXPORT_SUBDIR / "note.md").is_file(),
+    (vault / dyb.DEFAULT_EXPORT_SUBDIR / b_export.root.name / "note.md").is_file(),
     str(sorted(q.name for q in vault.iterdir())),
 )
 check(
@@ -2309,7 +2341,7 @@ check(
 )
 check(
     "frames land under images/",
-    (vault / dyb.DEFAULT_EXPORT_SUBDIR / "images" / "f_0001.jpg").is_file(),
+    (vault / dyb.DEFAULT_EXPORT_SUBDIR / b_export.root.name / "images" / "f_0001.jpg").is_file(),
     str(copied),
 )
 check(
@@ -2604,7 +2636,11 @@ _r_registered_off_images = (
 if _r is not None:
     _r.bundle.export_to_vault(_r_vault)
 _r_vault_files = (
-    {p.name for p in (_r_vault / dyb.DEFAULT_EXPORT_SUBDIR).iterdir() if p.is_file()}
+    {
+        p.name
+        for p in (_r_vault / dyb.DEFAULT_EXPORT_SUBDIR / _r.bundle.root.name).iterdir()
+        if p.is_file()
+    }
     if _r is not None
     else set()
 )
@@ -3909,9 +3945,7 @@ def _refusal_chat(messages, config, **kwargs):  # noqa: ANN001, ANN202, ARG001
 # them the `NO_ENDPOINT` path runs and reports 2 considered / 2 failed, which every assertion
 # below would read as "the refusal was counted as a failure" -- a false pass on the one bug
 # this block exists to catch.
-_refusal_saved = {
-    _k: os.environ.pop(_k, None) for _k in ("DYAK_VLM_ENDPOINT", "DYAK_VLM_MODEL")
-}
+_refusal_saved = {_k: os.environ.pop(_k, None) for _k in ("DYAK_VLM_ENDPOINT", "DYAK_VLM_MODEL")}
 os.environ["DYAK_VLM_ENDPOINT"] = "http://vision.invalid/v1"
 os.environ["DYAK_VLM_MODEL"] = "fake-vision"
 

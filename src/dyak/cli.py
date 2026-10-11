@@ -207,7 +207,10 @@ def _process(args: argparse.Namespace) -> int:
     # `--no-vault-export` is the opt-out; the export is verified by size and never blocks.
     if not getattr(args, "no_vault_export", False):
         vault = dyd.resolve_vault(getattr(args, "vault_path", None))
-        subdir = getattr(args, "vault_subdir", None) or dyb.DEFAULT_EXPORT_SUBDIR
+        subdir = (
+            getattr(args, "vault_subdir", None)
+            or f"{dyb.DEFAULT_EXPORT_SUBDIR}/{result.bundle.root.name}"
+        )
         # A vault that does not exist is reported, not created. `export_to_vault` ends in
         # `mkdir(parents=True)`, so exporting to a mistyped path silently materialises an
         # empty directory -- and then `check_vault` finds it exists, is a directory and is
@@ -243,7 +246,10 @@ def _process(args: argparse.Namespace) -> int:
                     )
             try:
                 copied = result.bundle.export_to_vault(
-                    vault, subdir=subdir, images=getattr(args, "vault_images", False)
+                    vault,
+                    subdir=subdir,
+                    images=getattr(args, "vault_images", False),
+                    force=getattr(args, "force_export", False),
                 )
             except OSError as exc:
                 print(f"dyak: vault export failed: {exc}", file=sys.stderr)
@@ -288,9 +294,7 @@ def _process(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         for finding in audit_errors[:10]:
-            print(
-                f"dyak:   line {finding.line} {finding.rule}: {finding.detail}", file=sys.stderr
-            )
+            print(f"dyak:   line {finding.line} {finding.rule}: {finding.detail}", file=sys.stderr)
         if len(audit_errors) > 10:
             print(
                 f"dyak:   ... and {len(audit_errors) - 10} more in "
@@ -349,8 +353,7 @@ def _process(args: argparse.Namespace) -> int:
         for alignment in result.caption.alignments:
             if alignment.caption_status not in ("OK", "GATED_OUT"):
                 print(
-                    f"dyak:   {alignment.frame}: {alignment.caption_status} "
-                    f"-- {alignment.reason}",
+                    f"dyak:   {alignment.frame}: {alignment.caption_status} -- {alignment.reason}",
                     file=sys.stderr,
                 )
         print(
@@ -538,6 +541,14 @@ def build_parser() -> argparse.ArgumentParser:
             "where inside the vault the bundle lands, relative to it "
             f"(default: {dyb.DEFAULT_EXPORT_SUBDIR}/). Not optional in practice: a bundle is "
             "~188 files, and the vault root holds the user's own notes"
+        ),
+    )
+    p_process.add_argument(
+        "--force-export",
+        action="store_true",
+        help=(
+            "replace a vault note that was edited by hand after the last export "
+            "(default: refuse, and report which file)"
         ),
     )
     p_process.add_argument(
