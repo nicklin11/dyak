@@ -403,7 +403,7 @@ check(
     f"read={malformed!r} stderr={err_buf.getvalue()!r}",
 )
 
-settings_file.write_text("vault = 42\nother = \"x\"\n", encoding="utf-8")
+settings_file.write_text('vault = 42\nother = "x"\n', encoding="utf-8")
 check(
     "non-string values are dropped, not stringified",
     dyd.read_settings() == {"other": "x"},

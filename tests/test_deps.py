@@ -42,7 +42,7 @@ PKG = SRC / "dyak"
 # The package under test, for the settings-feedback checks below (#156). Imported after the
 # env isolation above so the module's own `DYAK_*` reads are not the developer's.
 sys.path.insert(0, str(SRC))
-from dyak import deps as dyd
+from dyak import deps as dyd  # noqa: E402
 
 # The one permitted third-party import, and the reason it is permitted.
 ALLOWED = {"numpy"}
