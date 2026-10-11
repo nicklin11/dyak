@@ -550,7 +550,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help=(
             "where to write the output bundle (default: "
-            "$XDG_STATE_HOME/dyak/<lecture>, or ./output/<lecture> if unset)"
+            "$XDG_STATE_HOME/dyak/<lecture>, or ~/.local/state/dyak/<lecture> if unset)"
         ),
     )
     p_process.add_argument(

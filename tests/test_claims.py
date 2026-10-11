@@ -162,15 +162,15 @@ check(
 # covers nothing. `git check-ignore` asks git directly, on a path that need not exist, so
 # this creates no files in the working tree.
 #
-# These four were all missing and all reachable by an ordinary command:
-# `Bundle.open` (bundle.py) falls back to `./output/<lecture>` when $XDG_STATE_HOME is
-# unset, so a run started in this directory drops a whole bundle here; `images/` is where
-# stage 5 puts the frames, not the `frames/` the rule above names; `*.log` is where a
-# redirected run writes; and `-o dyak` from the README's zipapp build lands a binary
-# named after the package at the repository root, which `ALLOWED_ROOT` would also reject.
+# These three were all missing and all reachable by an ordinary command: `images/` is
+# where stage 5 puts the frames, not the `frames/` the rule above names; `*.log` is where
+# a redirected run writes; and the single-file zipapp build lands a binary named after the
+# package at the repository root, which `ALLOWED_ROOT` would also reject. The bundle root
+# is deliberately absent: `Bundle.open` (bundle.py:109-113,156) defaults to
+# `$XDG_STATE_HOME/dyak/<lecture>`, never a CWD-relative `./output/`, so a run started in
+# this tree leaves nothing behind.
 MUST_BE_IGNORED = {
-    "output/1_lecture_OCS/report.json": "the default bundle root when XDG_STATE_HOME is unset",
-    "output/1_lecture_OCS/images/f_1.png": "the frames stage 5 publishes",
+    "1_lecture_OCS/images/f_1.png": "the frames stage 5 publishes",
     "dyak-run.log": "a redirected run",
     "dyak": "the zipapp binary",
 }
