@@ -14,6 +14,8 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
+import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -53,28 +55,41 @@ def settings_path() -> Path:
 
 
 def read_settings() -> dict[str, str]:
-    """Top-level `key = "value"` pairs from the settings file. Never raises.
+    """Top-level `key = "value"` string pairs from the settings file. Never raises.
 
-    Deliberately a flat scan rather than `tomllib`: there is exactly one key, and a
-    dependency on a parser format would outlast the thing being parsed. A malformed line is
-    skipped and the rest of the file is still read, because a typo in a config file must not
-    take the pipeline down at stage 0.
+    The file is TOML, parsed with stdlib `tomllib` (the >=3.11 floor has it), so trailing
+    comments, quoting and escapes mean what any TOML parser says. A file that does not parse
+    is reported once to stderr with its path and yields nothing: a typo in a config file must
+    not take the pipeline down at stage 0, and must not be read as a garbage value either.
+    Non-string values are dropped rather than stringified.
     """
     path = settings_path()
     if not path.is_file():
         return {}
-    found: dict[str, str] = {}
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"dyak: cannot read settings {path}: {exc}", file=sys.stderr)
         return {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        found[key.strip()] = value.strip().strip('"').strip("'")
-    return found
+    except tomllib.TOMLDecodeError as exc:
+        print(f"dyak: ignoring malformed settings {path}: {exc}", file=sys.stderr)
+        return {}
+    return {key: value for key, value in data.items() if isinstance(value, str)}
+
+
+def _toml_string(value: str) -> str:
+    """A TOML basic string for `value`, with quotes, backslashes and control characters escaped."""
+    out: list[str] = []
+    for ch in value:
+        if ch == '"':
+            out.append('\\"')
+        elif ch == "\\":
+            out.append("\\\\")
+        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
 
 
 def write_settings(vault: Path) -> Path:
@@ -82,11 +97,14 @@ def write_settings(vault: Path) -> Path:
 
     Writing is the whole point of the first run: without it, "settable at setup" means the
     user has to guess that `DYAK_VAULT` exists, and a default nobody can discover is a
-    default nobody will change.
+    default nobody will change. The value is escaped so any path round-trips through
+    `read_settings` unchanged.
     """
     path = settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f'{SETTINGS_TEMPLATE}{SETTINGS_KEY} = "{vault}"\n', encoding="utf-8")
+    path.write_text(
+        f"{SETTINGS_TEMPLATE}{SETTINGS_KEY} = {_toml_string(str(vault))}\n", encoding="utf-8"
+    )
     return path
 
 
