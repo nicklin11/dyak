@@ -134,6 +134,8 @@ ALLOWED_ROOT = {
     "src",
     "tests",
     "tools",
+    # the committed graphify knowledge map (#116), regenerated on request
+    "graphify-out",
     # caches are ignored by git but present in a working tree; they are expected
     # on disk and must never be committed, which the .gitignore check below covers
 }
