@@ -529,7 +529,7 @@ def caption_frames(
         text = reply.text.strip()
         if not text:
             alignment.caption_status = "EMPTY"
-            alignment.reason = "vision model returned nothing"
+            alignment.reason = "vision model returned nothing; empty completions are not retried"
             alignment.caption_trace = {
                 "source": "empty",
                 "fingerprint": fingerprint,
@@ -732,6 +732,17 @@ def provenance(settings: Settings, config: llm.Config, outcome: CaptionOutcome) 
             "model": config.redacted() | {"served_model": outcome.served_model},
             "inherited_text_endpoint": config.is_vision_default,
             "cache_key": "sha256(frame bytes) + model id",
+            "empty_response_policy": {
+                "retry_limit": 0,
+                "description": "do not retry HTTP 200 empty completions; record each as EMPTY",
+                "measurement": (
+                    "42 fresh captions from 36 sampled lecture frames returned 0 empty completions. "
+                    "Then 3 frames previously reported EMPTY were re-extracted at their exact PTS "
+                    "and each returned NO_NEW_INFORMATION on both of 2 fresh calls. This supports "
+                    "the model-refusal hypothesis for those three cases, but does not establish "
+                    "how common empty completions are."
+                ),
+            },
             "ocr": "not attempted (no dependency; the vision endpoint reads the frame)",
             "uncovered_share_limit": settings.uncovered_share_limit,
             "max_chars": settings.max_chars,
