@@ -1294,8 +1294,10 @@ uout = io.StringIO()
 with redirect_stdout(uout), redirect_stderr(uout):
     rc_unverified = dyc.main(["process", str(src)])
 check(
-    "a run whose artefacts did NOT verify does NOT exit 0",
-    rc_unverified == ec.USAGE,
+    "a run whose artefacts did NOT verify has a distinct code from usage",
+    getattr(ec, "ARTEFACT_VERIFICATION_FAILED", None) is not None
+    and rc_unverified == ec.ARTEFACT_VERIFICATION_FAILED
+    and ec.ARTEFACT_VERIFICATION_FAILED != ec.USAGE,
     f"rc={rc_unverified}",
 )
 check(
@@ -1306,6 +1308,55 @@ check(
 dyp.run = fake_pipeline
 rc_ok_again = dyc.main(["process", str(src)])
 check("and it is recoverable, not latched", rc_ok_again == ec.OK, f"rc={rc_ok_again}")
+
+
+# A late export failure is reported, but must not mask the audit verdict.
+def error_audit_pipeline(source, work, **kw):
+    result = fake_pipeline(source, work, **kw)
+    result.audit.add("test", "test-error", "ERROR", 1, "synthetic error finding")
+    return result
+
+
+vault_for_failure = tmp / "vault-export-fails"
+vault_for_failure.mkdir(exist_ok=True)
+real_export = dyb.Bundle.export_to_vault
+
+
+def fail_export(self, *args, **kwargs):
+    raise OSError("synthetic export failure")
+
+
+dyb.Bundle.export_to_vault = fail_export
+export_out, export_err = io.StringIO(), io.StringIO()
+with redirect_stdout(export_out), redirect_stderr(export_err):
+    rc_export_only = dyc.main(["process", str(src), "--vault-path", str(vault_for_failure)])
+check(
+    "a clean bundle with failed vault export returns dependency failure (#127)",
+    rc_export_only == ec.DEPENDENCY_FAILED,
+    f"rc={rc_export_only}",
+)
+check(
+    "vault export failure is reported to the user (#127)",
+    "vault export failed: synthetic export failure" in export_err.getvalue(),
+    export_err.getvalue(),
+)
+
+dyp.run = error_audit_pipeline
+export_out, export_err = io.StringIO(), io.StringIO()
+with redirect_stdout(export_out), redirect_stderr(export_err):
+    rc_export_and_audit = dyc.main(["process", str(src), "--vault-path", str(vault_for_failure)])
+dyp.run = fake_pipeline
+dyb.Bundle.export_to_vault = real_export
+check(
+    "audit ERROR outranks vault export failure (#127)",
+    rc_export_and_audit == ec.AUDIT_FINDINGS,
+    f"rc={rc_export_and_audit}",
+)
+check(
+    "vault export failure is still reported when audit ERROR wins (#127)",
+    "vault export failed: synthetic export failure" in export_err.getvalue(),
+    export_err.getvalue(),
+)
 check("the transcript summary is reported", "3 segments, 40 timed words" in text, text)
 # A path into a directory release() just deleted reads like an output location
 # and is not one. Asserted per-artefact: the bare word "transcript" also occurs

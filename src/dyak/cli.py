@@ -134,8 +134,9 @@ def _process(args: argparse.Namespace) -> int:
     run that produced zero frames and exited successfully, because ffmpeg wrote an empty
     file and exited 0.
 
-    The precedence is 5 (errors in the note) > 4 (soft frames) > 1 (could not verify) >
-    0, and every message is printed regardless of which code comes out.
+    Content verdicts take precedence over a late vault-export failure: 5 (audit errors) >
+    4 (soft frames) > 6 (could not verify artefacts) > 1 (degraded note) > 3 (vault export
+    failed) > 0. Every message is printed regardless of which code comes out.
     """
     if not args.path:
         print("dyak: process needs a recording to work on.", file=sys.stderr)
@@ -213,7 +214,10 @@ def _process(args: argparse.Namespace) -> int:
     # "One command" has to mean the note ends up in the vault, not that it ends up somewhere
     # the user has to know to open. The vault resolves the same way doctor resolves it, so
     # `dyak process video.mp4` with nothing configured does what doctor just reported.
-    # `--no-vault-export` is the opt-out; the export is verified by size and never blocks.
+    # `--no-vault-export` is the opt-out; the export is verified by size.
+    # Its failure is reported now but its exit code is deferred until after the
+    # bundle's content verdicts, so it cannot mask audit/quality/verification.
+    export_failed = False
     if not getattr(args, "no_vault_export", False):
         vault = dyd.resolve_vault(getattr(args, "vault_path", None))
         subdir = (
@@ -266,16 +270,17 @@ def _process(args: argparse.Namespace) -> int:
                     "dyak:   remediation: the vault is an export target; the bundle is intact",
                     file=sys.stderr,
                 )
-                return ec.DEPENDENCY_FAILED
-            if written is not None:
-                print(f"  vault      {vault / subdir} (first run — written to {written})")
-                print(f"             {len(copied)} files exported")
+                export_failed = True
             else:
-                print(f"  vault      {len(copied)} files exported to {vault / subdir}")
-                print(
-                    f"             (change with {dyd.VAULT_ENV}, --vault-path, or "
-                    f"{dyd.settings_path()})"
-                )
+                if written is not None:
+                    print(f"  vault      {vault / subdir} (first run — written to {written})")
+                    print(f"             {len(copied)} files exported")
+                else:
+                    print(f"  vault      {len(copied)} files exported to {vault / subdir}")
+                    print(
+                        f"             (change with {dyd.VAULT_ENV}, --vault-path, or "
+                        f"{dyd.settings_path()})"
+                    )
     if not result.quality.ok:
         # ADR-0001 D4: the note is still written; a bad frame means the crops are soft, not that
         # the pipeline stopped. The quality report is the artefact that explains why.
@@ -339,13 +344,11 @@ def _process(args: argparse.Namespace) -> int:
     #        failed, 5 still wins: the reader is told the note has errors AND, above, that
     #        the frames were soft. Reporting 4 alone would hide the note's own verdict.
     #   4 -- a content frame was soft. The note exists; its inputs were not.
-    #   1 -- the pipeline could not finish, could not verify what it produced, or produced
-    #        a note no model ever wrote. This is ADR-0001 D3's point: a stage that exits 0 having
-    #        written nothing -- or having written a template and calling it synthesis --
-    #        has lied, and the only defence is that something measured the output instead
-    #        of trusting it.
-    #   0 -- every stage ran, every artefact is on disk, and the note was actually
-    #        synthesised.
+    #   6 -- the pipeline ran but required artefacts could not be verified (ADR-0001 D3).
+    #   1 -- the note is a template, not a model synthesis.
+    #   3 -- the vault export failed, but the bundle is intact and no stronger content verdict
+    #        was produced.
+    #   0 -- every stage ran, every artefact is on disk, and the note was actually synthesised.
     if audit_errors:
         return ec.AUDIT_FINDINGS
     if not result.caption_outcome.ok:
@@ -394,7 +397,9 @@ def _process(args: argparse.Namespace) -> int:
             "disagrees. Not exiting 0.",
             file=sys.stderr,
         )
-        return ec.USAGE
+        return ec.ARTEFACT_VERIFICATION_FAILED
+    if export_failed:
+        return ec.DEPENDENCY_FAILED
     print(f"dyak: all stages complete; artefacts verified in {result.bundle.root}")
     return ec.OK
 
@@ -481,7 +486,8 @@ def build_parser() -> argparse.ArgumentParser:
         f"Stages {dyp.FIRST_STAGE}-{dyp.IMPLEMENTED} are implemented. process exits 0 "
         f"only when stage 12 has verified the artefacts on disk: {ec.AUDIT_FINDINGS} if "
         f"the audit found errors, {ec.QUALITY_GATE_FAILED} if frames were soft, "
-        f"{ec.DEPENDENCY_FAILED} if a tool failed, {ec.USAGE} if it could not verify.",
+        f"{ec.ARTEFACT_VERIFICATION_FAILED} if artefacts could not be verified, and "
+        f"{ec.DEPENDENCY_FAILED} if a dependency or vault export failed.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
