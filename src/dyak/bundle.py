@@ -134,11 +134,17 @@ class Bundle:
             stem = slugify(Path(source).stem) if source else "lecture"
             root = (state_root() / stem).resolve()
 
-        if root.exists() and overwrite:
-            shutil.rmtree(root)
         existed = root.exists()
         root.mkdir(parents=True, exist_ok=True)
-        return cls(root=root, created=not existed)
+        bundle = cls(root=root, created=not existed)
+        if overwrite and existed:
+            # #119: the directory may be a user's own (`--output-dir ~/notes`). Remove only what
+            # a run writes -- the same set `clear_root` uses -- and the `images/` directory.
+            # A user file alongside them survives, and so does the directory itself.
+            bundle.clear_root()
+            if (root / IMAGES).is_dir():
+                bundle.clear_images()
+        return bundle
 
     @property
     def images(self) -> Path:
