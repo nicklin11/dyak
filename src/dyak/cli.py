@@ -80,10 +80,15 @@ def _preflight(no_llm: bool = False) -> int:
 
     The stage 0-4 dependencies are always fatal. The LLM endpoint is fatal too, because
     stages 7, 9 and 10 need it and a run without it spends its STT and frame time before
-    failing (#126). `no_llm` is the explicit consent to the template skeleton instead. The
-    vault and the vision gateway are reported but not enforced.
+    failing (#126). `no_llm` is the explicit consent to the template skeleton instead. A
+    *configured* vision endpoint is fatal for the same reason -- stage 6 needs it, and a dead
+    one is otherwise discovered there after the transcription and frame extraction have run
+    (#167) -- while an endpoint that was never configured is not: stage 6 marks every frame
+    `NO_ENDPOINT` and the pipeline still writes a note. The vault is reported but not enforced.
     """
     required = PROCESS_REQUIRES if no_llm else PROCESS_REQUIRES | {"llm"}
+    if dyd.vlm_configured():
+        required = required | {"vlm"}
     checks = run_all(required=required)
     failed = [c for c in checks if c.failed]
     degraded = [c for c in checks if not c.ok and not c.failed]
@@ -98,6 +103,15 @@ def _preflight(no_llm: bool = False) -> int:
             print(
                 "dyak: note: no LLM endpoint (--no-llm): the note will be the template "
                 "skeleton; stages 6, 7 and 9 use the endpoint",
+                file=sys.stderr,
+            )
+        elif c.name == "vlm":
+            # Reached only when neither role is configured, so there is no fallback and
+            # stage 6 has nothing to caption with. The generic note below would be false:
+            # stage 6 is exactly the stage that uses this role.
+            print(
+                "dyak: note: no vision endpoint: stage 6 will caption no frame; "
+                f"set {dyd.VLM_ENV} and {dyd.VLM_MODEL_ENV}, or {dyd.LLM_ENV} as the fallback",
                 file=sys.stderr,
             )
         else:
