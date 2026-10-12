@@ -4542,6 +4542,50 @@ check(
     _wprompts[0][1]["content"][:300],
 )
 
+# #84's second half. `synthesise` unpacks the third element of `SECTIONS` -- the skill's
+# per-section brief -- and used to discard it, handing the writer the *slice*'s brief
+# (`кадры f_a.png–f_c.png`) under the section's own title. `assemble` then imposed the real
+# heading, so the note satisfied the document contract while the writer never saw it. The
+# caption half of #84 is guarded above; this is the other half, and it had no assertion.
+_bsections: list = []
+
+
+class _BriefSynth:
+    name = "brief"
+
+    def section(self, section, transcript):
+        _bsections.append(section)
+        return dysy.SectionBody(text="тело")
+
+
+dysy.synthesise(_WIRE, "текст", src_path, _BriefSynth())
+_brief_section = _bsections[0] if _bsections else None
+check(
+    "synthesise hands the writer the skill's brief, not the slice's frame range (#84)",
+    _brief_section is not None
+    and _brief_section.brief == dysy.SECTIONS[0][2]
+    and "кадры" not in _brief_section.brief,
+    f"brief={_brief_section.brief!r} want={dysy.SECTIONS[0][2]!r}"
+    if _brief_section is not None
+    else "no calls",
+)
+
+if _brief_section is not None:
+    _wprompts.clear()
+    dyle.chat = _wire_chat
+    try:
+        _wsyn.section(_brief_section, _brief_section.text)
+    finally:
+        dyle.chat = _real_chat
+    _brief_prompt = _wprompts[0][1]["content"]
+else:
+    _brief_prompt = ""
+check(
+    "the skill's brief is in the prompt under «Что в нём должно быть» (#84)",
+    f"Что в нём должно быть: {dysy.SECTIONS[0][2]}" in _brief_prompt,
+    _brief_prompt[:300],
+)
+
 # The eight headings are the model's to write nothing about.
 note = dysy.synthesise(json.loads(scaps.read_text())["alignments"], "текст", src_path, FakeSynth())
 check(
