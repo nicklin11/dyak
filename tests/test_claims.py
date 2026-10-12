@@ -875,6 +875,85 @@ check(
     PROCESS_PARSER.format_help(),
 )
 
+# --- 8c. the --help exit-code sentence names every cause the ladder returns -------------
+# #238: the rendered `dyak --help` said "{4} if frames were soft" while `cli.py` returned 4 from
+# two places. The second cause landed with #223's guard (`cli.py:442`, guarded on `considered`),
+# which refuses the note when stage 6 found the audio and the video describing different
+# lectures; the frame gate above it (`if not result.quality.ok`) is the older cause.
+# `exitcodes.DESCRIPTIONS[4]` is generic and was already right, and the ADR row and
+# docs/quality.md were updated with the gate -- only the help sentence was missed, because
+# nothing read it.
+#
+# This is the check whose absence was the bug, and it is derived from the ladder rather than
+# from a golden string: the guard of every `return ec.QUALITY_GATE_FAILED` in `main` is
+# collected, and each one must be a cause the sentence names. A new return site fails here, a
+# lost one fails here, and so does a reworded sentence that drops a cause and leaves a user
+# whose A/V disagrees looking at their frame quality.
+HELP_CAUSES = {
+    # guard marker -> the words the help sentence must carry for that cause
+    "quality.ok": "frames were soft",
+    "caption.ok": "audio and video disagreed",
+}
+
+
+def _code_4_guards(tree: ast.AST) -> list[str]:
+    """`ast.unparse` of the `if` test guarding every `return ec.QUALITY_GATE_FAILED`."""
+    out: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        returns_4 = any(
+            isinstance(stmt, ast.Return)
+            and isinstance(stmt.value, ast.Attribute)
+            and stmt.value.attr == "QUALITY_GATE_FAILED"
+            for stmt in node.body
+        )
+        if returns_4:
+            out.append(ast.unparse(node.test))
+    return out
+
+
+CODE_4_GUARDS = _code_4_guards(CLI_TREE)
+check(
+    "the ladder has two code-4 return sites to judge",
+    len(CODE_4_GUARDS) == 2,
+    f"guards found: {CODE_4_GUARDS}",
+)
+check(
+    "every code-4 return site in the ladder is a cause this check knows",
+    all(any(marker in guard for marker in HELP_CAUSES) for guard in CODE_4_GUARDS),
+    f"guards {CODE_4_GUARDS} do not all match {sorted(HELP_CAUSES)}: a new cause needs its "
+    "wording in the --help sentence and an entry in HELP_CAUSES",
+)
+
+for _marker, _wording in HELP_CAUSES.items():
+    _guard = next((g for g in CODE_4_GUARDS if _marker in g), None)
+    check(
+        f"the --help sentence names the code-4 cause behind `{_marker}`",
+        _guard is not None and _wording in dyc.build_parser().description,
+        f"guard={_guard!r} wording={_wording!r} description={dyc.build_parser().description!r}",
+    )
+
+check(
+    "the --help sentence interpolates ec.QUALITY_GATE_FAILED, so its number follows the code",
+    any(
+        isinstance(node, ast.FormattedValue)
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == "QUALITY_GATE_FAILED"
+        for node in ast.walk(CLI_TREE)
+    ),
+    "no {ec.QUALITY_GATE_FAILED} interpolation found in cli.py",
+)
+#: Asserted on the wrapped render too, not only on `parser.description`: nothing else proves the
+#: sentence reaches the user, and argparse wraps at the terminal width -- so the two wordings
+#: are looked for in the normalised text, the way section 8b does it.
+HELP_RENDERED = " ".join(dyc.build_parser().format_help().split())
+check(
+    "both code-4 causes reach the rendered --help, not just the parser attribute",
+    all(wording in HELP_RENDERED for wording in HELP_CAUSES.values()),
+    HELP_RENDERED,
+)
+
 # --- 9. bundle.RUN_ARTEFACTS is the set `clear_root` deletes ------------------------
 # `Bundle.clear_root` removes exactly the names in `RUN_ARTEFACTS` before each run, and that
 # set is written as literals in `bundle.py` because importing the stage modules there would
