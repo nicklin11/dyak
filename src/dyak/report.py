@@ -434,6 +434,8 @@ def read_quality_gate(bundle_root: Path) -> tuple[dict[str, str] | None, str]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         return None, f"cannot read {quality.REPORT_NAME}: {exc}"
+    if not isinstance(payload, dict):
+        return None, f"{quality.REPORT_NAME} is not a JSON object"
     frames = payload.get("frames")
     if not isinstance(frames, list):
         return None, f"{quality.REPORT_NAME} has no 'frames' list"
@@ -495,24 +497,20 @@ def gate_disagreements(
         return findings
 
     path = Path(bundle_root) / caption.REPORT_NAME
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    alignments, captions_error = caption.read_alignments(path)
+    if captions_error:
+        # The reader's reasons fall into two families: the file could not be read, and it was
+        # read but its shape is wrong. The `why` says which; `detail` is the reader's reason
+        # verbatim, so stage 7 and stage 12 describe one file in one vocabulary (#201).
         findings.append(
             {
                 "artefact": caption.REPORT_NAME,
-                "why": "the frame-to-gate agreement cannot be checked against an unreadable file",
-                "detail": f"cannot read {caption.REPORT_NAME}: {exc}",
-            }
-        )
-        return findings
-    alignments = payload.get("alignments")
-    if not isinstance(alignments, list):
-        findings.append(
-            {
-                "artefact": caption.REPORT_NAME,
-                "why": "stage 6's product must list its alignments to be verifiable",
-                "detail": f"{caption.REPORT_NAME} has no 'alignments' list",
+                "why": (
+                    "the frame-to-gate agreement cannot be checked against an unreadable file"
+                    if captions_error.startswith("cannot read ")
+                    else "stage 6's product must list its alignments to be verifiable"
+                ),
+                "detail": captions_error,
             }
         )
         return findings

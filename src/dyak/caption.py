@@ -245,11 +245,38 @@ def read_manifest(manifest: Path) -> list[tuple[int, str]]:
     return rows
 
 
-def read_segments(transcript: Path) -> list[Segment]:
+def read_transcript(path: Path) -> tuple[dict | None, str]:
+    """(the transcript payload, why `transcript.json` could not be read).
+
+    `None` with an empty reason means the file is absent -- legitimate: a run may have no
+    transcript, and stage 12 names the missing required artefact. `None` with a reason means it
+    is present and unusable: truncated, not a JSON object, or without a `segments` list. A
+    wrong-shaped container is not read as "no words": measured, that degradation reports the
+    source as uncovered and exits 8 -- a claim about the lecture made from a file that is
+    simply wrong (#201).
+    """
+    if not path.is_file():
+        return None, ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"cannot read transcript.json: {exc}"
+    if not isinstance(payload, dict):
+        return None, "transcript.json is not a JSON object"
+    if not isinstance(payload.get("segments"), list):
+        return None, "transcript.json has no 'segments' list"
+    return payload, ""
+
+
+def read_segments(payload: dict) -> list[Segment]:
+    """`Segment`s from a transcript payload, dropping rows that cannot be used.
+
+    A pure parser: `read_transcript` reads the file once and decides whether a malformed
+    *file* is a failure. A malformed *row* is skipped here, not fatal -- a transcript row is
+    normalised data and stage 3 reports its own anomalies, so guessing at a row with a
+    reversed interval would hide a decoder problem behind a plausible alignment.
+    """
     segments: list[Segment] = []
-    if not transcript.is_file():
-        return segments
-    payload = json.loads(transcript.read_text(encoding="utf-8"))
     for raw in payload.get("segments") or []:
         if not isinstance(raw, dict):
             continue
@@ -322,11 +349,11 @@ def read_quality_entries(path: Path) -> tuple[dict[str, dict] | None, str]:
     state the pipeline allows and the second is a failed write.
 
     Stage 12 reads the same file through `report.read_quality_gate` and names the same failures
-    in the same words for every shape it can read; a payload that is not a JSON object is #202
-    and is named by stage 6 alone today. `tests/test_stages.py` pins the two against each other
-    for the shapes both handle, so one file is not described two ways. The reader lives here
-    rather than in `quality.py` because `caption` must not import `report` (`report` imports
-    `caption`, `report.py:48`) and stage 6 is the only reader in this PR's scope.
+    in the same words for every shape; `tests/test_stages.py` pins the two against each other,
+    so one file is not described two ways. The reader lives here rather than in `quality.py`
+    because `caption` must not import `report` (`report` imports `caption`, `report.py:48`), and
+    #202 completed the second copy in place instead of merging them: no new reader was created,
+    so there was no new drift surface to remove.
 
     The parse is guarded because this is a trust boundary: stage 5 writes the file and stage 6
     reads it moments later, and before this function a truncated file reached the user as a
@@ -354,6 +381,40 @@ def read_quality_entries(path: Path) -> tuple[dict[str, dict] | None, str]:
     return entries, ""
 
 
+def read_alignments(path: Path) -> tuple[list[dict] | None, str]:
+    """(stage 6's alignments, why `captions.json` could not be read).
+
+    Absence is a reason here, unlike `transcript.json` and `quality.json`: an audio-only source
+    is rejected before stage 6 (`probe.require_supported`) and stage 6 writes this file
+    unconditionally, so a missing one is a failed write, not a legitimate state.
+
+    A malformed entry is a reason, not a row to skip. Each entry is one frame's place in the
+    note, and a dropped one would be invisible: `report.count_frames` compares the manifest
+    against the files on disk and the coverage figure is read back from `synth.json`, so
+    neither sees a frame that never reached the note. `frame` is the only key stage 7 needs.
+
+    `report.gate_disagreements` calls this reader rather than parsing the file a second time,
+    so the reasons for one file exist once (#201).
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"cannot read {REPORT_NAME}: {exc}"
+    if not isinstance(payload, dict):
+        return None, f"{REPORT_NAME} is not a JSON object"
+    alignments = payload.get("alignments")
+    if not isinstance(alignments, list):
+        return None, f"{REPORT_NAME} has no 'alignments' list"
+    for entry in alignments:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("frame"), str)
+            or not entry["frame"]
+        ):
+            return None, f"{REPORT_NAME} has an alignment without a 'frame'"
+    return alignments, ""
+
+
 def align(
     manifest: Path,
     transcript: Path,
@@ -363,9 +424,9 @@ def align(
 ) -> Report:
     """Align every frame stage 5 passed to the words spoken while it was displayed.
 
-    Raises `runner.DependencyError` (exit 6) when `quality.json` is present and unreadable.
-    Falling back to "no gate information" would caption every frame the gate rejected, which
-    is the #82 defect; the file names its reason instead.
+    Raises `runner.DependencyError` (exit 6) when `transcript.json` or `quality.json` is present
+    and unreadable. Falling back to "no information" would caption every frame the gate rejected
+    (#82) or report the source as having no words (#201); the file names its reason instead.
     """
     settings = settings or Settings()
     report = Report(uncovered_share_limit=settings.uncovered_share_limit)
@@ -374,10 +435,23 @@ def align(
     if not frames:
         return report
 
-    transcript_payload = (
-        json.loads(transcript.read_text(encoding="utf-8")) if transcript.is_file() else {}
-    )
-    segments = read_segments(transcript)
+    transcript_payload, transcript_error = read_transcript(transcript)
+    if transcript_error:
+        # The same carrier and the same code as the gate report below: the run reached a stage
+        # that needed an artefact and the artefact could not be used, which is what code 6 now
+        # names whether the run reached stage 12 or stopped here (exitcodes.py:32-36, #201).
+        raise runner.DependencyError(
+            name="dyak",
+            code=ec.ARTEFACT_VERIFICATION_FAILED,
+            message=transcript_error,
+            remediation=(
+                "re-run `dyak process` so stage 3 rewrites it. A file that cannot be read is "
+                "not read as a transcript with no words: that would report the source as "
+                "uncovered instead of naming the failed write (#201)"
+            ),
+        )
+    transcript_payload = transcript_payload or {}
+    segments = read_segments(transcript_payload)
 
     gate_entries, gate_error = read_quality_entries(quality_report)
     if gate_error:
