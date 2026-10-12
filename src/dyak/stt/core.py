@@ -45,11 +45,14 @@ from .. import runner
 PROVENANCE_NAME = "stt-provenance.json"
 REMEDIATION = "start whisper.cpp and set DYAK_WHISPERCPP_URL, or set DYAK_STT to an endpoint"
 
-# Measured on this host, CPU whisper.cpp:
+# Measured on this host, CPU whisper.cpp. The 257.2 s figure was long recorded as
+# the 4520 s lecture's; ADR-0001's 2026-10-04 amendment shows it came from the
+# shorter 4396 s .webm, and the 4520 s run measured 315.4 s:
 #   25 s clip   ->   4.9 s wall  (0.20x realtime; server warm-up dominates here)
-#   4520 s lecture -> 257.2 s wall (0.057x realtime)
-# The 25 s figure is warm-up, not throughput -- the steady-state rate is ~0.06x,
-# so the estimate below is an interval wide enough to cover both.
+#   4396 s webm -> 257.2 s wall  (0.057x realtime)
+#   4520 s mp4  -> 315.4 s wall  (0.070x realtime)
+# The 25 s figure is warm-up, not throughput -- the two lecture-length runs measured
+# 0.057x and 0.070x, so the estimate below is an interval wide enough to cover both.
 #
 # The timeout ceiling is 2x realtime plus a fixed margin: generous, because a
 # timeout here discards a lecture-length run that has already been paid for,
@@ -64,8 +67,8 @@ TIMEOUT_MARGIN = 120.0
 RATE_RANGE = (0.05, 0.2)
 
 # Below this much audio the whisper.cpp warm-up is a material share of the run:
-# 25 s measured 0.20x, 4520 s measured 0.057x. Short inputs therefore get the
-# slow end of RATE_RANGE as their floor, not the fast end.
+# 25 s measured 0.20x, the 4396 s webm 0.057x and the 4520 s mp4 0.070x. Short
+# inputs therefore get the slow end of RATE_RANGE as their floor, not the fast end.
 WARMUP_SECONDS = 300.0
 
 

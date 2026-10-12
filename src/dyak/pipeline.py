@@ -1,19 +1,17 @@
 """Stage orchestration for `dyak process`.
 
-Stages 1-4 live here. Stage 0 (`doctor`) runs in the CLI before this is called,
-because its output is a rendered report rather than a pipeline artefact, and
-stages 5-12 are not built yet.
+Stages 1-12 live here. Stage 0 (`doctor`) runs in the CLI before this is called,
+because its output is a rendered report rather than a pipeline artefact.
 
-**Progress is reported as stage lines, and the unbuilt stages are named.** ADR-0001 D7's
-reason for stage-level progress is that the STT backend issues one blocking HTTP
-request with no streaming, and a bar that reads 90% during a 23-minute transcribe
-and then sits still is a lie about where the time went. What D7 bans is a *fabricated*
-bar, and a count of units this run itself observed is not one: the hosted route's
-chunk counter is printed as it advances (#193), while whisper.cpp -- which reports
-nothing this client can read -- says so rather than borrowing a rate. The same
-argument applies to the stages that do not exist yet: a run that stops after stage 3
-and reports "done" would misrepresent a partial pipeline as a finished one. So the
-last line of every run states what is still missing and which issue tracks it.
+**Progress is reported as stage lines.** ADR-0001 D7's reason for stage-level
+progress is that the STT backend issues one blocking HTTP request with no streaming,
+and a bar that reads 90% during a 23-minute transcribe and then sits still is a lie
+about where the time went. What D7 bans is a *fabricated* bar, and a count of units
+this run itself observed is not one: the hosted route's chunk counter is printed as
+it advances (#193), while whisper.cpp -- which reports nothing this client can read
+-- says so rather than borrowing a rate. The count in every line is
+`stages.IMPLEMENTED`, which is 12: every stage ADR-0001 § *The pipeline* lists is
+built.
 """
 
 from __future__ import annotations
@@ -258,10 +256,11 @@ def _estimate(audio_seconds: float) -> tuple[float, float]:
 
     Short inputs are not faster per second of audio -- they are *slower*,
     because the whisper.cpp warm-up is a fixed cost that a long lecture
-    amortises away. Measured here: 25 s of audio took 4.9 s (0.20x), 4520 s took
-    257.2 s (0.057x). So below WARMUP_SECONDS the floor is the slow end; using
-    the fast end there would print a lower bound 3.9x below the only measurement
-    taken at that length, which is the ADR-0001 D7 failure mode exactly.
+    amortises away. Measured here: 25 s of audio took 4.9 s (0.20x), the 4396 s
+    webm 257.2 s (0.057x) and the 4520 s mp4 315.4 s (0.070x). So below
+    WARMUP_SECONDS the floor is the slow end; using the fast end there would
+    print a lower bound 3.9x below the 25 s measurement, which is the ADR-0001 D7
+    failure mode exactly.
 
     HEADROOM widens the upper bound so the interval is never degenerate: with
     the floor already at the slow end, a short clip would otherwise print the
