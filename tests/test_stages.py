@@ -4423,8 +4423,10 @@ for _label, _raw, _why in (
 # #201: the same guard for transcript.json. Stage 6 parsed it twice -- once for the alignment
 # segments and once for `audio_duration` -- with no guard, so a truncated file or a non-object
 # payload reached the user as a JSONDecodeError/AttributeError traceback and Python's exit 1
-# (cli.py:214-220), while {"segments": "x"} was read as "no words" and reported the source as
-# uncovered (exit 8) -- a claim about the lecture made from a wrong-shaped file. Stage 12 has no
+# (cli.py:214-220), while {"segments": "x"} was read as "no words": every frame is reported
+# uncovered (captions.json's provenance and the CLI's explain output) and the note loses the
+# frames' text, with no exit code fired -- `caption.ok` is read by nothing (#223). Reading it as
+# "no words" is still a claim about the lecture made from a wrong-shaped file. Stage 12 has no
 # reader for this artefact; `caption.read_transcript` is it, and `align` now reads the file once.
 for _label, _raw, _why in (
     ("truncated", '{"audio_duration": 300.0, "segments": [', "cannot read transcript.json"),
