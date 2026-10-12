@@ -556,6 +556,143 @@ check(
     str(_src2["source"]["duration"]),
 )
 
+# --- #94: the input's own fingerprint -----------------------------------------------
+# The bundle could prove "this note came from this transcript" (#79 hashes the transcript)
+# and only *assert* "this note came from this lecture" by filename. The two real files for
+# this lecture are the case: `1_lecture_OCS.mp4` (418568189 bytes, sha256 `a8a04e47...`) and
+# `1_lecture_OCS.webm` (883684992 bytes, `c0e51742...`) slugify to the same bundle and differ
+# in `duration` alone (4520.1 vs 4396), so a re-encode at the same duration is invisible in
+# the record without a size and a digest.
+#
+# `getattr`/`.get` rather than attribute and item access throughout, because these checks
+# exist to fail on the code that predates the two fields: an AttributeError or a KeyError
+# would abort the suite instead of failing one check, and the neighbours of a check that
+# aborts are the ones this file's accumulate-then-report shape is for.
+_fixture_digest = hashlib.sha256(src.read_bytes()).hexdigest()
+_linked = tmp / "linked-lecture.webm"
+_linked.symlink_to(src)
+install_fake(
+    {
+        "ffprobe": [
+            (
+                json.dumps(
+                    {
+                        "streams": [
+                            {
+                                "codec_type": "video",
+                                "codec_name": "vp8",
+                                "width": 1920,
+                                "height": 1080,
+                            },
+                            {
+                                "codec_type": "audio",
+                                "codec_name": "opus",
+                                "sample_rate": "48000",
+                                "channels": 2,
+                            },
+                        ],
+                        "format": {"duration": "4396.000000"},
+                    }
+                ).encode(),
+                b"",
+                0,
+            )
+        ]
+    }
+)
+_linked_info = dyprobe.probe(_linked)
+check(
+    # A symlink is the case that separates "resolved" from "the string the user typed": the
+    # fixture's own path is already absolute and symlink-free, so `probe(src)` cannot tell the
+    # two apart. The comment above the ffprobe argv claimed resolving "normalises the path in
+    # every message the user sees afterwards" and did not do it -- only the argv was resolved
+    # (`str(src.resolve())`), while `info.path` kept whatever the user typed.
+    "#94: probe resolves the input path before it stats it",
+    str(_linked_info.path) == str(src.resolve()) and str(_linked_info.path) != str(_linked),
+    f"{_linked_info.path} (asked for {_linked})",
+)
+check(
+    "#94: and measures the size and the digest of the file it resolved",
+    getattr(_linked_info, "size_bytes", None) == src.stat().st_size
+    and getattr(_linked_info, "sha256", None) == _fixture_digest,
+    f"{getattr(_linked_info, 'size_bytes', None)} {getattr(_linked_info, 'sha256', None)}",
+)
+_fingerprint = json.loads(dyprobe.provenance(_linked_info, ffmpeg_version="ffmpeg version n9.0.2"))
+check(
+    # The same document stages 1-2 already publish: `probe.provenance`'s own docstring settled
+    # that ("One document rather than two ... that is a single fact") and the file is already
+    # in `RUN_ARTEFACTS`, so it is already exported with the bundle -- no new artefact, and
+    # stage 12 can say which file the run read without re-hashing anything.
+    "#94: the record carries the path, the size and the digest",
+    _fingerprint["source"].get("path") == str(src.resolve())
+    and _fingerprint["source"].get("size_bytes") == src.stat().st_size
+    and _fingerprint["source"].get("sha256") == _fixture_digest,
+    str(_fingerprint["source"]),
+)
+check(
+    "#94: in the document stages 1-2 already publish, not a new artefact",
+    dyprobe.PROVENANCE_NAME in dyb.RUN_ARTEFACTS,
+    str(sorted(dyb.RUN_ARTEFACTS)),
+)
+check(
+    # `null` would claim the run measured a size and a digest and found neither; the key is
+    # absent instead, the pattern `ffmpeg` and `extracted_audio` already use for a value this
+    # document cannot speak to. The hand-built `MediaInfo` above is the case: it predates the
+    # two fields, and the existing checks on it stay green.
+    "#94: an unset fingerprint omits the keys rather than writing null",
+    "size_bytes" not in _src["source"] and "sha256" not in _src["source"],
+    str(_src["source"]),
+)
+
+# A re-run against a changed input is recorded, not detected and not refused (#94): the new
+# record replaces the old one in the same bundle, so the document describes the input *that
+# run* read -- the rule `clear_images` already applies to `images/`. A refusal was rejected
+# because the mixing it appears to fix does not depend on the input changing (filed as #219):
+# the refusal would fail a legitimate re-encode-and-re-run while leaving that in place.
+_rerun = tmp / "fingerprint-rerun"
+_rerun_bodies = (b"the first cut", b"a re-encode of the same lecture")
+_rerun_digests = []
+for _index, _body in enumerate(_rerun_bodies):
+    _input = tmp / f"rerun-{_index}" / "lecture.webm"
+    _input.parent.mkdir(parents=True, exist_ok=True)
+    _input.write_bytes(_body)
+    install_fake(
+        {
+            "ffprobe": [
+                (
+                    json.dumps(
+                        {
+                            "streams": [
+                                {"codec_type": "video", "codec_name": "vp8"},
+                                {
+                                    "codec_type": "audio",
+                                    "codec_name": "opus",
+                                    "sample_rate": "48000",
+                                    "channels": 2,
+                                },
+                            ],
+                            "format": {"duration": "100"},
+                        }
+                    ).encode(),
+                    b"",
+                    0,
+                )
+            ]
+        }
+    )
+    _bundle = dyb.Bundle.open(_input, output_dir=str(_rerun))
+    _record = tmp / "rerun-provenance.json"
+    _record.write_text(dyprobe.provenance(dyprobe.probe(_input)), encoding="utf-8")
+    _bundle.publish(_record.name, _record)
+    _rerun_digests.append(
+        json.loads((_rerun / _record.name).read_text(encoding="utf-8"))["source"].get("sha256")
+    )
+check(
+    "#94: a re-run against a changed input records the new one and refuses nothing",
+    _rerun_digests == [hashlib.sha256(body).hexdigest() for body in _rerun_bodies],
+    str(_rerun_digests),
+)
+
 install_fake(
     {
         "ffprobe": [
