@@ -125,8 +125,11 @@ class RunResult:
 #: not answer was "what did this run cost": stage 3 transcribes 4520 s of audio in ~297 s and
 #: no artefact said so. Stages 6, 7 and 9 record per-call seconds (`caption_trace`, the two
 #: `*-llm-transcript.json`), which made the omission look like a stage-3 gap. It was not --
-#: stages 1, 2, 4, 5, 8, 10, 11 and 12 recorded nothing either, and stages 5-12 do not even
-#: print the seconds they had.
+#: stages 1, 2, 4, 5, 8, 10, 11 and 12 recorded nothing either, and stage 12 is the one stage
+#: that does not print its seconds on the terminal: `report.run` writes its own `[12/12]` line
+#: without them (`report.py:646-649`), so `_stages` skips `StageReport.line()` for it. The
+#: qualifier is load-bearing: stage 12's seconds *do* reach `timings.json` (the note at the
+#: stage-12 append says so), and this sidecar is what writes them there.
 #:
 #: A sidecar, not an artefact: written straight to `bundle.root` and deliberately **not**
 #: registered through `Bundle.record`, so `bundle.summary()` and stage 12's REQUIRED/OPTIONAL
