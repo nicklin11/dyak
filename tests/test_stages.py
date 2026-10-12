@@ -4084,8 +4084,8 @@ check("no frames is not ok", not dycap.align(ctmp / "none.tsv", ctrans, cquality
 # could not read killed the run as an internal error -- JSONDecodeError, or AttributeError for
 # a payload that is not an object -- which reaches the user as a traceback and Python's exit 1
 # (cli.py:214-220), indistinguishable from a usage error. Stage 12 already fails this file
-# with a named reason (report.read_quality_gate, #87); these two loops pin stage 6 to the same
-# words for the same bytes, so one file is not described two ways.
+# with a named reason (report.read_quality_gate, #87); the first loop below pins stage 6 to the
+# same words for the same bytes, so one file is not described two ways.
 for _label, _raw, _why in (
     ("truncated", '{"frames": [', "cannot read"),
     ("frames-is-not-a-list", '{"frames": "x"}', "has no 'frames' list"),

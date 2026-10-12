@@ -30,10 +30,10 @@ QUALITY_GATE_FAILED = 4
 AUDIT_FINDINGS = 5
 
 # 6 — the pipeline ran, but required artefacts could not be verified on disk (ADR-0001 D3).
-# Not only stage 12's end-of-run check: a stage that needs a required artefact and cannot read
-# it names the same failure and exits 6 too (stage 6 on an unreadable gate report, #188). So
-# the code means "the run happened and the artefacts are not trustworthy", whether the run
-# reached stage 12 or stopped at the stage that needed the artefact.
+# Also produced by a run that stops at the stage which needed the artefact, not only by stage
+# 12's end-of-run check: stage 6 exits 6 when the gate report it must read is unreadable
+# (caption.py:388-391, #188), so the code means "the artefacts are not trustworthy", whether
+# the run reached stage 12 or stopped at the stage that needed the artefact.
 ARTEFACT_VERIFICATION_FAILED = 6
 
 # 7 — a model ran, but its note is degraded/incomplete and needs user attention.

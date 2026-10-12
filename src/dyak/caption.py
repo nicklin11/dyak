@@ -326,7 +326,7 @@ def read_quality_entries(path: Path) -> tuple[dict[str, dict] | None, str]:
     and is named by stage 6 alone today. `tests/test_stages.py` pins the two against each other
     for the shapes both handle, so one file is not described two ways. The reader lives here
     rather than in `quality.py` because `caption` must not import `report` (`report` imports
-    `caption`, #188) and stage 6 is the only reader in this PR's scope.
+    `caption`, `report.py:48`) and stage 6 is the only reader in this PR's scope.
 
     The parse is guarded because this is a trust boundary: stage 5 writes the file and stage 6
     reads it moments later, and before this function a truncated file reached the user as a
