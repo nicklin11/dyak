@@ -91,6 +91,13 @@ jobs:
       - name: Doctor suite
         run: python tests/test_doctor.py
 
+      # The precedence resolver (#52): flag > environment > settings file > default, the flat
+      # key naming rule, the derived honoured-key set, and typo rejection. It drives the real
+      # call sites (vault, terms dir, output dir, work dir, both model roles, STT), so a
+      # resolver that works but is not consulted fails here.
+      - name: Settings resolver suite (#52)
+        run: python tests/test_settings.py
+
       # The model-id invariant (#61): the id that was *requested* stays canonical in
       # `synth.json`, while the id the endpoint *reported* is recorded beside it and never
       # overwrites it. This suite passed for months while no workflow ran it (#173) -- a

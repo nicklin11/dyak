@@ -160,19 +160,25 @@ for path in sorted((REPO / "tests").rglob("*.py")):
         "; ".join(f"{p}:{ln} imports {n}" for p, ln, n in bad),
     )
 
-# --- 5. the honoured-key set cannot drift from the code that reads it ---------
-# #156 makes `read_settings` warn about every key outside `HONOURED_SETTINGS`, so that set is
-# a claim about which keys the tool reads. A second hand-kept list is exactly the drift this
-# repo keeps finding, so the claim is derived from the source: every `read_settings().get(...)`
-# call site, with module-level string constants resolved, is compared against the set. Add a
-# reader without listing its key and the warning starts lying about a key the tool uses; list
-# a key nothing reads and it lies in the other direction.
+# --- 5. the honoured-key set is derived from the constants the code defines ----
+# #52 makes `settings.resolve` the one reader and `HONOURED_SETTINGS` the set of flat keys the
+# settings file may carry. Both are claims about the code, and a second hand-kept list is the
+# drift this repo keeps finding. Two directions, checked separately because they are different
+# bugs:
+#
+#   * a `DYAK_*` constant the source defines but `HONOURED_SETTINGS` omits -> the file cannot
+#     set a variable the code reads, and the resolver refuses a key the tool uses;
+#   * an honoured key with no `resolve(...)` call site -> the file accepts a key that then
+#     does nothing, which is the defect #156 and #52 both exist for.
+#
+# `DYAK_SETTINGS` is the one documented exception: it names the file being read, so the file
+# cannot carry it and `settings_path` reads it directly.
 
-SETTINGS_READER = "read_settings"
+RESOLVER = "resolve"
 
 
 def string_constants(tree: ast.Module) -> dict[str, str]:
-    """Module-level `NAME = "literal"` bindings, so `get(SETTINGS_KEY)` resolves."""
+    """Module-level `NAME = "literal"` bindings, so `resolve(ENDPOINT_ENV)` resolves."""
     consts: dict[str, str] = {}
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -190,57 +196,183 @@ def string_constants(tree: ast.Module) -> dict[str, str]:
     return consts
 
 
-def settings_read_keys(tree: ast.Module) -> tuple[list[str], list[int]]:
-    """Every key a `read_settings().get(...)` call consults, and the lines it could not resolve."""
-    consts = string_constants(tree)
-    keys: list[str] = []
+def imported_constants(tree: ast.Module, known: dict[str, str]) -> dict[str, str]:
+    """`from .settings import NAME as ALIAS` bindings, resolved to the literal in `settings`.
+
+    The constants live in one module, so every other module reaches them through an import.
+    Without this the call-site harvest could not resolve `resolve(ENDPOINT_ENV)` and the
+    guard would be vacuous.
+    """
+    consts: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        if not node.module.endswith("settings"):
+            continue
+        for alias in node.names:
+            if alias.name in known:
+                consts[alias.asname or alias.name] = known[alias.name]
+    return consts
+
+
+def defines_resolver(tree: ast.Module) -> bool:
+    """True when this module defines its own `resolve` (stt/backends picks a backend)."""
+    return any(isinstance(node, ast.FunctionDef) and node.name == RESOLVER for node in tree.body)
+
+
+def shadows_resolver(tree: ast.Module) -> bool:
+    """True when a bare `resolve` in this module is not `settings.resolve`.
+
+    `stt/__init__.py` re-exports `backends.resolve` (the backend selector) and calls it; that
+    is a different function with the same name, and counting its calls as settings reads would
+    make this guard lie.
+    """
+    if defines_resolver(tree):
+        return True
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        if node.module.endswith("settings"):
+            continue
+        if any(alias.name == RESOLVER for alias in node.names):
+            return True
+    return False
+
+
+def resolve_call_names(tree: ast.Module, known: dict[str, str]) -> tuple[list[str], list[int]]:
+    """Every `resolve(...)` call's variable name, and the lines it could not resolve.
+
+    A bare `resolve` is `settings.resolve` unless the module shadows it; `settings.resolve` /
+    `dyd.resolve` are matched by attribute name.
+    """
+    consts = {**string_constants(tree), **imported_constants(tree, known)}
+    bare_ok = not shadows_resolver(tree)
+    names: list[str] = []
     unresolved: list[int] = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+        if not isinstance(node, ast.Call) or not node.args:
             continue
-        if node.func.attr != "get" or not node.args:
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            called = func.attr
+        elif isinstance(func, ast.Name):
+            called = func.id if bare_ok else ""
+        else:
             continue
-        inner = node.func.value
-        if not isinstance(inner, ast.Call):
-            continue
-        callee = inner.func
-        name = callee.attr if isinstance(callee, ast.Attribute) else getattr(callee, "id", "")
-        if name != SETTINGS_READER:
+        if called != RESOLVER:
             continue
         arg = node.args[0]
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            keys.append(arg.value)
+            names.append(arg.value)
         elif isinstance(arg, ast.Name) and arg.id in consts:
-            keys.append(consts[arg.id])
+            names.append(consts[arg.id])
+        elif isinstance(arg, ast.Attribute) and arg.attr in known:
+            names.append(known[arg.attr])
         else:
             unresolved.append(node.lineno)
-    return keys, unresolved
+    return names, unresolved
 
 
-consulted: dict[str, str] = {}
-unresolved_keys: list[str] = []
+settings_tree = ast.parse(
+    (PKG / "settings.py").read_text(encoding="utf-8"), filename=str(PKG / "settings.py")
+)
+settings_consts = string_constants(settings_tree)
+
+live_names: set[str] = set()
+resolved_names: dict[str, str] = {}
+unresolved_calls: list[str] = []
 for path in modules:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    keys, unresolved = settings_read_keys(tree)
     rel = path.relative_to(REPO).as_posix()
-    for key in keys:
-        consulted.setdefault(key, rel)
-    unresolved_keys += [f"{rel}:{line}" for line in unresolved]
+    # The constants, not every prose mention: `"DYAK_LLM_* pair"` in a message is not a
+    # variable, and test_claims.py already holds the documentation to the full string set.
+    for value in string_constants(tree).values():
+        if re.fullmatch(r"DYAK_[A-Z_]+", value):
+            live_names.add(value)
+    names, unresolved = resolve_call_names(tree, settings_consts)
+    for name in names:
+        resolved_names.setdefault(name, rel)
+    unresolved_calls += [f"{rel}:{line}" for line in unresolved]
+# The endpoint URLs are built from `DEFAULT_ENDPOINTS` keys in `backends.py`; both are
+# literals in `settings.py` now, but the dynamic name is added so the set does not depend on
+# how the message is phrased.
+BACKENDS_SRC = (PKG / "stt" / "backends.py").read_text(encoding="utf-8")
+for backend in re.findall(r'^\s{4}"(\w+)":\s*"http', BACKENDS_SRC, flags=re.M):
+    live_names.add(f"DYAK_{backend.upper()}_URL")
 
+honoured_names = {f"DYAK_{key.upper()}" for key in dyd.HONOURED_SETTINGS}
 check(
-    "the reader set the drift check runs against is populated",
-    bool(consulted),
-    f"no read_settings().get() call site found, so the check guards nothing: {sorted(consulted)}",
+    "the constant set the honoured-key check runs against is populated",
+    len(live_names) >= 15,
+    f"only {len(live_names)} names known: {sorted(live_names)}",
 )
 check(
-    "every read_settings() key is a literal or a resolvable constant",
-    not unresolved_keys,
-    "; ".join(unresolved_keys),
+    "every DYAK_* constant the source defines is honoured, and only those",
+    live_names == honoured_names | {dyd.SETTINGS_PATH_ENV},
+    f"in code, not honoured: {sorted(live_names - honoured_names - {dyd.SETTINGS_PATH_ENV})}; "
+    f"honoured, not in code: {sorted((honoured_names | {dyd.SETTINGS_PATH_ENV}) - live_names)}",
 )
 check(
-    "the honoured-key set matches the keys the code actually reads",
-    set(consulted) == set(dyd.HONOURED_SETTINGS),
-    f"read: {sorted(consulted)}; honoured: {sorted(dyd.HONOURED_SETTINGS)}",
+    "every resolve() call site names a known variable",
+    not unresolved_calls and set(resolved_names) <= honoured_names,
+    f"unresolved: {unresolved_calls}; unknown: {sorted(set(resolved_names) - honoured_names)}",
+)
+check(
+    "every honoured key has a resolve() call site, so no key is accepted and then ignored",
+    set(resolved_names) == honoured_names,
+    f"honoured with no reader: {sorted(honoured_names - set(resolved_names))}; "
+    f"read but not honoured: {sorted(set(resolved_names) - honoured_names)}",
+)
+
+# --- 5b. no call site reads a DYAK_* variable behind the resolver's back ------
+# `resolve` is the single precedence point only if every reader goes through it. A call site
+# that reaches into `os.environ` for a `DYAK_*` variable has no file layer and offers no flag
+# layer -- exactly the "no setting may bypass it" rule in #52. Non-setting variables
+# (`XDG_STATE_HOME` in `bundle.py`) are still allowed, so this is about the variable's name,
+# not about `os.environ` existing. `settings.py` is the resolver itself.
+
+
+def raw_env_reads(tree: ast.Module, known: dict[str, str]) -> list[int]:
+    """Lines that read a `DYAK_*` variable from `os.environ` / `os.getenv` directly."""
+    consts = {**string_constants(tree), **imported_constants(tree, known)}
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        arg = None
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and func.attr in {"get", "pop"}:
+                if isinstance(func.value, ast.Attribute) and func.value.attr == "environ":
+                    arg = node.args[0] if node.args else None
+            elif isinstance(func, ast.Attribute) and func.attr == "getenv":
+                if isinstance(func.value, ast.Name) and func.value.id == "os":
+                    arg = node.args[0] if node.args else None
+        elif isinstance(node, ast.Subscript):
+            value = node.value
+            if isinstance(value, ast.Attribute) and value.attr == "environ":
+                arg = node.slice
+        if arg is None:
+            continue
+        name = None
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            name = arg.value
+        elif isinstance(arg, ast.Name) and arg.id in consts:
+            name = consts[arg.id]
+        if name and name.startswith("DYAK_"):
+            lines.append(node.lineno)
+    return lines
+
+
+raw: list[str] = []
+for path in modules:
+    if path.name == "settings.py":
+        continue
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    rel = path.relative_to(REPO).as_posix()
+    raw += [f"{rel}:{line}" for line in raw_env_reads(tree, settings_consts)]
+check(
+    "no module reads a DYAK_* variable except through settings.resolve (#52)",
+    not raw,
+    "; ".join(raw),
 )
 
 # --- 6. the settings file reports what it will not honour (#156) --------------
@@ -276,10 +408,12 @@ check(
     repr(clean_err),
 )
 
-inert_result, inert_err = read_settings_with(f'{dyd.SETTINGS_KEY} = "/v"\nstt = "whispercpp"\n')
+inert_result, inert_err = read_settings_with(f'{dyd.SETTINGS_KEY} = "/v"\nnot_a_setting = "x"\n')
 check(
     "a key no setting reads warns, naming the key and the file (#156)",
-    "stt" in inert_err and str(settings_file) in inert_err and "not a setting" in inert_err,
+    "not_a_setting" in inert_err
+    and str(settings_file) in inert_err
+    and "not a setting" in inert_err,
     repr(inert_err),
 )
 check(
@@ -332,14 +466,14 @@ check(
 )
 
 os.environ[dyd.SETTINGS_PATH_ENV] = str(settings_file)
-settings_file.write_text(f'{dyd.SETTINGS_KEY} = "/v"\nstt = "x"\n', encoding="utf-8")
+settings_file.write_text(f'{dyd.SETTINGS_KEY} = "/v"\nnot_a_setting = "x"\n', encoding="utf-8")
 split_check = dyd.check_settings()
 check(
     "doctor names the honoured and the ignored keys (#156)",
     split_check.ok
     and not split_check.fatal
     and dyd.SETTINGS_KEY in split_check.detail
-    and "stt" in split_check.detail,
+    and "not_a_setting" in split_check.detail,
     split_check.detail,
 )
 
