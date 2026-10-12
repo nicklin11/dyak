@@ -33,6 +33,31 @@ the requested one and the two are left to disagree in the open.
   gateway) or may require one. Unset means send no `Authorization` header, which both of
   those accept. Guessing a placeholder key would produce a 401 that looks like an auth
   problem when it is a config one.
+
+## Concurrency
+
+`DYAK_LLM_CONCURRENCY` (default **1**) is how many section requests stage 7 and stage 9 may
+have in flight at once (#153). Both make one request per note section and both are blocking
+`urllib` calls, so the number is a thread count: it bounds what this client has outstanding,
+and says nothing about what the endpoint does with them.
+
+The default is 1 because the endpoint this is built against is a local gateway. A gateway with
+one model behind it serves concurrent requests by queueing them, so the knob buys wall clock
+only where the provider does, and it stays opt-in.
+
+Two rules hold at any value:
+
+* **The calls are recorded in section order, not completion order.** ADR-0004 D4 makes the
+  recorded order part of the provenance contract, so `Transcript.record` takes the section a
+  call belongs to and `as_dict` -- the artefact -- writes the calls in that order.
+* **Every shared write stays on the calling thread.** `map_bounded` runs the request in a
+  worker and nothing else: the loop that owns the transcript, the findings and the progress
+  line consumes the replies in the order it submitted the jobs, so no lock is needed and the
+  interleaving the counter shows is the section order (#197).
+
+The two stages stop differently, and that difference lives in their own loops rather than
+here: stage 9 stops at the first failed call, stage 7 after `BREAKER_MAX` consecutive
+connection failures. `map_bounded` takes the rule as a predicate.
 """
 
 from __future__ import annotations
@@ -43,9 +68,16 @@ import json
 import time
 import urllib.error
 import urllib.request
+from collections import deque
+from collections.abc import Callable
+from concurrent import futures
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypeVar
 
+from . import exitcodes as ec
+from . import runner
+from .settings import LLM_CONCURRENCY_ENV as CONCURRENCY_ENV
 from .settings import LLM_ENDPOINT_ENV as ENDPOINT_ENV
 from .settings import LLM_KEY_ENV as KEY_ENV
 from .settings import LLM_MODEL_ENV as MODEL_ENV
@@ -370,6 +402,12 @@ def _to_reply(data: dict, model: str, seconds: float, attempts: int) -> Reply:
     )
 
 
+#: The key `record` carries a call's section position in until `as_dict` writes the artefact.
+#: Not a fact about the call, so it is stripped: `purpose` already names the section, and the
+#: sequential transcript must not gain a field the concurrent one needs.
+_SECTION_KEY = "section"
+
+
 @dataclass
 class Transcript:
     """Every call made, for the provenance chain.
@@ -377,22 +415,62 @@ class Transcript:
     Held in memory and written once. ADR-0004 D4 requires that a note can be traced to the exact
     model output it came from, and the cheapest way to guarantee that is to record it at the
     point of the call rather than reconstructing it later.
+
+    `calls` is the order the calls *finished* in, which under `DYAK_LLM_CONCURRENCY > 1` is not
+    the order of the note. The artefact is `as_dict`, which writes them in section order; a
+    reader who needs the provenance contract reads that and not this list.
     """
 
     calls: list[dict] = field(default_factory=list)
 
-    def record(self, stage: str, purpose: str, messages: list[dict], reply: Reply) -> None:
-        self.calls.append(
-            {
-                "stage": stage,
-                "purpose": purpose,
-                "messages": messages,
-                **reply.as_dict(),
-            }
-        )
+    def record(
+        self,
+        stage: str,
+        purpose: str,
+        messages: list[dict],
+        reply: Reply,
+        *,
+        section: int | None = None,
+    ) -> None:
+        """Record one call. `section` is its position in the note, for the artefact's order.
+
+        A call with no section keeps the order it was recorded in -- today every caller is a
+        per-section loop and passes one, but a stage that records outside a loop must not have
+        to invent a number to stay where it is.
+        """
+        entry = {
+            "stage": stage,
+            "purpose": purpose,
+            "messages": messages,
+            **reply.as_dict(),
+        }
+        if section is not None:
+            entry[_SECTION_KEY] = section
+        self.calls.append(entry)
 
     def as_dict(self) -> dict:
-        return {"calls": self.calls}
+        """The artefact: `calls` in section order (ADR-0004 D4).
+
+        Concurrent calls come back in completion order, and the note they document is read in
+        section order, so the order is restored here rather than at each call site -- one place
+        owns the contract, and a stage that records calls gets it without asking.
+
+        `sorted` is stable, so unkeyed calls keep their relative order and follow the keyed
+        ones. At `DYAK_LLM_CONCURRENCY=1` the sections are already ascending and this is the
+        identity, which is what keeps the sequential transcript byte-identical.
+        """
+        if not any(_SECTION_KEY in call for call in self.calls):
+            return {"calls": self.calls}
+        ordered = sorted(
+            self.calls,
+            key=lambda call: (call.get(_SECTION_KEY) is None, call.get(_SECTION_KEY) or 0),
+        )
+        return {
+            "calls": [
+                {key: value for key, value in call.items() if key != _SECTION_KEY}
+                for call in ordered
+            ]
+        }
 
     def write(self, target: Path) -> None:
         target.write_text(
@@ -426,3 +504,100 @@ class Breaker:
     @property
     def tripped(self) -> bool:
         return self.consecutive >= self.limit
+
+
+#: Section requests stage 7 and stage 9 may have in flight at once when `DYAK_LLM_CONCURRENCY`
+#: is unset. 1 is the sequential run this client shipped with, and it is the right default for
+#: the local gateway the stages are pointed at (#153).
+DEFAULT_CONCURRENCY = 1
+
+
+def concurrency() -> int:
+    """How many section requests one stage may have in flight at once.
+
+    Read where it is used rather than at import, so an unset variable leaves the run exactly as
+    it was and a test can set it per call.
+
+    A value that is not a positive whole number is refused, not clamped. Clamping would make
+    `DYAK_LLM_CONCURRENCY=0` -- what someone writes to ask for sequential -- look like it
+    worked; exit 1 names the variable instead, the same answer
+    `DYAK_OPENAI_MAX_UPLOAD_BYTES` gives a bad count (`stt/openai_compat.py:470`).
+    """
+    raw = resolve(CONCURRENCY_ENV, default=str(DEFAULT_CONCURRENCY)).value
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        value = 0
+    if value < 1:
+        raise runner.DependencyError(
+            name="llm",
+            code=ec.USAGE,
+            message=f"{CONCURRENCY_ENV} is not a positive request count: {raw!r}",
+            remediation=(
+                "set it to the number of section requests stage 7 and stage 9 may have in "
+                f"flight at once (default {DEFAULT_CONCURRENCY} = one at a time)"
+            ),
+        )
+    return value
+
+
+T = TypeVar("T")
+
+
+def map_bounded(
+    jobs: list[Callable[[], T]],
+    workers: int,
+    *,
+    stop_when: Callable[[object], bool] | None = None,
+) -> list[T | EndpointError | NotConfiguredError | None]:
+    """Call every job with at most `workers` in flight; results in the order they were given.
+
+    Only the request runs in a worker. The caller keeps every shared write -- the transcript,
+    the findings, the progress line -- on its own thread, and consumes this list in order, so
+    the recorded section order is a property of the loop and not of a lock (#153).
+
+    `stop_when` is asked after each reply, in that same order, whether the calls after it
+    should be left alone; an unattempted job's slot is `None`. The predicate belongs to the
+    caller because the two stages stop on different things: stage 9 stops at the first failed
+    call, where its sequential loop `break`s, and stage 7 stops after `BREAKER_MAX` consecutive
+    connection failures. Calls already in flight when the predicate trips still finish -- at
+    most `workers` of them -- and their replies are kept, so a dead endpoint costs a bounded
+    number of ladders instead of one per section (#124).
+
+    `EndpointError` and `NotConfiguredError` come back as values, because both stages catch
+    both around their call and a raised one would lose the section it belongs to. Anything else
+    is a bug in this program and propagates.
+    """
+    results: list[T | EndpointError | NotConfiguredError | None] = [None] * len(jobs)
+    if not jobs:
+        return results
+    window = max(1, min(workers, len(jobs)))
+    with futures.ThreadPoolExecutor(max_workers=window) as pool:
+        pending: deque[tuple[int, futures.Future]] = deque()
+
+        def start(index: int) -> None:
+            pending.append((index, pool.submit(jobs[index])))
+
+        for index in range(window):
+            start(index)
+        following = window
+        stopped = False
+        while pending:
+            index, future = pending.popleft()
+            results[index] = _outcome(future)
+            if stop_when is not None and not stopped and stop_when(results[index]):
+                # Not `break`: the calls already in flight are paid for either way, and each
+                # reply belongs to the section that asked for it.
+                stopped = True
+            if not stopped and following < len(jobs):
+                start(following)
+                following += 1
+    return results
+
+
+def _outcome(future: futures.Future) -> object:
+    """A job's reply, or the failure its caller would have caught. Anything else propagates."""
+    try:
+        return future.result()
+    except (EndpointError, NotConfiguredError) as exc:
+        return exc

@@ -562,7 +562,13 @@ class LLMSynthesizer:
             },
         ]
         reply = llm.chat(messages, self.config)
-        self.transcript.record(7, f"section {section.number}", messages, reply)
+        # `section.number` is the call's position in the note, and the transcript writes the
+        # calls back in that order: with `DYAK_LLM_CONCURRENCY > 1` this record happens in a
+        # worker, so the append order is the completion order and ADR-0004 D4 needs the
+        # section order instead (#153).
+        self.transcript.record(
+            7, f"section {section.number}", messages, reply, section=section.number
+        )
         return SectionBody(text=reply.text, finish_reason=reply.finish_reason)
 
 
@@ -642,6 +648,78 @@ def normalise(body: str) -> str:
     return "\n".join(_HEADING.sub(demote, line) for line in body.splitlines())
 
 
+def _section_target(lecture: Lecture, number: int, title: str, brief: str) -> Section:
+    """One section as the writer is asked for it.
+
+    The skill's own number, title and brief -- not the slice's "Фрагмент N" (#117). A writer
+    that is not told it is writing "Паспорт лекции" cannot write one. Every request carries the
+    whole lecture, so the payload is `lecture.text` and the slices are only a frame boundary
+    kept visible inside it.
+    """
+    return Section(
+        number=number,
+        title=title,
+        brief=brief,
+        start_ms=lecture.start_ms,
+        end_ms=lecture.end_ms,
+        text=lecture.text,
+        frames=lecture.frames,
+        captions=lecture.captions,
+        word_count=lecture.words_sent,
+    )
+
+
+def _unattempted(number: int, title: str, limit: int) -> tuple[str, dict]:
+    """What a section the breaker never sent is reported as: the note, and the section record.
+
+    Shared by the sequential `stopped` branch and the concurrent one, because "not attempted"
+    has to read the same in both -- it is the difference between a section that failed and a
+    section nobody asked for (#124).
+    """
+    return (
+        f"section {number}: not attempted; stage 7 stopped after "
+        f"{limit} consecutive connection failures",
+        {
+            "number": number,
+            "title": title,
+            "present": False,
+            "reason": "not attempted: stage 7 stopped after repeated connection failures",
+        },
+    )
+
+
+def _finish_section(
+    number: int, title: str, body: str, finish_reason: str | None
+) -> tuple[str, dict, list[str]]:
+    """Normalise one section's body and describe it: `(body, record, warnings)`.
+
+    The TOC discard and the heading demotion are the same in both modes. A body that reached
+    the note one way sequentially and another way concurrently would be a second definition of
+    what a section is, and stage 8's structural lint would be checking whichever one it got.
+    """
+    extra: list[str] = []
+    first = body.splitlines()[0] if body.splitlines() else ""
+    if first and _TOC.match(first):
+        # A model told "section 5 of 8" will sometimes answer with the contents of the
+        # whole document. Shipping that as section 5 duplicates eight headings and puts
+        # a table of contents where the mathematics belongs.
+        body = ""
+        extra.append(f"section {number}: model emitted a table of contents, discarded")
+    else:
+        body = normalise(body)
+    return (
+        body,
+        {
+            "number": number,
+            "title": title,
+            "present": bool(body.strip()),
+            "bytes": len(body.encode("utf-8")),
+            "finish_reason": finish_reason,
+        },
+        extra,
+    )
+
+
 def synthesise(
     alignments: list[dict],
     transcript_text: str,
@@ -664,6 +742,8 @@ def synthesise(
     warnings: list[str] = []
     breaker = llm.Breaker()
     stopped = False
+    workers = llm.concurrency()
+    targets = [_section_target(lecture, number, title, brief) for number, title, brief in SECTIONS]
 
     if lecture.dropped:
         warnings.append(
@@ -671,6 +751,36 @@ def synthesise(
             + ", ".join(lecture.dropped)
             + f" did not reach the model; coverage {lecture.coverage:.0%}"
         )
+
+    if workers > 1 and lecture.text.strip():
+        # `DYAK_LLM_CONCURRENCY > 1`: the eight requests are dispatched in section order on
+        # this thread and the replies are folded back in that order below, so
+        # `synth-llm-transcript.json` and `synth.json` read in section order whatever order the
+        # endpoint answers in (#153, ADR-0004 D4). The transcript's own ordering is handled by
+        # `llm.Transcript.record`, which is told which section each call belongs to.
+        def stop_when(outcome: object) -> bool:
+            """The #124 rule, read off the replies in section order instead of mid-loop.
+
+            The same `Breaker` and the same count as the sequential loop: only connection-level
+            failures count, and any answer at all resets it. What differs is that the stop is
+            decided between replies, so the calls dispatched while those replies were still
+            coming back also run: the concurrent arm can spend up to
+            `workers + BREAKER_MAX - 1` ladders where the sequential one spends `BREAKER_MAX`.
+            """
+            if not isinstance(outcome, llm.EndpointError):
+                return False
+            if outcome.connection:
+                return breaker.fail()
+            breaker.ok()
+            return False
+
+        prefetched = llm.map_bounded(
+            [lambda target=target: synthesizer.section(target, lecture.text) for target in targets],
+            workers,
+            stop_when=stop_when,
+        )
+    else:
+        prefetched = None
 
     for index, (number, section_title, brief) in enumerate(SECTIONS):
         # First statement of the body, before the no-material and stopped checks (#197): every
@@ -688,78 +798,68 @@ def synthesise(
                 }
             )
             continue
-        # The skill's own number, title and brief -- not the slice's "Фрагмент N" (#117). A
-        # writer that is not told it is writing "Паспорт лекции" cannot write one.
-        target = Section(
-            number=number,
-            title=section_title,
-            brief=brief,
-            start_ms=lecture.start_ms,
-            end_ms=lecture.end_ms,
-            text=lecture.text,
-            frames=lecture.frames,
-            captions=lecture.captions,
-            word_count=lecture.words_sent,
-        )
-        if stopped:
-            # Seven more ladders against an endpoint already known to be down is the cost
-            # #124 is about, and an unattempted section is not a failed synthesis.
-            warnings.append(
-                f"section {number}: not attempted; stage 7 stopped after "
-                f"{breaker.limit} consecutive connection failures"
-            )
-            reported.append(
-                {
-                    "number": number,
-                    "title": section_title,
-                    "present": False,
-                    "reason": "not attempted: stage 7 stopped after repeated connection failures",
-                }
-            )
-            continue
-        finish_reason: str | None = None
-        try:
-            outcome = synthesizer.section(target, lecture.text)
-        except llm.NotConfiguredError as exc:
-            warnings.append(f"section {number}: {exc}")
-            body = ""
-        except llm.EndpointError as exc:
-            # One failed section must not lose the seven that succeeded. The note
-            # survives a failed synthesis.
-            warnings.append(f"section {number}: {exc}")
-            body = ""
-            if exc.connection:
-                stopped = breaker.fail()
+        target = targets[index]
+        if prefetched is None:
+            if stopped:
+                # Seven more ladders against an endpoint already known to be down is the cost
+                # #124 is about, and an unattempted section is not a failed synthesis.
+                warning, entry = _unattempted(number, section_title, breaker.limit)
+                warnings.append(warning)
+                reported.append(entry)
+                continue
+            finish_reason: str | None = None
+            try:
+                outcome = synthesizer.section(target, lecture.text)
+            except llm.NotConfiguredError as exc:
+                warnings.append(f"section {number}: {exc}")
+                body = ""
+            except llm.EndpointError as exc:
+                # One failed section must not lose the seven that succeeded. The note
+                # survives a failed synthesis.
+                warnings.append(f"section {number}: {exc}")
+                body = ""
+                if exc.connection:
+                    stopped = breaker.fail()
+                else:
+                    breaker.ok()
             else:
+                body = outcome.text
+                finish_reason = outcome.finish_reason
                 breaker.ok()
+                if outcome.truncated:
+                    warnings.append(
+                        f"section {number}: model output hit the length limit; the section is "
+                        "truncated and its ending is missing"
+                    )
         else:
-            body = outcome.text
-            finish_reason = outcome.finish_reason
-            breaker.ok()
-            if outcome.truncated:
-                warnings.append(
-                    f"section {number}: model output hit the length limit; the section is "
-                    "truncated and its ending is missing"
-                )
-        first = body.splitlines()[0] if body.splitlines() else ""
-        if first and _TOC.match(first):
-            # A model told "section 5 of 8" will sometimes answer with the contents of the
-            # whole document. Shipping that as section 5 duplicates eight headings and puts
-            # a table of contents where the mathematics belongs.
-            body = ""
-            warnings.append(f"section {number}: model emitted a table of contents, discarded")
-        else:
-            body = normalise(body)
+            outcome = prefetched[index]
+            if outcome is None:
+                # Not dispatched: the breaker had already tripped when this section came up.
+                warning, entry = _unattempted(number, section_title, breaker.limit)
+                warnings.append(warning)
+                reported.append(entry)
+                continue
+            finish_reason = None
+            if isinstance(outcome, llm.NotConfiguredError):
+                warnings.append(f"section {number}: {outcome}")
+                body = ""
+            elif isinstance(outcome, llm.EndpointError):
+                # The breaker was updated when this reply came back, in section order, by
+                # `stop_when`; counting it again here would trip it at half the failures.
+                warnings.append(f"section {number}: {outcome}")
+                body = ""
+            else:
+                body = outcome.text
+                finish_reason = outcome.finish_reason
+                if outcome.truncated:
+                    warnings.append(
+                        f"section {number}: model output hit the length limit; the section is "
+                        "truncated and its ending is missing"
+                    )
+        body, entry, extra = _finish_section(number, section_title, body, finish_reason)
         bodies[number] = body
-        reported.append(
-            {
-                "number": number,
-                "title": section_title,
-                "present": bool(body.strip()),
-                "bytes": len(body.encode("utf-8")),
-                "finish_reason": finish_reason,
-            }
-        )
+        warnings.extend(extra)
+        reported.append(entry)
 
     markdown = assemble(note_title, bodies, slices)
     missing = [n for n, _, _ in SECTIONS if not bodies.get(n, "").strip()]

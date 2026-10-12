@@ -6691,6 +6691,296 @@ check(
     str([f.severity for f in crit]),
 )
 
+# --- #153: DYAK_LLM_CONCURRENCY, and what it does to stage 9's cap ------------------------
+# Stages 7 and 9 make one blocking call per note section, and #153 lets them overlap. Two
+# claims have to hold that no wall clock shows: at 1 the run is the run that shipped -- the
+# transcript byte-for-byte, and the cap still stopping requests -- and above 1 the provenance
+# transcript is written in section order even though the replies arrive in another one, because
+# ADR-0004 D4 makes that order part of the artefact.
+_SECTION_HEADINGS = [f"{number}. {title}" for number, title, _ in dysy.SECTIONS]
+
+
+def _concurrency(value, fn):
+    """Run `fn` with `DYAK_LLM_CONCURRENCY` set to `value`, or unset when it is None."""
+    previous = os.environ.pop(dyle.CONCURRENCY_ENV, None)
+    if value is not None:
+        os.environ[dyle.CONCURRENCY_ENV] = str(value)
+    try:
+        return fn()
+    finally:
+        os.environ.pop(dyle.CONCURRENCY_ENV, None)
+        if previous is not None:
+            os.environ[dyle.CONCURRENCY_ENV] = previous
+
+
+def _stub_reply(text: str) -> dyle.Reply:
+    return dyle.Reply(
+        text=text, model="stub", prompt_tokens=1, completion_tokens=1, seconds=0.0, attempts=1
+    )
+
+
+_knob_values = {value: _concurrency(value, dyle.concurrency) for value in (None, 1, 4)}
+_knob_refusals = [
+    _concurrency(value, lambda: raises(dyle.concurrency)) for value in (0, -2, "abc", "1.5")
+]
+check(
+    "the concurrency knob is 1 unless set, reads the environment, and refuses a non-count (#153)",
+    _knob_values == {None: 1, 1: 1, 4: 4}
+    and all(
+        exc is not None and exc.code == ec.USAGE and dyle.CONCURRENCY_ENV in exc.message
+        for exc in _knob_refusals
+    ),
+    f"{_knob_values} refused={[(e.code, e.message) for e in _knob_refusals if e]}",
+)
+
+# The ordering rule itself, without a stage in the way: the artefact is what ADR-0004 D4 is
+# about, and `calls` is the order the replies actually arrived in.
+_section_trace = dyle.Transcript()
+for _number in (3, 1, 2):
+    _section_trace.record(
+        7, f"section {_number}", [], _stub_reply(f"тело {_number}"), section=_number
+    )
+_section_artefact = _section_trace.as_dict()["calls"]
+check(
+    "a call recorded with its section is written in section order, not completion order (#153)",
+    [call["purpose"] for call in _section_artefact] == ["section 1", "section 2", "section 3"]
+    and [call["purpose"] for call in _section_trace.calls]
+    == ["section 3", "section 1", "section 2"]
+    and not any("section" in call for call in _section_artefact),
+    f"artefact={[c['purpose'] for c in _section_artefact]} "
+    f"recorded={[c['purpose'] for c in _section_trace.calls]}",
+)
+
+
+class _OutOfOrderCritic:
+    """Answers every section, section 1 last.
+
+    The delay reverses the completion order, and that is the control the checks below need: a
+    transcript written per completion would come out backwards, and without `completions` "the
+    artefact is in section order" could be true because the stub happened to answer in order.
+    """
+
+    def __init__(self, text: str = "OK", step: float = 0.02) -> None:
+        self.text = text
+        self.step = step
+        self.completions: list[str] = []
+        self.seen: list[list[dict]] = []
+
+    def __call__(self, messages, config, **kw):
+        heading = messages[1]["content"].split("## КОНСПЕКТ — ")[1].split("\n")[0]
+        time.sleep(self.step * (len(_SECTION_HEADINGS) - _SECTION_HEADINGS.index(heading)))
+        self.completions.append(heading)
+        self.seen.append(messages)
+        return _stub_reply(self.text)
+
+
+def _critic_run(workers, stub, limit=6):
+    """`tier2_critic` on `clean_note` with the knob set: (findings, coverage, transcript)."""
+
+    def call():
+        trace = dyle.Transcript()
+        dyle.chat = stub
+        try:
+            found, _dropped, coverage = dyau.tier2_critic(
+                clean_note, LECT, _critic_cfg, trace, limit=limit, stream=io.StringIO()
+            )
+        finally:
+            dyle.chat = real_chat
+        return found, coverage, trace
+
+    return _concurrency(workers, call)
+
+
+_cdir = tmp / "concurrency"
+_cdir.mkdir(parents=True, exist_ok=True)
+_concurrency_stubs = {}
+_concurrency_runs = {}
+for _name, _workers in (("unset", None), ("one", 1), ("four", 4)):
+    _concurrency_stubs[_name] = _OutOfOrderCritic()
+    _concurrency_runs[_name] = _critic_run(_workers, _concurrency_stubs[_name])
+    _concurrency_runs[_name][2].write(_cdir / f"{_name}.json")
+_transcripts = {name: (_cdir / f"{name}.json").read_bytes() for name in _concurrency_runs}
+check(
+    # Not a stored golden: the three arms are the same fixture in the same session, and the
+    # concurrent one is in there because a transcript that only matches when nothing overlaps
+    # would be the artefact of the sequential path, not of the stage.
+    "the transcript at DYAK_LLM_CONCURRENCY=1 is byte-identical to the sequential one (#153)",
+    _transcripts["unset"] == _transcripts["one"] == _transcripts["four"]
+    and len(_transcripts["one"]) > 0,
+    f"{len(_transcripts['unset'])} bytes unset, {len(_transcripts['one'])} at 1, "
+    f"{len(_transcripts['four'])} at 4",
+)
+check(
+    "and the concurrent arm answered out of section order, so that check has teeth (#153)",
+    _concurrency_stubs["four"].completions != _SECTION_HEADINGS
+    and sorted(_concurrency_stubs["four"].completions) == sorted(_SECTION_HEADINGS)
+    and _concurrency_stubs["one"].completions == _SECTION_HEADINGS,
+    f"at 4 {_concurrency_stubs['four'].completions} at 1 {_concurrency_stubs['one'].completions}",
+)
+
+# The cap, which #153 does not let be glossed: the two readings are different audits, and the
+# owner's decision is that above 1 every section is sent and the cap becomes a report limit.
+_conc_cap_stub = _OutOfOrderCritic(GOOD_LINE, step=0.0)
+_conc_cap_found, _conc_cap_cov, _conc_cap_trace = _critic_run(4, _conc_cap_stub, limit=1)
+_seq_cap_stub = _OutOfOrderCritic(GOOD_LINE, step=0.0)
+_seq_cap_found, _seq_cap_cov, _seq_cap_trace = _critic_run(1, _seq_cap_stub, limit=1)
+check(
+    "with concurrency the cap no longer stops requests: every section is sent (#153)",
+    len(_conc_cap_trace.calls) == 8
+    and len(_conc_cap_cov["reviewed"]) == 8
+    and _conc_cap_cov["skipped"] == 0
+    and len(_conc_cap_stub.seen) == 8,
+    f"{len(_conc_cap_trace.calls)} calls, reviewed {len(_conc_cap_cov['reviewed'])}, "
+    f"skipped {_conc_cap_cov['skipped']}",
+)
+check(
+    "and it becomes a report limit on the collected findings, named as such (#153)",
+    len(_conc_cap_found) == 1
+    and _conc_cap_cov["capped"] is True
+    and _conc_cap_cov.get("cap_scope") == "findings"
+    and _conc_cap_cov.get("cap_dropped") == 7,
+    str({k: v for k, v in _conc_cap_cov.items() if k.startswith("cap")}),
+)
+check(
+    "while the sequential path still stops requests at the cap, and keeps its old shape (#153)",
+    len(_seq_cap_trace.calls) == 1
+    and _seq_cap_cov["skipped"] == 7
+    and _seq_cap_cov["capped"] is True
+    and "cap_scope" not in _seq_cap_cov,
+    f"{len(_seq_cap_trace.calls)} calls, {_seq_cap_cov}",
+)
+
+
+def _audit_status(workers):
+    """Stage 9's run line through `audit()`, which is where a cap is read as a clean audit."""
+
+    def call():
+        dyle.chat = _OutOfOrderCritic(GOOD_LINE, step=0.0)
+        try:
+            return dyau.audit(clean_note, LECT, A, config=_critic_cfg, stream=io.StringIO()).tier2
+        finally:
+            dyle.chat = real_chat
+
+    return _concurrency(workers, call)
+
+
+_conc_status = _audit_status(4)
+_seq_status = _audit_status(1)
+check(
+    "the run line says which cap applied, so a capped audit is not read as a clean one (#153)",
+    "collected findings were dropped" in _conc_status
+    and "collected findings were dropped" not in _seq_status
+    and "capped at 6 findings" in _seq_status,
+    f"k=4 {_conc_status!r} k=1 {_seq_status!r}",
+)
+
+# The counter is written where the requests are dispatched, on the calling thread, so with four
+# in flight it still reads in section order and the interleaving the #197 decision forbids
+# cannot happen.
+_conc_stream = _FlushRecorder()
+dyle.chat = _OutOfOrderCritic(step=0.02)
+try:
+    _concurrency(
+        4,
+        lambda: dyau.tier2_critic(
+            clean_note, LECT, _critic_cfg, dyle.Transcript(), stream=_conc_stream
+        ),
+    )
+finally:
+    dyle.chat = real_chat
+_conc_lines = [
+    line.strip()
+    for line in _conc_stream.getvalue().splitlines()
+    if line.startswith("           sections ")
+]
+check(
+    "the section counter is written in section order under concurrency (#197, #153)",
+    _conc_lines == [f"sections {i}/8" for i in range(8)] and _conc_stream.flushes >= 8,
+    f"{_conc_lines} flushes={_conc_stream.flushes}",
+)
+
+
+_synth_cfg = dyle.Config(endpoint="http://x/v1", model="m")
+
+
+class _OutOfOrderChat:
+    """Stage 7's request shape, answered section 1 last -- the same control as above."""
+
+    def __init__(self, step: float = 0.02) -> None:
+        self.step = step
+        self.completions: list[int] = []
+
+    def __call__(self, messages, config, **kw):
+        number = int(messages[1]["content"].split("Раздел ")[1].split(" ")[0])
+        time.sleep(self.step * (len(dysy.SECTIONS) - number + 1))
+        self.completions.append(number)
+        return _stub_reply(f"тело {number}")
+
+
+def _synth_run(workers, stub):
+    """`synthesise` over the real `LLMSynthesizer` and a stubbed transport: (note, transcript)."""
+
+    def call():
+        trace = dyle.Transcript()
+        dyle.chat = stub
+        try:
+            note = dysy.synthesise(
+                _WIRE,
+                "текст",
+                src_path,
+                dysy.LLMSynthesizer(_synth_cfg, trace),
+                stream=io.StringIO(),
+            )
+        finally:
+            dyle.chat = real_chat
+        return note, trace
+
+    return _concurrency(workers, call)
+
+
+_seq_synth_stub = _OutOfOrderChat()
+_seq_synth_note, _seq_synth_trace = _synth_run(1, _seq_synth_stub)
+_conc_synth_stub = _OutOfOrderChat()
+_conc_synth_note, _conc_synth_trace = _synth_run(4, _conc_synth_stub)
+_synth_dir = tmp / "concurrency7"
+_synth_dir.mkdir(parents=True, exist_ok=True)
+_seq_synth_trace.write(_synth_dir / "one.json")
+_conc_synth_trace.write(_synth_dir / "four.json")
+_conc_purposes = [call["purpose"] for call in _conc_synth_trace.as_dict()["calls"]]
+check(
+    # Stage 7's record happens inside the request, so it lands in completion order; the artefact
+    # is section order, and the in-memory list is asserted to differ so the ordering is provably
+    # `as_dict`'s doing rather than the loop's.
+    "stage 7's transcript is written in section order above 1, and unchanged at 1 (#153)",
+    _conc_synth_stub.completions != list(range(1, 9))
+    and _conc_purposes == [f"section {n}" for n in range(1, 9)]
+    and [call["purpose"] for call in _conc_synth_trace.calls] != _conc_purposes
+    and (_synth_dir / "one.json").read_bytes() == (_synth_dir / "four.json").read_bytes()
+    and _conc_synth_note.markdown == _seq_synth_note.markdown,
+    f"completions={_conc_synth_stub.completions} artefact={_conc_purposes}",
+)
+
+
+def _slow_critic(messages, config, **kw):
+    """The same answer at a fixed cost per call, so the two arms can be timed."""
+    time.sleep(0.15)
+    return _stub_reply("OK")
+
+
+_slow_began = time.perf_counter()
+_critic_run(1, _slow_critic)
+_slow_one = time.perf_counter() - _slow_began
+_slow_began = time.perf_counter()
+_critic_run(4, _slow_critic)
+_slow_four = time.perf_counter() - _slow_began
+check(
+    # The knob's whole point, on the suite's own fixture: eight calls that each cost 150 ms
+    # cannot finish in about one call's time unless four of them really are in flight.
+    "eight 150 ms calls take about one call's time at 4, so the calls do overlap (#153)",
+    _slow_four < _slow_one / 2,
+    f"1 -> {_slow_one:.2f}s, 4 -> {_slow_four:.2f}s",
+)
+
 # ADR-0001 D5's enforced format, checked mechanically. Each of these is a plausible critic output
 # and each must be discarded -- with a logged reason, never silently.
 SECTION = "содержимое"

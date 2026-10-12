@@ -56,6 +56,7 @@ OPENAI_MAX_UPLOAD_BYTES_ENV = "DYAK_OPENAI_MAX_UPLOAD_BYTES"
 LLM_ENDPOINT_ENV = "DYAK_LLM_ENDPOINT"
 LLM_MODEL_ENV = "DYAK_LLM_MODEL"
 LLM_KEY_ENV = "DYAK_LLM_KEY"
+LLM_CONCURRENCY_ENV = "DYAK_LLM_CONCURRENCY"
 VLM_ENDPOINT_ENV = "DYAK_VLM_ENDPOINT"
 VLM_MODEL_ENV = "DYAK_VLM_MODEL"
 VLM_KEY_ENV = "DYAK_VLM_KEY"
@@ -94,7 +95,9 @@ HONOURED_SETTINGS: frozenset[str] = frozenset(
 #: Honoured keys whose value is a number in the environment and in the built-in default, so a
 #: bare TOML integer in the file is the value rather than a type error (#192). Derived from the
 #: constant above for the same reason `HONOURED_SETTINGS` is: the name exists once.
-NUMERIC_SETTINGS: frozenset[str] = frozenset({settings_key(OPENAI_MAX_UPLOAD_BYTES_ENV)})
+NUMERIC_SETTINGS: frozenset[str] = frozenset(
+    {settings_key(OPENAI_MAX_UPLOAD_BYTES_ENV), settings_key(LLM_CONCURRENCY_ENV)}
+)
 
 # --- the resolver --------------------------------------------------------------------
 #: `Resolved.source` values, named rather than inline so a caller compares against a symbol.

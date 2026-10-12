@@ -49,6 +49,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -549,6 +550,89 @@ def parse_critic_findings(
 SECTION_CHARS = 6000
 
 
+@dataclass(frozen=True)
+class _Section:
+    """One note section's request: what the critic is sent, and what the report says about it."""
+
+    index: int
+    heading: str
+    text: str
+    messages: list[dict]
+    over_limit: bool
+
+
+def _section_request(index: int, part: str, transcript_text: str) -> _Section | None:
+    """The request for one `## ` section, or None when it has no body to audit.
+
+    Shared by the sequential loop and the concurrent one so a section cannot be sent one thing
+    in one mode and another in the other: the transcript-first order (#123) and the
+    `SECTION_CHARS` cut are decided here, once.
+    """
+    heading, _, body = part.partition("\n")
+    if not body.strip() or body.strip() == "в лекции не затрагивается":
+        return None
+    section_text = body.strip()
+    messages = [
+        {"role": "system", "content": CRITIC_SYSTEM},
+        {
+            "role": "user",
+            "content": (
+                # The transcript first and the section last (#123). All eight requests then
+                # share the transcript as a common prefix, which is the condition a
+                # provider prefix-cache is built for; section-first made every request's
+                # prefix unique, so none of them could share anything.
+                f"## СТЕНОГРАММА ЛЕКЦИИ\n\n{transcript_text.strip()}"
+                f"\n\n## КОНСПЕКТ — {heading.strip()}\n\n{section_text[:SECTION_CHARS]}"
+            ),
+        },
+    ]
+    return _Section(
+        index=index,
+        heading=heading.strip(),
+        text=section_text,
+        messages=messages,
+        over_limit=len(section_text) > SECTION_CHARS,
+    )
+
+
+def _fold_reply(
+    section: _Section,
+    reply: llm.Reply,
+    llm_log: llm.Transcript,
+    out: list[Finding],
+    all_dropped: list[dict],
+    transcript_text: str,
+) -> int:
+    """Record one reply and fold it into the findings; returns the findings it added.
+
+    One function for both loops, so a reply cannot mean two things: the transcript record --
+    which ADR-0004 D4 makes provenance -- and the OK/abstain/parse handling all happen here, in
+    the order the caller walks the sections.
+    """
+    # `section.index` is the call's position in the note. Recorded so the transcript writes the
+    # calls in that order (ADR-0004 D4) rather than in the order this loop happens to walk them
+    # (#153); `llm.Transcript.as_dict` is where that order is applied.
+    llm_log.record(
+        9, f"critic: {section.heading[:40]}", section.messages, reply, section=section.index
+    )
+    text = reply.text.strip()
+    if text.upper() == "OK":
+        return 0
+    if text.upper() in ABSTAIN:
+        # An abstention is a result. It is recorded so that a section which was
+        # reviewed and produced nothing is distinguishable from one nobody read.
+        out.append(
+            Finding("tier2", "critic/abstained", "INFO", 0, "the auditor was not sure", text)
+        )
+        return 0
+    kept, dropped = parse_critic_findings(text, section.text, transcript_text)
+    for entry in dropped:
+        entry["section"] = section.heading[:60]
+    out.extend(kept)
+    all_dropped.extend(dropped)
+    return len(kept)
+
+
 def tier2_critic(
     markdown: str,
     transcript_text: str,
@@ -563,6 +647,15 @@ def tier2_critic(
     per section keeps each call's context small, and a cap keeps the audit's cost bounded
     and its latency predictable. The cap is reported, not silently applied.
 
+    `DYAK_LLM_CONCURRENCY` changes what the cap *is*, and the two meanings do not produce the
+    same audit (#153). At 1, the default, the cap stops requests: a section reached once
+    `limit` findings exist is never sent, and it is reported in `skipped`. Above 1 every
+    section is sent -- there is no "so far" to stop on -- and the cap becomes a limit on the
+    findings that survive, cut after the loop with the remainder counted in `cap_dropped`.
+    That second reading is the owner's decision on #153, taken rather than guessed. A reader of
+    the artefact can tell which applied: `cap_scope` is `"findings"` only in the second case,
+    and the sequential coverage keeps exactly the keys it had before this knob existed.
+
     Cost, stated: each request carries the section *and* the whole transcript, so the
     stage is N times the transcript in context. That is ADR-0001's own estimate for this
     stage (~106k tokens for a 90-minute lecture), not an accident of the implementation.
@@ -576,6 +669,7 @@ def tier2_critic(
     # contradiction (#197).
     progress = stream if stream is not None else sys.stdout
     sections = re.split(r"^## ", markdown, flags=re.M)[1:]
+    workers = llm.concurrency()
     reviewed: list[str] = []
     truncated: list[str] = []
     skipped = 0
@@ -585,81 +679,114 @@ def tier2_critic(
     # not spent the budget -- letting abstentions consume it would stop the audit reaching
     # the sections where the errors actually are.
     findings_so_far = 0
-    for index, part in enumerate(sections):
-        # First statement of the body, before the cap and empty-body checks (#197): a section
-        # skipped by either still advances the counter, so the cap cannot freeze it. The unit
-        # is a note section, and the first line is `sections 0/N` with no interval.
-        stages.progress_line(progress, "sections", index, len(sections))
-        if findings_so_far >= limit:
-            skipped += 1
-            continue
-        heading, _, body = part.partition("\n")
-        if not body.strip() or body.strip() == "в лекции не затрагивается":
-            skipped += 1
-            continue
-        reviewed.append(heading.strip())
-        section_text = body.strip()
-        if len(section_text) > SECTION_CHARS:
-            # Reported, not silent. A section audited only in part can pass a review of the
-            # part that was sent, which is a clean bill of health for text nobody read (#123).
-            truncated.append(heading.strip())
-        messages = [
-            {"role": "system", "content": CRITIC_SYSTEM},
-            {
-                "role": "user",
-                "content": (
-                    # The transcript first and the section last (#123). All eight requests then
-                    # share the transcript as a common prefix, which is the condition a
-                    # provider prefix-cache is built for; section-first made every request's
-                    # prefix unique, so none of them could share anything.
-                    f"## СТЕНОГРАММА ЛЕКЦИИ\n\n{transcript_text.strip()}"
-                    f"\n\n## КОНСПЕКТ — {heading.strip()}\n\n{section_text[:SECTION_CHARS]}"
-                ),
-            },
-        ]
-        try:
-            reply = llm.chat(messages, config)
-        except llm.NotConfiguredError:
-            raise
-        except llm.EndpointError as exc:
-            out.append(Finding("tier2", "critic/unavailable", "WARN", 0, str(exc)))
-            break
-        llm_log.record(9, f"critic: {heading.strip()[:40]}", messages, reply)
-        text = reply.text.strip()
-        if text.upper() == "OK":
-            continue
-        if text.upper() in ABSTAIN:
-            # An abstention is a result. It is recorded so that a section which was
-            # reviewed and produced nothing is distinguishable from one nobody read.
-            out.append(
-                Finding("tier2", "critic/abstained", "INFO", 0, "the auditor was not sure", text)
+    cap_dropped = 0
+
+    if workers == 1:
+        # The sequential run, kept as the loop it always was: `DYAK_LLM_CONCURRENCY=1` is
+        # byte-identical to the behaviour before the knob existed, and the way to keep that a
+        # fact rather than a hope is to leave the path that produced it alone.
+        for index, part in enumerate(sections):
+            # First statement of the body, before the cap and empty-body checks (#197): a section
+            # skipped by either still advances the counter, so the cap cannot freeze it. The unit
+            # is a note section, and the first line is `sections 0/N` with no interval.
+            stages.progress_line(progress, "sections", index, len(sections))
+            if findings_so_far >= limit:
+                skipped += 1
+                continue
+            section = _section_request(index, part, transcript_text)
+            if section is None:
+                skipped += 1
+                continue
+            reviewed.append(section.heading)
+            if section.over_limit:
+                # Reported, not silent. A section audited only in part can pass a review of the
+                # part that was sent, which is a clean bill of health for text nobody read (#123).
+                truncated.append(section.heading)
+            try:
+                reply = llm.chat(section.messages, config)
+            except llm.NotConfiguredError:
+                raise
+            except llm.EndpointError as exc:
+                out.append(Finding("tier2", "critic/unavailable", "WARN", 0, str(exc)))
+                break
+            findings_so_far += _fold_reply(
+                section, reply, llm_log, out, all_dropped, transcript_text
             )
-            continue
-        kept, dropped = parse_critic_findings(text, body, transcript_text)
-        for entry in dropped:
-            entry["section"] = heading.strip()[:60]
-        out.extend(kept)
-        findings_so_far += len(kept)
-        all_dropped.extend(dropped)
+    else:
+        # `DYAK_LLM_CONCURRENCY > 1`. The sections are planned and dispatched in note order on
+        # this thread, the requests run in workers, and the replies are folded back in the same
+        # order -- so the transcript, the findings and the counter are all in section order
+        # whatever order the endpoint answers in (#153, ADR-0004 D4).
+        plans: list[_Section | None] = []
+        for index, part in enumerate(sections):
+            # Written here, before the request is dispatched: with the calls in flight the
+            # dispatch is what makes the count an observable fact, and a line written per
+            # completion would interleave nondeterministically (#197).
+            stages.progress_line(progress, "sections", index, len(sections))
+            section = _section_request(index, part, transcript_text)
+            plans.append(section)
+            if section is None:
+                skipped += 1
+        jobs: list[Callable[[], llm.Reply]] = []
+        sending: list[_Section] = []
+        for section in plans:
+            if section is None:
+                continue
+            sending.append(section)
+            jobs.append(lambda section=section: llm.chat(section.messages, config))
+        replies = llm.map_bounded(
+            jobs,
+            workers,
+            # The sequential loop breaks at the first failed call, so this one stops
+            # dispatching at the first failure too; the calls already in flight finish.
+            stop_when=lambda outcome: isinstance(outcome, llm.EndpointError),
+        )
+        for section, outcome in zip(sending, replies):
+            if outcome is None:
+                # Left alone after an earlier call failed. The sequential loop stops there as
+                # well; the difference is that this one cannot un-send the calls in flight.
+                skipped += 1
+                continue
+            reviewed.append(section.heading)
+            if section.over_limit:
+                truncated.append(section.heading)
+            if isinstance(outcome, llm.NotConfiguredError):
+                raise outcome
+            if isinstance(outcome, llm.EndpointError):
+                out.append(Finding("tier2", "critic/unavailable", "WARN", 0, str(outcome)))
+                continue
+            findings_so_far += _fold_reply(
+                section, outcome, llm_log, out, all_dropped, transcript_text
+            )
+        # The cap as a report limit (the owner's decision on #153): every section was sent, so
+        # what is left to bound is what the report holds.
+        cap_dropped = max(0, len(out) - limit)
+        out = out[:limit]
+
     # The cap is part of the result, not an implementation detail. A reader who sees
     # "3 sections reviewed" in a note they know has eight must be told the other five were
     # not examined -- an unstated cap reads as a clean bill of health.
-    return (
-        out,
-        all_dropped,
-        {
-            "sections": len(sections),
-            "reviewed": reviewed,
-            "skipped": skipped,
-            "finding_cap": limit,
-            "capped": skipped > 0 and findings_so_far >= limit,
-            "dropped": len(all_dropped),
-            "transcript_chars": len(transcript_text.strip()),
-            "section_chars": SECTION_CHARS,
-            "truncated": truncated,
-            "enforced": "quote verbatim in note, citation verbatim in transcript, confidence stated",
-        },
-    )
+    coverage = {
+        "sections": len(sections),
+        "reviewed": reviewed,
+        "skipped": skipped,
+        "finding_cap": limit,
+        # The two readings of the cap, and which one this run took. Sequentially it is the
+        # sections the cap kept from being sent; concurrently nothing is left unsent, so it is
+        # the findings it cut. `cap_scope` and `cap_dropped` are added below rather than here:
+        # at 1 the artefact keeps the exact keys it had before the knob existed, which is what
+        # "an unset variable changes nothing" has to mean for a bundle that is diffed.
+        "capped": (skipped > 0 and findings_so_far >= limit) if workers == 1 else cap_dropped > 0,
+        "dropped": len(all_dropped),
+        "transcript_chars": len(transcript_text.strip()),
+        "section_chars": SECTION_CHARS,
+        "truncated": truncated,
+        "enforced": "quote verbatim in note, citation verbatim in transcript, confidence stated",
+    }
+    if workers > 1:
+        coverage["cap_scope"] = "findings"
+        coverage["cap_dropped"] = cap_dropped
+    return (out, all_dropped, coverage)
 
 
 # --- orchestration -------------------------------------------------------------------
@@ -704,7 +831,16 @@ def audit(
                 f"ran, {len(found)} findings, {len(dropped)} discarded, "
                 f"{len(coverage['reviewed'])}/{coverage['sections']} sections reviewed"
             )
-            if coverage["capped"]:
+            if coverage.get("cap_scope") == "findings":
+                # The line is where a cap is believed (#123). With the sections concurrent the
+                # cap no longer leaves a section unexamined, so the count it hid is the
+                # findings it cut, and saying "capped at 6" alone would read as six examined
+                # and none lost.
+                report.tier2 += (
+                    f" (capped at {tier2_limit} findings; "
+                    f"{coverage['cap_dropped']} collected findings were dropped)"
+                )
+            elif coverage["capped"]:
                 report.tier2 += f" (capped at {tier2_limit} findings)"
             report.tier2_findings = len(found)
             report.tier2_coverage = coverage
