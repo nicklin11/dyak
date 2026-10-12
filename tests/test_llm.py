@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import _env  # noqa: E402
+import _env
 
 SAVED_ENV = _env.isolate()
 
@@ -163,7 +163,7 @@ try:
         llm.chat([{"role": "user", "content": "hi"}], _probe)
     except llm.EndpointError as _exc:
         _raised = _exc
-    except BaseException as _exc:  # noqa: BLE001 -- the point is *what* escapes
+    except BaseException as _exc:
         _raised = _exc
     check(
         "a hung endpoint raises EndpointError, not a bare TimeoutError",

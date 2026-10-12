@@ -163,7 +163,7 @@ def _netloc(request) -> str:
     return full.split("//", 1)[-1].split("/", 1)[0] if "//" in full else ""
 
 
-def fake_urlopen(request, timeout=None):  # noqa: ANN001, ANN202 - mirrors urllib's shape
+def fake_urlopen(request, timeout=None):
     full = getattr(request, "full_url", "")
     if _netloc(request) not in FAKED_NETLOCS:
         raise urllib.error.URLError(f"connection refused (real path, not faked): {full}")
@@ -2178,7 +2178,7 @@ check("a 401 on /v1/models is not fatal", dyso.OpenAICompat("http://127.0.0.1:1"
 
 # -- autodetection: both branches, neither dependent on the machine ---------------
 _install = dysb.resolve
-_install.__globals__  # noqa: B018 - keep the reference alive for the linter
+_install.__globals__
 
 
 class _Fake:
@@ -2557,7 +2557,7 @@ real_copy2 = dyb.shutil.copy2
 
 def truncate_copy(src, dst, **kwargs):
     real_copy2(src, dst, **kwargs)
-    pathlib.Path(dst).write_bytes(pathlib.Path(dst).read_bytes()[:10])  # noqa: F821
+    pathlib.Path(dst).write_bytes(pathlib.Path(dst).read_bytes()[:10])
 
 
 vault_trunc = tmp / "vault_trunc"
@@ -2709,7 +2709,7 @@ order_transcript.write_text(
 )
 
 
-def _stub_stt_write(tr, dest):  # noqa: ANN001, ANN202, ARG001
+def _stub_stt_write(tr, dest):
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     (dest / "transcript.raw.json").write_text("{}", encoding="utf-8")
@@ -3893,7 +3893,7 @@ os.environ["DYAK_VLM_ENDPOINT"] = "http://vision.invalid/v1"
 os.environ["DYAK_VLM_MODEL"] = "fake-vision"
 
 
-def _fake_vision_chat(messages, config, **kwargs):  # noqa: ANN001, ANN202, ARG001
+def _fake_vision_chat(messages, config, **kwargs):
     _seen_messages.append((messages, config))
     return _caption_reply()
 
@@ -4076,7 +4076,7 @@ try:
     )
 
     # A refusing endpoint is recorded per frame, and the run says it captioned nothing.
-    def _refusing_chat(messages, config, **kwargs):  # noqa: ANN001, ANN202, ARG001
+    def _refusing_chat(messages, config, **kwargs):
         raise dyle.EndpointError("vision refused: 400 unsupported")
 
     dyle.chat = _refusing_chat
@@ -4122,7 +4122,7 @@ try:
     )
     _dead_calls: list[int] = []
 
-    def _dead_chat(messages, config, **kwargs):  # noqa: ANN001, ANN202, ARG001
+    def _dead_chat(messages, config, **kwargs):
         _dead_calls.append(1)
         raise dyle.EndpointError("connection refused", connection=True)
 
@@ -4327,7 +4327,7 @@ for _key, _value in _empty_test_env.items():
 #   * a warm re-run reports it identically. The cache path used to hardcode `OK`, which made
 #     a warm bundle claim all 57 frames described while the cold run before it said 16 were
 #     not -- same input, contradictory artefact.
-def _refusal_chat(messages, config, **kwargs):  # noqa: ANN001, ANN202, ARG001
+def _refusal_chat(messages, config, **kwargs):
     _seen_messages.append((messages, config))
     return _caption_reply(text=dycap.NO_NEW_INFORMATION)
 
@@ -4636,7 +4636,7 @@ check(
 _llm_chat_124 = dyle.chat
 
 
-def _truncating_chat(messages, config, **kwargs):  # noqa: ANN001, ANN202, ARG001
+def _truncating_chat(messages, config, **kwargs):
     return dyle._to_reply(
         {
             "choices": [
@@ -6102,7 +6102,7 @@ def _cap_stub_modules():
         check_coverage=lambda i, a: None,
     )
 
-    def _cap_stt_write(t, d):  # noqa: ANN001, ANN202, ARG001
+    def _cap_stt_write(t, d):
         # Writes the file it returns: `Bundle.publish` raises on a missing source now (#89),
         # and a stub that only names a path would fail the run for the wrong reason.
         d.mkdir(parents=True, exist_ok=True)

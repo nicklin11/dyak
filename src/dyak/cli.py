@@ -197,7 +197,7 @@ def _process(args: argparse.Namespace) -> int:
         work.retain("interrupted by the user")
         print(f"dyak: {work.note()}", file=sys.stderr)
         return ec.INTERRUPTED
-    except Exception as exc:  # noqa: BLE001 -- retain, print where, then propagate
+    except Exception as exc:
         work.retain(f"{type(exc).__name__}: {exc}")
         # An unexpected exception reaches the user as a traceback. Without this
         # line the traceback would be the only thing they see, and the retained

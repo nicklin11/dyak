@@ -31,7 +31,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import _env  # noqa: E402
+import _env
 
 SAVED_ENV = _env.isolate()
 

@@ -420,7 +420,7 @@ os.environ[dyd.VAULT_ENV] = str(Path(tempfile.mkdtemp()) / "no-vault")
 try:
     stt_checks = dyd.run_all(required=dyd.PROCESS_REQUIRES)
     stt_raised = None
-except Exception as exc:  # noqa: BLE001 -- the regression is exactly "it raises"
+except Exception as exc:
     stt_checks, stt_raised = [], exc
 stt_check = next((c for c in stt_checks if c.name == "stt"), None)
 check(

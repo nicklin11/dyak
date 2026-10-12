@@ -338,7 +338,7 @@ def _retry_after(exc: urllib.error.HTTPError) -> float | None:
 def _body(exc: urllib.error.HTTPError) -> str:
     try:
         return exc.read().decode("utf-8", "replace")[:500]
-    except Exception:  # noqa: BLE001 -- the body is the interesting part, not its failure
+    except Exception:
         return "<unreadable>"
 
 

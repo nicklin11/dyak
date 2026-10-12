@@ -264,7 +264,7 @@ def ffmpeg_version() -> str:
     try:
         raw = runner.run("ffmpeg", ["-version"], remediation=REMEDIATION, timeout=30.0)
         return raw.decode("utf-8", "replace").splitlines()[0]
-    except Exception:  # noqa: BLE001 - provenance must never fail the run
+    except Exception:
         return "unknown"
 
 
