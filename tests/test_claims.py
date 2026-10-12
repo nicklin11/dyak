@@ -414,6 +414,91 @@ check(
     f"referenced values: {sorted({v for _, _, v in referenced})}",
 )
 
+# --- 6b. one guarded reader per artefact ---------------------------------------
+# #188/#201/#202: a malformed artefact must reach the user as a named reason and exit 6, not a
+# traceback with Python's exit 1. The shape that makes that true is one guarded reader in the
+# module that owns the artefact, and every consumer calling it. A second parse of the same file
+# is a second place for the failure to escape -- and, for the transcript, a second read of a
+# file that can change between the two. The behavioural half of these claims is in
+# `tests/test_stages.py`; this is the half a behavioural test cannot see: that the parse is not
+# still there underneath the call.
+CAPTION_TREE = ast.parse((REPO / "src" / "dyak" / "caption.py").read_text(encoding="utf-8"))
+SYNTH_TREE = ast.parse((REPO / "src" / "dyak" / "synth.py").read_text(encoding="utf-8"))
+REPORT_TREE = ast.parse((REPO / "src" / "dyak" / "report.py").read_text(encoding="utf-8"))
+
+
+def _funcs(tree: ast.AST) -> dict[str, ast.AST]:
+    return {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _calls(node: ast.AST, name: str) -> list[ast.Call]:
+    """Calls spelled `name(...)` or `<anything>.name(...)` under `node`."""
+    out: list[ast.Call] = []
+    for call in ast.walk(node):
+        if not isinstance(call, ast.Call):
+            continue
+        func = call.func
+        if (isinstance(func, ast.Name) and func.id == name) or (
+            isinstance(func, ast.Attribute) and func.attr == name
+        ):
+            out.append(call)
+    return out
+
+
+def _parses(node: ast.AST, receiver: str) -> list[ast.Call]:
+    """`json.loads(<receiver>.read_text(...))` calls under `node`: a second parse of one file."""
+    out: list[ast.Call] = []
+    for call in _calls(node, "loads"):
+        for arg in call.args:
+            for sub in ast.walk(arg):
+                if (
+                    isinstance(sub, ast.Call)
+                    and isinstance(sub.func, ast.Attribute)
+                    and sub.func.attr == "read_text"
+                    and isinstance(sub.func.value, ast.Name)
+                    and sub.func.value.id == receiver
+                ):
+                    out.append(call)
+    return out
+
+
+_caption_funcs = _funcs(CAPTION_TREE)
+_synth_funcs = _funcs(SYNTH_TREE)
+_report_funcs = _funcs(REPORT_TREE)
+check(
+    "the functions the reader claims describe are the ones this section reads",
+    {"align", "read_transcript", "read_alignments"} <= set(_caption_funcs)
+    and "run" in _synth_funcs
+    and "gate_disagreements" in _report_funcs,
+    f"caption={sorted(_caption_funcs)} synth={sorted(_synth_funcs)} report={sorted(_report_funcs)}",
+)
+check(
+    "#201: caption.align reads transcript.json once, through the guarded reader",
+    len(_calls(_caption_funcs["align"], "read_transcript")) == 1
+    and not _parses(_caption_funcs["align"], "transcript"),
+    f"read_transcript={len(_calls(_caption_funcs['align'], 'read_transcript'))} "
+    f"parses={len(_parses(_caption_funcs['align'], 'transcript'))}",
+)
+check(
+    "#201: synth.run reads captions.json through caption.read_alignments, not json.loads",
+    len(_calls(_synth_funcs["run"], "read_alignments")) == 1
+    and not _parses(_synth_funcs["run"], "captions"),
+    f"read_alignments={len(_calls(_synth_funcs['run'], 'read_alignments'))} "
+    f"parses={len(_parses(_synth_funcs['run'], 'captions'))}",
+)
+check(
+    "#201: report.gate_disagreements calls the same captions.json reader, not json.loads",
+    len(_calls(_report_funcs["gate_disagreements"], "read_alignments")) == 1
+    and not _parses(_report_funcs["gate_disagreements"], "path"),
+    f"read_alignments={len(_calls(_report_funcs['gate_disagreements'], 'read_alignments'))} "
+    f"parses={len(_parses(_report_funcs['gate_disagreements'], 'path'))}",
+)
+
+
 # --- 7. every stage announces itself -------------------------------------------
 # ADR-0001 D7 rejected a progress bar that sits still through the dominant stage as "a lie
 # about where the time went". **Seven** stages had no `[n/12]` line at all: 5, 6, 7, 8, 9, 10

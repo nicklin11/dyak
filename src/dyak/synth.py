@@ -81,7 +81,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from . import caption, llm, stages
+from . import caption, exitcodes as ec, llm, runner, stages
 
 REPORT_NAME = "synth.json"
 PROVENANCE_NAME = "synth-provenance.json"
@@ -801,7 +801,23 @@ def run(
 ) -> Note:
     out = stream if stream is not None else sys.stdout
     destination.mkdir(parents=True, exist_ok=True)
-    alignments = json.loads(captions.read_text(encoding="utf-8")).get("alignments", [])
+    alignments, captions_error = caption.read_alignments(captions)
+    if captions_error:
+        # Stage 7 is the first consumer of stage 6's product, so a file it cannot read stops
+        # the run here rather than at stage 12. `name="dyak"`, not the file name: runner.report
+        # prints "(<name> wrote nothing to stderr)" and the file variant would be a false claim.
+        raise runner.DependencyError(
+            name="dyak",
+            code=ec.ARTEFACT_VERIFICATION_FAILED,
+            message=captions_error,
+            remediation=(
+                "re-run `dyak process` so stage 6 rewrites it. Unlike the transcript, an absent "
+                "captions.json is not legitimate: every frame's alignment is this file, and "
+                "reading it as 'no frames' would write a note that silently lost the screen "
+                "content (#201)"
+            ),
+        )
+    alignments = alignments or []
     transcript = transcript_txt.read_text(encoding="utf-8") if transcript_txt.is_file() else ""
 
     try:

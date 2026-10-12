@@ -4501,16 +4501,34 @@ for limit, expected in ((0.30, False), (0.40, True)):
     )
 check("no frames is not ok", not dycap.align(ctmp / "none.tsv", ctrans, cquality, cimg).ok)
 
-# #188: stage 6 parsed the gate report with an unguarded json.loads, so a quality.json it
+
+def _reader(module, name, path):
+    """`module.name(path)`, or a two-tuple naming why the reader could not be called.
+
+    On unmodified main the readers below do not exist, so calling one directly in a `check`
+    argument would abort this suite instead of recording a failure; a missing reader is a failed
+    check, not a reason to stop the run. The sentinel's second element is the `repr` of the
+    failure, so `_reader(...)[1]` is always a string and `_reader(...) == (None, "")` is false.
+    """
+    try:
+        return getattr(module, name)(path)
+    except BaseException as exc:  # recorded, not swallowed
+        return None, repr(exc)
+
+
+# #188/#202: stage 6 parsed the gate report with an unguarded json.loads, so a quality.json it
 # could not read killed the run as an internal error -- JSONDecodeError, or AttributeError for
 # a payload that is not an object -- which reaches the user as a traceback and Python's exit 1
-# (cli.py:214-220), indistinguishable from a usage error. Stage 12 already fails this file
-# with a named reason (report.read_quality_gate, #87); the first loop below pins stage 6 to the
-# same words for the same bytes, so one file is not described two ways.
+# (cli.py:214-220), indistinguishable from a usage error. Stage 12 reads the same file through
+# report.read_quality_gate; the loop below pins stage 6 to the same words for the same bytes,
+# so one file is not described two ways. `[1, 2]` was the one shape stage 12 could not name
+# (report.py:437 called payload.get with no isinstance check); #202 added the check, so the
+# shape lives in the loop rather than in a stage-6-only block.
 for _label, _raw, _why in (
     ("truncated", '{"frames": [', "cannot read"),
-    ("frames-is-not-a-list", '{"frames": "x"}', "has no 'frames' list"),
-    ("no-frames-key", "{}", "has no 'frames' list"),
+    ("frames-is-not-a-list", '{"frames": "x"}', "quality.json has no 'frames' list"),
+    ("no-frames-key", "{}", "quality.json has no 'frames' list"),
+    ("not-a-json-object", "[1, 2]", "quality.json is not a JSON object"),
 ):
     _path = ctmp / f"quality-{_label}.json"
     _path.write_text(_raw, encoding="utf-8")
@@ -4527,34 +4545,64 @@ for _label, _raw, _why in (
     # a failure rather than abort on it.
     _named = isinstance(_raised, dyr.DependencyError)
     _message = _raised.message if _named else repr(_raised)
+    _stage12 = _reader(dyro, "read_quality_gate", _root)[1]
     check(
         f"#188: a {_label} quality.json fails stage 6 with a named reason, not a traceback",
         _named and _raised.code == ec.ARTEFACT_VERIFICATION_FAILED and _why in _message,
         _message,
     )
     check(
-        f"#188: and {_label} is named in the same words stage 12 uses for the same file",
-        _named and _message == dyro.read_quality_gate(_root)[1],
-        f"{_message!r} vs {dyro.read_quality_gate(_root)[1]!r}",
+        f"#188/#202: and {_label} is named in the same words stage 12 uses for the same file",
+        _named and _message == _stage12,
+        f"{_message!r} vs {_stage12!r}",
     )
 
-# A payload that is not a JSON object is the one corrupt shape stage 12 cannot yet name:
-# report.read_quality_gate calls payload.get with no isinstance check (report.py:437) and
-# raises AttributeError. That hole is in report.py, outside this PR's scope, and is filed as
-# #202; stage 6 must still not crash on it, and must say what is wrong.
-_object_path = ctmp / "quality-not-a-json-object.json"
-_object_path.write_text("[1, 2]", encoding="utf-8")
-_object_raised = None
-try:
-    dycap.align(cmanifest, ctrans, _object_path, cimg)
-except BaseException as _exc:  # on main this is AttributeError
-    _object_raised = _exc
+# #201: the same guard for transcript.json. Stage 6 parsed it twice -- once for the alignment
+# segments and once for `audio_duration` -- with no guard, so a truncated file or a non-object
+# payload reached the user as a JSONDecodeError/AttributeError traceback and Python's exit 1
+# (cli.py:214-220), while {"segments": "x"} was read as "no words": every frame it considers is
+# reported uncovered (captions.json's provenance and the CLI's explain output) and the note loses
+# the frames' text, with no exit code fired -- `caption.ok` is read by nothing (#223). Reading it
+# as "no words" is still a claim about the lecture made from a wrong-shaped file. Stage 12 has no
+# reader for this artefact; `caption.read_transcript` is it, and `align` now reads the file once.
+for _label, _raw, _why in (
+    ("truncated", '{"audio_duration": 300.0, "segments": [', "cannot read transcript.json"),
+    ("not-a-json-object", "[1, 2]", "transcript.json is not a JSON object"),
+    ("segments-not-a-list", '{"segments": "x"}', "transcript.json has no 'segments' list"),
+    ("segments-null", '{"segments": null}', "transcript.json has no 'segments' list"),
+    ("no-segments-key", '{"audio_duration": 300.0}', "transcript.json has no 'segments' list"),
+):
+    _path = ctmp / f"transcript-{_label}.json"
+    _path.write_text(_raw, encoding="utf-8")
+    _raised = None
+    try:
+        dycap.align(cmanifest, _path, cquality, cimg)
+    except BaseException as _exc:  # on main: JSONDecodeError/AttributeError, or no raise at all
+        _raised = _exc
+    _named = isinstance(_raised, dyr.DependencyError)
+    _message = _raised.message if _named else repr(_raised)
+    check(
+        f"#201: a {_label} transcript.json fails stage 6 with a named reason, not a traceback",
+        _named and _raised.code == ec.ARTEFACT_VERIFICATION_FAILED and _why in _message,
+        _message,
+    )
+    _reader_reason = _reader(dycap, "read_transcript", _path)[1]
+    check(
+        f"#201: and {_label} names transcript.json in the reader's words",
+        _named and _message == _reader_reason,
+        f"{_message!r} vs {_reader_reason!r}",
+    )
+_absent_transcript = _reader(dycap, "read_transcript", ctmp / "no-such-transcript.json")
 check(
-    "#188: a quality.json that is not a JSON object is named, not an AttributeError",
-    isinstance(_object_raised, dyr.DependencyError)
-    and _object_raised.code == ec.ARTEFACT_VERIFICATION_FAILED
-    and _object_raised.message == "quality.json is not a JSON object",
-    repr(_object_raised),
+    "#201: an absent transcript.json is legitimate -- the reader says so with no reason",
+    _absent_transcript == (None, ""),
+    repr(_absent_transcript),
+)
+_whole_transcript = _reader(dycap, "read_transcript", ctrans)
+check(
+    "#201: a well-formed transcript.json is returned whole by the one reader",
+    _whole_transcript[0] == transcript_payload,
+    repr(_whole_transcript),
 )
 
 # The other half: an absent report, and readable reports that carry no gate information, stay
@@ -4594,16 +4642,22 @@ broken.write_text(
     ),
     encoding="utf-8",
 )
-kept = dycap.read_segments(broken)
+_broken_payload = json.loads(broken.read_text(encoding="utf-8"))
+_kept = None
+try:
+    _kept = dycap.read_segments(_broken_payload)
+except BaseException as _exc:  # on main read_segments takes a Path, not a payload
+    _kept = repr(_exc)
 check(
     "unparseable and reversed segments are dropped rather than guessed at",
-    [s.index for s in kept] == [0],
-    str([(s.index, s.start, s.end) for s in kept]),
+    isinstance(_kept, list) and [s.index for s in _kept] == [0],
+    repr(_kept),
 )
+_missing_transcript = _reader(dycap, "read_transcript", ctmp / "does-not-exist.json")
 check(
     "a missing transcript is empty, not a traceback",
-    dycap.read_segments(ctmp / "does-not-exist.json") == [],
-    "raised",
+    _missing_transcript == (None, ""),
+    repr(_missing_transcript),
 )
 check(
     "a missing manifest is empty, not a traceback",
@@ -5783,6 +5837,75 @@ check(
     str(srep),
 )
 check("and that the note is degraded", srep["degraded"] is True, str(srep))
+
+# #201: captions.json is stage 6's product, one entry per frame, and stage 7 read it with an
+# unguarded json.loads plus `.get("alignments", [])`. Five shapes crashed -- a missing file
+# (FileNotFoundError), a truncated one (JSONDecodeError), a non-object or a non-list
+# (AttributeError), an entry without a `frame` (KeyError), and null (TypeError) -- and a missing
+# key was read as "no frames", writing a note that had silently lost the screen content. The
+# reader is `caption.read_alignments`, in the module that owns the artefact.
+for _label, _raw, _why in (
+    ("absent", None, "cannot read captions.json"),
+    ("truncated", '{"alignments": [', "cannot read captions.json"),
+    ("not-a-json-object", "[1, 2]", "captions.json is not a JSON object"),
+    ("alignments-not-a-list", '{"alignments": "x"}', "captions.json has no 'alignments' list"),
+    ("alignments-null", '{"alignments": null}', "captions.json has no 'alignments' list"),
+    ("no-alignments-key", '{"provenance": {}}', "captions.json has no 'alignments' list"),
+    (
+        "list-of-non-dicts",
+        '{"alignments": [1, 2]}',
+        "captions.json has an alignment without a 'frame'",
+    ),
+    (
+        "list-of-empty-dicts",
+        '{"alignments": [{}]}',
+        "captions.json has an alignment without a 'frame'",
+    ),
+):
+    _path = sdir / f"captions-{_label}.json"
+    if _raw is None:
+        _path.unlink(missing_ok=True)
+    else:
+        _path.write_text(_raw, encoding="utf-8")
+    _raised = None
+    try:
+        dysy.run(_path, stxt, src_path, sdir / f"out-{_label}", config=None, stream=io.StringIO())
+    except (
+        BaseException
+    ) as _exc:  # on main: FileNotFoundError/JSONDecodeError/AttributeError/KeyError/TypeError
+        _raised = _exc
+    _named = isinstance(_raised, dyr.DependencyError)
+    _message = _raised.message if _named else repr(_raised)
+    check(
+        f"#201: a {_label} captions.json fails stage 7 with a named reason, not a traceback",
+        _named and _raised.code == ec.ARTEFACT_VERIFICATION_FAILED and _why in _message,
+        _message,
+    )
+    _reader_reason = _reader(dycap, "read_alignments", _path)[1]
+    check(
+        f"#201: and {_label} is named in the reader's words",
+        _named and _message == _reader_reason,
+        f"{_message!r} vs {_reader_reason!r}",
+    )
+_missing_key = _reader(dycap, "read_alignments", sdir / "captions-no-alignments-key.json")
+check(
+    "#201: captions.json with no alignments key is a failure, not a note with no frames",
+    _missing_key[1] == "captions.json has no 'alignments' list",
+    repr(_missing_key),
+)
+_empty_caps = sdir / "captions-empty.json"
+_empty_caps.write_text('{"alignments": []}', encoding="utf-8")
+check(
+    "#201: an empty alignments list is still legitimate -- the shape is right and there were none",
+    _reader(dycap, "read_alignments", _empty_caps) == ([], ""),
+    repr(_reader(dycap, "read_alignments", _empty_caps)),
+)
+_whole_captions = _reader(dycap, "read_alignments", scaps)
+check(
+    "#201: a well-formed captions.json is returned whole by the one reader",
+    len(_whole_captions[0] or []) == 6 and _whole_captions[1] == "",
+    repr(_whole_captions),
+)
 
 
 # --- 14. stage 8 lint: the mechanical floor under the model's prose ----------------
@@ -7911,6 +8034,41 @@ check(
     not _corrupt.ok and any(e["artefact"] == dyq.REPORT_NAME for e in _corrupt.inconsistent),
     f"ok={_corrupt.ok} inconsistent={_corrupt.inconsistent}",
 )
+
+# #201: the malformed captions.json shapes stage 12 used to *skip* -- a non-dict entry, an entry
+# with no `frame` -- are now a finding carrying the reader's reason. The old skip dropped them
+# and nothing else could see it: `count_frames` compares the manifest against the files on disk
+# and the coverage figure is read back from `synth.json`, so a frame that never reached the note
+# left both clean. `report.gate_disagreements` now calls `caption.read_alignments`, so stage 12
+# and stage 7 name the same bytes in the same words.
+for _label, _raw in (
+    ("not-a-json-object", "[1, 2]"),
+    ("alignments-not-a-list", '{"alignments": "x"}'),
+    ("entry-without-a-frame", '{"alignments": [{}]}'),
+    ("entry-not-a-dict", '{"alignments": [1, 2]}'),
+):
+    _root = _gate_bundle(f"caps-{_label}", captions_gate="PASS", quality_gate="PASS")
+    (_root / dycap.REPORT_NAME).write_text(_raw, encoding="utf-8")
+    _raised = None
+    try:
+        _rep = run_report_in(_root)
+    except BaseException as _exc:  # on main: AttributeError/KeyError escape the cross-check
+        _raised = _exc
+    _reason = _reader(dycap, "read_alignments", _root / dycap.REPORT_NAME)[1]
+    _finding = (
+        []
+        if _raised is not None
+        else [
+            e
+            for e in _rep.inconsistent
+            if e["artefact"] == dycap.REPORT_NAME and e["detail"] == _reason
+        ]
+    )
+    check(
+        f"#201: stage 12 names a {_label} captions.json instead of skipping it",
+        _raised is None and not _rep.ok and bool(_finding),
+        repr(_raised) if _raised is not None else f"ok={_rep.ok} inconsistent={_rep.inconsistent}",
+    )
 
 # (d) `quality.json` is required only when the bundle's own source record says the source had
 # video. A wrong unconditional REQUIRED would fail every audio-only bundle, so all three
