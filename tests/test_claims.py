@@ -557,11 +557,13 @@ check(
 )
 
 # --- 8b. the --vault-subdir default the help states is the one the export uses --------
-# #183: cli.py rendered "(default: dyak/)" for as long as it existed, while
-# `Bundle.export_to_vault` appended the lecture name -- so the help named the exact shared
-# layout #118 removed, because a shared `dyak/` made the second export silently replace the
-# first. The layout was pinned (tests/test_stages.py:2748); the sentence was not, and the
-# sentence is the only place a user learns the default.
+# #183: the help rendered a bare "(default: <name>/)" -- "(default: glimpse/)" before
+# c2824d7, "(default: dyak/)" after it -- while `Bundle.export_to_vault` appended the
+# lecture name, so the help named the exact shared layout #118 removed: a shared directory
+# made the second export silently replace the first. The layout was pinned
+# (tests/test_stages.py:2748); the sentence was not, and `--help` is the surface a user
+# reads while deciding whether to pass the flag -- docs/running.md:100 states the same
+# default, and section 8 pins only the flag's name.
 
 
 def _subparser(parser: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:
