@@ -16,10 +16,17 @@ every artefact it expects and counts what is actually there.
    because "the note as stage 7 wrote it" is evidence about what the synthesizer did, and
    throwing it away to save a filename would destroy the only record of it.
 2. **Verifies the required set.** Each entry states why it is required, so a failure names
-   the reason instead of a filename.
-3. **Counts frames against the manifest** when the source had video. A manifest listing 18
+   the reason instead of a filename. Membership is not unconditional: `quality.json` is
+   required only when the bundle's own source record says the input had video, because the
+   gate runs on frames and an audio-only source has none (#87).
+3. **Cross-checks what two artefacts claim about each other.** Presence is not agreement:
+   `captions.json` and `quality.json` describe the same frames from opposite ends of the
+   pipeline, and every alignment's `quality_gate` must match the gate report's verdict for
+   that frame. Two internally consistent files contradicting each other is how stage 5's gate
+   stayed a no-op for eight runs (#82), and no `is_file()` can see it (#87).
+4. **Counts frames against the manifest** when the source had video. A manifest listing 18
    timestamps and 17 files on disk is a failure, not a rounding difference.
-4. **Records what is absent and why.** Optional artefacts — the tier-2 LLM transcript, the
+5. **Records what is absent and why.** Optional artefacts — the tier-2 LLM transcript, the
    link reports — are reported as absent when they are legitimately absent. A verification
    that lists everything missing looks identical whether the thing is optional or broken.
 
@@ -38,7 +45,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import audit, frames, lint, link, quality, repair, stages, synth
+from . import audit, caption, frames, lint, link, probe, quality, repair, stages, synth
 from .bundle import IMAGES
 
 REPORT_NAME = "report.json"
@@ -60,9 +67,34 @@ REQUIRED: dict[str, str] = {
     audit.REPORT_NAME: "the audit; without it the note is unverified",
     repair.REPORT_NAME: "the fix log; ADR-0001 D5 requires 'wrong' and 'changed' stay separable",
     frames.MANIFEST: "the record of which frames were extracted and when",
+    caption.REPORT_NAME: "stage 6's whole product: which frame was on screen when, and the "
+    "words it was captioned against",
+    synth.REPORT_NAME: "stage 7's own record; stage 12 reads the coverage and section gates "
+    "back from it, so losing it makes the note's completeness unfalsifiable",
+}
+
+#: Required only when the bundle's own source record says the source had video (#87).
+#:
+#: `quality.json` was optional for a real reason -- the gate runs on frames and an audio-only
+#: source has none -- but "optional" made a corrupt or missing gate report indistinguishable
+#: from a legitimate absence, and left `captions.json` with nothing to be checked against. The
+#: promotion is therefore conditional rather than unconditional: a wrong unconditional
+#: `REQUIRED` would fail every bundle whose source had no frames.
+#:
+#: Whether the source had video is read back from `source-provenance.json` (see
+#: `source_had_video`), which stages 1 and 2 publish for every run. A bundle whose record is
+#: absent or unreadable keeps the optional behaviour: unknown is not False, and a missing
+#: record must not fail a run that may legitimately have no frames.
+REQUIRED_WHEN_VIDEO: dict[str, str] = {
+    quality.REPORT_NAME: "the gate's verdict on every frame; without it stage 5's claim is "
+    "unfalsifiable and captions.json has nothing to agree with",
 }
 
 #: Artefacts that are legitimately absent. Recorded as absent, not as failures.
+#:
+#: `quality.json` is listed here so an audio-only (or source-unknown) bundle reports it as
+#: legitimately absent. When `source_had_video` is True it is removed from this set and
+#: required instead; `_required` is the one place that decides which.
 OPTIONAL: dict[str, str] = {
     quality.REPORT_NAME: "the quality gate runs on frames; an audio-only source has none",
     audit.LLM_TRANSCRIPT_NAME: "tier 2 did not run, so no model was called",
@@ -93,6 +125,58 @@ def registered_by_root_name(artefacts: dict[str, Path]) -> dict[str, Path]:
     return {Path(path).name: Path(path) for path in artefacts.values()}
 
 
+def source_had_video(bundle_root: Path) -> bool | None:
+    """Whether the bundle's own record says the source had video (#87).
+
+    Read from `source-provenance.json`, which stages 1 and 2 publish for every run. It is the
+    bundle's own measurement of its input, which is the right evidence for a stage whose job
+    is to verify the bundle rather than trust the pipeline that filled it.
+
+    `None` means the record is absent or unreadable -- unknown, not False. The two are kept
+    apart because an audio-only source legitimately has no `quality.json`, while a bundle
+    whose source record went missing must not be read as one. Unknown therefore keeps
+    `quality.json` optional rather than inventing a requirement the bundle cannot justify.
+    """
+    path = Path(bundle_root) / probe.PROVENANCE_NAME
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    source = payload.get("source")
+    if not isinstance(source, dict):
+        return None
+    value = source.get("has_video")
+    return value if isinstance(value, bool) else None
+
+
+def _required(had_video: bool | None) -> dict[str, str]:
+    """The REQUIRED set for a bundle whose source did or did not have video."""
+    required = dict(REQUIRED)
+    if had_video is True:
+        required.update(REQUIRED_WHEN_VIDEO)
+    return required
+
+
+def required_for(bundle_root: Path) -> dict[str, str]:
+    """The REQUIRED set for this bundle, conditional entries included (#87).
+
+    Exposed rather than inlined into `run` so a test can ask the same question of the same
+    bundle the stage verified, without re-implementing the condition and drifting from it.
+    """
+    return _required(source_had_video(bundle_root))
+
+
+def _optional(required: dict[str, str]) -> dict[str, str]:
+    """OPTIONAL minus anything `required` has taken over.
+
+    A name that is required must not also be reported as legitimately absent: the two records
+    would disagree about the same file, and `absent` is the one a reader skips.
+    """
+    return {name: reason for name, reason in OPTIONAL.items() if name not in required}
+
+
 @dataclass
 class Report:
     verified: list[dict] = field(default_factory=list)
@@ -113,6 +197,20 @@ class Report:
     #: them, `audit.json` and `repair.json`, did exactly that for eight runs. Recorded because
     #: a non-empty list is the evidence that what was verified belonged to this run.
     superseded: list[str] = field(default_factory=list)
+    #: Where two artefacts contradict each other, or where one of the pair cannot be read.
+    #: Empty means `captions.json` and `quality.json` agree about every frame. This is the
+    #: cross-reference #87 asked for and the check that would have caught #82 from the bundle
+    #: alone: the published `captions.json` carried `quality_gate: ""` on all 58 frames while
+    #: `quality.json` recorded one FAIL, and neither file was wrong on its own (#87).
+    inconsistent: list[dict] = field(default_factory=list)
+    #: What the bundle's own source record says about the input: `True`, `False`, or `None`
+    #: when the record is absent or unreadable. Recorded because it decides whether
+    #: `quality.json` is required, and a reader must be able to see which way that went.
+    source_had_video: bool | None = None
+    #: Whether `quality.json` was required for this bundle. Equal to
+    #: `source_had_video is True`, stated separately so the verdict is not re-derived from a
+    #: tri-state by every reader.
+    quality_required: bool = False
     #: Stage 7's own measurement of how much of the transcript reached the model, read back
     #: from `synth.json` rather than recomputed. `None` when the figure is not there to read
     #: (a bundle from before the metric existed): unknown is not the same as low.
@@ -156,8 +254,10 @@ class Report:
 
     @property
     def ok(self) -> bool:
-        """Nothing required is missing, and the frame count agrees with the manifest."""
-        return not self.missing and self.frames_found == self.frames_expected
+        """Nothing required is missing, nothing contradicts, and the frame count agrees."""
+        return (
+            not self.missing and not self.inconsistent and self.frames_found == self.frames_expected
+        )
 
     @property
     def low_coverage(self) -> bool:
@@ -171,7 +271,10 @@ class Report:
 
     def summary(self) -> str:
         if not self.ok:
-            return f"FAILED: {len(self.missing)} missing, frames {self.frames_found}/{self.frames_expected}"
+            return (
+                f"FAILED: {len(self.missing)} missing, {len(self.inconsistent)} inconsistent, "
+                f"frames {self.frames_found}/{self.frames_expected}"
+            )
         return (
             f"{len(self.verified)} verified, {len(self.absent)} optional absent, "
             f"frames {self.frames_found}/{self.frames_expected}"
@@ -185,6 +288,9 @@ class Report:
             "verified": self.verified,
             "absent": self.absent,
             "missing": self.missing,
+            "inconsistent": self.inconsistent,
+            "source_had_video": self.source_had_video,
+            "quality_gate_required": self.quality_required,
             "frames_expected": self.frames_expected,
             "frames_found": self.frames_found,
             "note_promoted": self.promoted,
@@ -295,7 +401,9 @@ def inventory(root: Path, checked: set[Path], frames: set[str]) -> tuple[int, li
 
     The point is not to fail on them. It is that `report.json` said `"ok": true` after looking
     at 65 of 143 files and nothing in the artefact said so. Measured on run 12: `captions.json`
-    and `quality.json` were never stat'd, so a corrupted quality gate still exits 0. #87.
+    and `quality.json` were never stat'd, so a corrupted quality gate still exits 0. #87 closed
+    that: both are verified now (`captions.json` is required, `quality.json` when the source had
+    video), and this list is what remains outside the check.
     """
     on_disk = {p for p in root.rglob("*") if p.is_file()}
     frame_paths = {(root / IMAGES / name).resolve() for name in frames}
@@ -307,20 +415,139 @@ def inventory(root: Path, checked: set[Path], frames: set[str]) -> tuple[int, li
     return len(on_disk), unchecked
 
 
-def _rejected_by_gate(bundle_root: Path) -> set[str]:
-    """Frame names stage 5 refused. Empty when there is no quality report to ask."""
-    path = bundle_root / quality.REPORT_NAME
+def read_quality_gate(bundle_root: Path) -> tuple[dict[str, str] | None, str]:
+    """(frame name -> gate verdict, why the file could not be read).
+
+    `None` with an empty reason means `quality.json` is absent. `None` with a reason means it
+    is present and unusable -- truncated, corrupt, or shaped wrongly. The two are kept apart
+    because the first is legitimate for an audio-only source and the second is a failed write.
+
+    The second case used to be swallowed: `_rejected_by_gate` caught `JSONDecodeError` and
+    returned an empty set, so a corrupt gate report still exited 0 with
+    `frames_found == frames_expected` (#87). `run` now records the reason as an
+    inconsistency; this function only reports it.
+    """
+    path = Path(bundle_root) / quality.REPORT_NAME
     if not path.is_file():
-        return set()
+        return None, ""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"cannot read {quality.REPORT_NAME}: {exc}"
+    frames = payload.get("frames")
+    if not isinstance(frames, list):
+        return None, f"{quality.REPORT_NAME} has no 'frames' list"
+    verdicts: dict[str, str] = {}
+    for entry in frames:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if isinstance(name, str) and name:
+            verdicts[name] = str(entry.get("quality_gate") or "")
+    return verdicts, ""
+
+
+def _rejected_by_gate(bundle_root: Path) -> set[str]:
+    """Frame names stage 5 refused. Empty when there is no readable quality report.
+
+    A corrupt report is not silently ignored by the run -- `gate_disagreements` records it --
+    but this function still has to answer for the frame count, and "no gate information" is
+    the safe answer: it subtracts nothing rather than guessing which frames failed.
+    """
+    verdicts, _ = read_quality_gate(bundle_root)
+    if not verdicts:
         return set()
-    return {
-        entry.get("name", "")
-        for entry in payload.get("frames", [])
-        if entry.get("quality_gate") and entry.get("quality_gate") != "PASS"
-    }
+    return {name for name, gate in verdicts.items() if gate and gate != "PASS"}
+
+
+def gate_disagreements(
+    bundle_root: Path,
+    verdicts: dict[str, str] | None,
+    quality_error: str,
+) -> list[dict]:
+    """Where `captions.json` and `quality.json` contradict each other (#87).
+
+    The cross-reference the issue asked for, and the check that would have caught #82 from the
+    bundle alone: the published `captions.json` carried `quality_gate: ""` on all 58 frames
+    while `quality.json` recorded one FAIL. Each file was internally consistent; only a
+    comparison between them shows the contradiction.
+
+    One direction, as specified: every alignment in `captions.json` is compared against the
+    gate's verdict for the same frame. A frame the gate report does not mention is itself a
+    disagreement -- `captions.json` cannot be cross-checked against a verdict that is not
+    there. The reverse (a frame in `quality.json` with no alignment) is not checked here: the
+    issue named this direction, and stage 6 records every manifest frame, rejected ones
+    included, so a missing alignment is a different defect with a different owner.
+    """
+    findings: list[dict] = []
+    if quality_error:
+        findings.append(
+            {
+                "artefact": quality.REPORT_NAME,
+                "why": "the gate's own verdict must be readable before it can be believed",
+                "detail": quality_error,
+            }
+        )
+        return findings
+    if verdicts is None:
+        # No gate report at all. Whether that is legitimate is decided by
+        # `REQUIRED_WHEN_VIDEO`; here there is simply nothing to cross-check against.
+        return findings
+
+    path = Path(bundle_root) / caption.REPORT_NAME
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        findings.append(
+            {
+                "artefact": caption.REPORT_NAME,
+                "why": "the frame-to-gate agreement cannot be checked against an unreadable file",
+                "detail": f"cannot read {caption.REPORT_NAME}: {exc}",
+            }
+        )
+        return findings
+    alignments = payload.get("alignments")
+    if not isinstance(alignments, list):
+        findings.append(
+            {
+                "artefact": caption.REPORT_NAME,
+                "why": "stage 6's product must list its alignments to be verifiable",
+                "detail": f"{caption.REPORT_NAME} has no 'alignments' list",
+            }
+        )
+        return findings
+
+    for alignment in alignments:
+        if not isinstance(alignment, dict):
+            continue
+        frame = alignment.get("frame")
+        if not isinstance(frame, str) or not frame:
+            continue
+        claimed = str(alignment.get("quality_gate") or "")
+        if frame not in verdicts:
+            findings.append(
+                {
+                    "artefact": caption.REPORT_NAME,
+                    "frame": frame,
+                    "why": "every captioned frame must carry the gate's verdict for it",
+                    "detail": f"{quality.REPORT_NAME} records no verdict for {frame}",
+                }
+            )
+            continue
+        measured = verdicts[frame]
+        if claimed != measured:
+            findings.append(
+                {
+                    "artefact": caption.REPORT_NAME,
+                    "frame": frame,
+                    "why": "captions.json must not contradict the gate report it was aligned against",
+                    "detail": (
+                        f"{caption.REPORT_NAME} says quality_gate={claimed!r} for {frame}, "
+                        f"{quality.REPORT_NAME} says {measured!r}"
+                    ),
+                }
+            )
+    return findings
 
 
 def run(
@@ -349,7 +576,15 @@ def run(
     artefacts["note"] = published
     by_root_name = registered_by_root_name(artefacts)
 
-    for name, reason in REQUIRED.items():
+    # Whether `quality.json` is required, read from the bundle's own source record (#87).
+    # Unknown (`None`) keeps it optional: a bundle whose record is missing may legitimately
+    # have no frames, and failing it would invent a requirement the bundle cannot justify.
+    report.source_had_video = source_had_video(root)
+    required = _required(report.source_had_video)
+    optional = _optional(required)
+    report.quality_required = quality.REPORT_NAME in required
+
+    for name, reason in required.items():
         path = artefacts.get(name) or by_root_name.get(name)
         if path is None:
             # No stage registered it. Deliberately *not* a fallback to `root / name`: that is
@@ -372,12 +607,19 @@ def run(
         else:
             report.missing.append(entry)
 
-    for name, reason in OPTIONAL.items():
+    for name, reason in optional.items():
         # Absence is the expected outcome here, so an unregistered name is simply absent --
         # no reason to fail a run over an artefact that is allowed not to exist.
         path = artefacts.get(name) or by_root_name.get(name)
         if path is None or not Path(path).is_file():
             report.absent.append({"artefact": name, "why_absent": reason})
+
+    # The cross-artefact half of the verification (#87). A presence check cannot see two
+    # internally consistent files contradicting each other, which is exactly how #82 shipped:
+    # `captions.json` said every frame passed, `quality.json` said one failed, and stage 12
+    # never compared them. Read the gate report once and hand it to the comparison.
+    verdicts, quality_error = read_quality_gate(root)
+    report.inconsistent = gate_disagreements(root, verdicts, quality_error)
 
     report.frames_expected, report.frames_found = count_frames(root)
     # Read back, never recomputed: the coverage figure is stage 7's measurement of what it
@@ -407,10 +649,15 @@ def run(
     )
     for entry in report.missing:
         out.write(f"           MISSING {entry['artefact']}: {entry['detail']} -- {entry['why']}\n")
+    for entry in report.inconsistent:
+        # Its own line and its own reason, because it is not a missing file: both files are
+        # there and one of them is wrong about a frame. #87.
+        where = entry["artefact"] + (f":{entry['frame']}" if entry.get("frame") else "")
+        out.write(f"           INCONSISTENT {where}: {entry['detail']} -- {entry['why']}\n")
     if report.unchecked:
         # The exit code does not depend on this line and must not. It exists so that `ok: true`
         # is never read as "everything in the bundle was verified": it is a statement about the
-        # required set and the frame count, and those are 65 files out of 143. #87.
+        # required set and the frame count, not about every file present. #87.
         out.write(
             f"           verified {report.checked} of {report.bundle_files + 2} files; "
             f"{len(report.unchecked)} unexamined, listed in {REPORT_NAME} under 'unchecked'\n"
@@ -459,6 +706,23 @@ def provenance(report: Report) -> str:
             "files_in_bundle_excluding_this_stage": report.bundle_files,
             "superseded_by_this_run": report.superseded,
             "not_checked": report.unchecked,
+            "inconsistent": report.inconsistent,
+            "source_had_video": report.source_had_video,
+            "quality_gate_required": report.quality_required,
+            "quality_gate_conditional_source": (
+                f"read from {probe.PROVENANCE_NAME}, which stages 1 and 2 publish: when the "
+                f"source had video, {quality.REPORT_NAME} is required, not optional, and every "
+                f"alignment in {caption.REPORT_NAME} must agree with its verdict for that frame "
+                "(#87). Unknown keeps it optional, because a bundle whose source record is "
+                "missing may legitimately have no frames."
+            ),
+            "inconsistency_check": (
+                f"every alignment in {caption.REPORT_NAME} is compared with "
+                f"{quality.REPORT_NAME}'s verdict for the same frame. A disagreement, or an "
+                f"unreadable {quality.REPORT_NAME}, is named in 'inconsistent' and fails the "
+                "run. This is the check that would have caught #82 from the bundle alone: the "
+                "two files were each internally consistent and contradicted each other."
+            ),
             "run_id": report.run_id,
             "started_at": report.started_at,
             "run_id_source": (
@@ -488,7 +752,9 @@ def provenance(report: Report) -> str:
             "coverage": (
                 f"{report.checked} of {report.bundle_files + 2} files were examined; the "
                 "remainder are listed in report.json under 'unchecked'. `ok` is a statement "
-                "about the required set and the frame count, not about every file present."
+                "about the required set, the frame count, and the "
+                f"{caption.REPORT_NAME}/{quality.REPORT_NAME} agreement -- not about every "
+                "file present."
             ),
         },
         indent=2,

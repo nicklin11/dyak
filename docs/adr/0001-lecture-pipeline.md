@@ -329,6 +329,42 @@ one that is loud:
 An uncaught internal error — a bug in dyak — has no row on purpose: it
 propagates as a traceback. The work dir is retained and its path printed first.
 
+### Amendment 2026-10-12 — the required set, and a cross-artefact check (#87)
+
+Stage 12's per-file contract was presence-and-non-empty, and `REQUIRED` named eight root
+artefacts plus the frames. On the one real bundle that was 65 of 144 files, and two of the
+files outside the check were load-bearing: `captions.json` — stage 6's entire product — was in
+neither `REQUIRED` nor `OPTIONAL`, and `quality.json` was optional, so the gate report's own
+verdict was verified by nothing. A `quality.json` truncated to one byte exited 0, because
+`_rejected_by_gate` caught `JSONDecodeError` and returned an empty set: `frames_found` still
+equalled `frames_expected` and the run reported success.
+
+Three changes, and the third is the substantive one.
+
+1. `captions.json` and `synth.json` join `REQUIRED`. Losing either makes a stage's claim
+   unfalsifiable: `captions.json` is the alignment stage 6 produced, and stage 12 already read
+   `synth.json` back for coverage and truncation (#117, #128).
+2. `quality.json` is required **when the source had video**, and required-ness is read from the
+   bundle's own `source-provenance.json` (stages 1 and 2). The reason it was optional is real —
+   the gate runs on frames and an audio-only source has none — so an unconditional promotion
+   would fail a legitimate bundle. Unknown (record absent or unreadable) keeps it optional.
+3. `captions.json` and `quality.json` are cross-checked: every alignment's `quality_gate` must
+   equal the gate report's verdict for that frame, and a frame the gate report does not mention
+   is itself a disagreement. This is the check that would have caught #82 from the bundle
+   alone: `captions.json` said every frame passed and `quality.json` said one failed, and each
+   file was internally consistent.
+
+`ok` therefore means "nothing required is missing, nothing contradicts, and the frame count
+agrees". A contradiction is a verification failure and keeps code **6**: the artefacts are
+present, and the verification that they are what they claim to be failed. It gets its own named
+reason (`inconsistent`, carrying the frame and both verdicts) rather than a new code, because
+code 6 already names exactly this class — "required artefacts could not be verified" — and a
+separate code would split two failures whose remediation is the same.
+
+`_check` stays presence-only. A byte-size threshold was considered and rejected: a parse, a
+count or a cross-reference is what the issue asked for, and a size floor is a proxy that passes
+a truncated file that happens to be large.
+
 ### Amendment 2026-10-11 — code 8, and why it is not code 6
 
 Stage 7 cut the lecture into time slices and mapped the eight required sections onto the
