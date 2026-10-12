@@ -11,12 +11,8 @@ information a user needs: whether to install something or fix something.
 
 from __future__ import annotations
 
-import difflib
-import os
 import shutil
 import subprocess
-import sys
-import tomllib
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -24,213 +20,32 @@ from pathlib import Path
 
 from . import exitcodes as ec
 from . import runner, stt
-from .llm import VISION_ENDPOINT_ENV as VLM_ENV
-from .llm import VISION_KEY_ENV as VLM_KEY_ENV
-from .llm import VISION_MODEL_ENV as VLM_MODEL_ENV
+from .settings import (
+    HONOURED_SETTINGS,
+    LLM_KEY_ENV,
+    LLM_MODEL_ENV,
+    _parse_settings,
+    resolve,
+    settings_path,
+)
+from .settings import LLM_ENDPOINT_ENV as LLM_ENV
+from .settings import SETTINGS_KEY as SETTINGS_KEY
+from .settings import SETTINGS_PATH_ENV as SETTINGS_PATH_ENV
+from .settings import SETTINGS_TEMPLATE as SETTINGS_TEMPLATE
+from .settings import VAULT_ENV
+from .settings import VLM_ENDPOINT_ENV as VLM_ENV
+from .settings import VLM_KEY_ENV as VLM_KEY_ENV
+from .settings import VLM_MODEL_ENV as VLM_MODEL_ENV
+from .settings import read_settings as read_settings
+from .settings import report_settings as report_settings
+from .settings import settings_warnings as settings_warnings
+from .settings import write_settings as write_settings
 
-VAULT_ENV = "DYAK_VAULT"
-LLM_ENV = "DYAK_LLM_ENDPOINT"
-LLM_MODEL_ENV = "DYAK_LLM_MODEL"
-LLM_KEY_ENV = "DYAK_LLM_KEY"
-#: The vision role's names are imported rather than retyped: ADR-0004 D3 keeps the two roles
-#: separate, and a second literal here could drift from the one `llm.py` actually reads.
-#: `check_vlm` and `vlm_configured` are the readers (#167).
+#: The vision role's names are imported from `settings` rather than retyped: ADR-0004 D3
+#: keeps the two roles separate, and a second literal could drift from the one `llm.py`
+#: actually reads. `check_vlm` and `vlm_configured` are the readers (#167).
 DEFAULT_VAULT = Path.home() / "Documents/obs_notes"
 PROBE_TIMEOUT = 10.0
-
-SETTINGS_PATH_ENV = "DYAK_SETTINGS"
-SETTINGS_KEY = "vault"
-#: Written by `write_settings`, read by `resolve_vault`. One key, one file.
-SETTINGS_TEMPLATE = "# dyak settings. Written on first run; edit by hand.\n"
-
-#: The settings keys the tool honours. ONE place, and it is a claim about the code: the key a
-#: reader consults and the key named here must be the same, or `read_settings` warns about a
-#: key the tool actually uses (or stays silent about one it does not). `tests/test_deps.py`
-#: derives the keys the source reads and fails if the two sets drift (#156).
-#: `vault` is the only key today; #52 grows this set rather than replacing it.
-HONOURED_SETTINGS: frozenset[str] = frozenset({SETTINGS_KEY})
-
-
-def settings_path() -> Path:
-    """The settings file: `$DYAK_SETTINGS` if set, else `$XDG_CONFIG_HOME/dyak/settings.toml`.
-
-    The env var names the *file*, not a directory, which is what the name says and what
-    testing needs. Issue #52 wants a real config file with a real precedence resolver; this
-    is the file that will hold it, carrying exactly one key until then, so #52 extends
-    something rather than replacing a default someone is already relying on.
-    """
-    configured = os.environ.get(SETTINGS_PATH_ENV, "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    base = Path(
-        os.environ.get("XDG_CONFIG_HOME", "").strip() or Path.home() / ".config"
-    ).expanduser()
-    return base / "dyak" / "settings.toml"
-
-
-def _parse_settings(path: Path) -> dict[str, object] | None:
-    """The settings file parsed as TOML; `None` when it is unreadable or malformed.
-
-    Never raises, and reports both unreadable states to stderr itself with the path: a typo
-    in a config file must not take the pipeline down at stage 0, and must not be read as a
-    garbage value either. `None` is deliberately distinct from `{}` so `check_settings` can
-    tell "the file is empty" from "the file could not be parsed" -- the message has already
-    gone to stderr, but `doctor` should not report a file it could not read as empty.
-
-    The parse error is reported once per file per process. `read_settings` runs several times
-    in one invocation -- stage 0's `check_vault`, `process`'s export and stage 11's terms
-    lookup all resolve the vault -- and the same error repeated three times reads as three
-    problems. A CLI invocation cannot edit the file mid-run, so a process-lifetime memo is
-    the same lifetime as the fact.
-    """
-    if not path.is_file():
-        return {}
-    try:
-        return tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError) as exc:
-        _report_once(path, f"cannot read settings {path}: {exc}")
-        return None
-    except tomllib.TOMLDecodeError as exc:
-        _report_once(path, f"ignoring malformed settings {path}: {exc}")
-        return None
-
-
-#: Settings files whose parse failure has already been reported in this process (#156).
-_REPORTED_SETTINGS: set[str] = set()
-
-
-def _report_once(path: Path, message: str) -> None:
-    """Print `dyak: {message}` on stderr the first time this file's failure is seen."""
-    key = str(path)
-    if key in _REPORTED_SETTINGS:
-        return
-    _REPORTED_SETTINGS.add(key)
-    print(f"dyak: {message}", file=sys.stderr)
-
-
-def _toml_type(value: object) -> str:
-    """The TOML type of a parsed value, named for a diagnostic (#156)."""
-    # bool before int: `isinstance(True, int)` is True, and "a boolean" is the useful word.
-    if isinstance(value, bool):
-        return "a boolean"
-    if isinstance(value, int):
-        return "a number"
-    if isinstance(value, float):
-        return "a number"
-    if isinstance(value, list):
-        return "an array"
-    if isinstance(value, dict):
-        return "a table"
-    return f"a {type(value).__name__}"
-
-
-#: How close a key must be to an honoured one to be reported as a likely typo rather than as
-#: plain inert. 0.6 is what catches `vault_path` (0.67) without matching unrelated keys.
-_TYPO_CUTOFF = 0.6
-
-
-def settings_warnings(path: Path, data: dict[str, object]) -> list[str]:
-    """One line per key in `data` that `read_settings` will not honour (#156).
-
-    Three silent behaviours, all of them the same defect -- a hand-edited file with no
-    feedback loop:
-
-      * a key no setting reads (`stt = "whispercpp"` is inert and said nothing);
-      * a value dropped for not being a string (`stt = 1` vanished, not even ignored aloud);
-      * a typo'd key, which is indistinguishable from "not configured" (`vault_path` fell
-        back to the default vault, and the only evidence was a path in the output).
-
-    Pure: `report_settings` prints these, so the acceptance criterion "a correct file
-    produces no warning" is a property of this function rather than of whichever caller
-    happens to run it. A key whose value is not a string is reported for its type first:
-    that is the more specific defect, and one line per key is enough.
-    """
-    lines: list[str] = []
-    known = ", ".join(sorted(HONOURED_SETTINGS))
-    for key, value in data.items():
-        if not isinstance(value, str):
-            lines.append(f"settings: {path}: '{key}' is {_toml_type(value)}, not a string; ignored")
-            continue
-        if key in HONOURED_SETTINGS:
-            continue
-        near = difflib.get_close_matches(key, HONOURED_SETTINGS, n=1, cutoff=_TYPO_CUTOFF)
-        if near:
-            lines.append(f"settings: {path}: '{key}' is not a setting; did you mean '{near[0]}'?")
-        else:
-            lines.append(
-                f"settings: {path}: '{key}' is not a setting; nothing reads it "
-                f"(known keys: {known})"
-            )
-    return lines
-
-
-def report_settings() -> None:
-    """Print what the settings file holds that will not be honoured. Silent when it is clean.
-
-    Called once per invocation from `cli.main`, not from `read_settings`: `resolve_vault` is
-    consulted by stage 0, by `process` and by stage 11's terms lookup, so a warning emitted
-    by the reader would repeat three times in one run. One warning per key per run is
-    feedback; three is noise. Unreadable and malformed files are reported by
-    `_parse_settings`, which `read_settings` also calls, so this adds nothing for them.
-    """
-    path = settings_path()
-    data = _parse_settings(path)
-    if data is None:
-        return
-    for line in settings_warnings(path, data):
-        print(f"dyak: {line}", file=sys.stderr)
-
-
-def read_settings() -> dict[str, str]:
-    """Top-level `key = "value"` string pairs from the settings file. Never raises.
-
-    The file is TOML, parsed with stdlib `tomllib` (the >=3.11 floor has it), so trailing
-    comments, quoting and escapes mean what any TOML parser says. A file that does not parse
-    is reported once to stderr with its path and yields nothing: a typo in a config file must
-    not take the pipeline down at stage 0, and must not be read as a garbage value either.
-    Non-string values are dropped rather than stringified.
-
-    Keys no setting reads, values dropped for not being a string and likely typos are named
-    on stderr by `report_settings` (#156). They are not reported here: this function is the
-    reader, it runs several times per invocation, and the report belongs to the command, not
-    to each read.
-    """
-    return {
-        key: value
-        for key, value in (_parse_settings(settings_path()) or {}).items()
-        if isinstance(value, str)
-    }
-
-
-def _toml_string(value: str) -> str:
-    """A TOML basic string for `value`, with quotes, backslashes and control characters escaped."""
-    out: list[str] = []
-    for ch in value:
-        if ch == '"':
-            out.append('\\"')
-        elif ch == "\\":
-            out.append("\\\\")
-        elif ord(ch) < 0x20 or ord(ch) == 0x7F:
-            out.append(f"\\u{ord(ch):04X}")
-        else:
-            out.append(ch)
-    return '"' + "".join(out) + '"'
-
-
-def write_settings(vault: Path) -> Path:
-    """Persist the vault, creating the file on first use. Returns the path written.
-
-    Writing is the whole point of the first run: without it, "settable at setup" means the
-    user has to guess that `DYAK_VAULT` exists, and a default nobody can discover is a
-    default nobody will change. The value is escaped so any path round-trips through
-    `read_settings` unchanged.
-    """
-    path = settings_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        f"{SETTINGS_TEMPLATE}{SETTINGS_KEY} = {_toml_string(str(vault))}\n", encoding="utf-8"
-    )
-    return path
 
 
 @dataclass
@@ -385,8 +200,10 @@ def check_stt() -> Check:
 def resolve_vault(explicit: str | Path | None = None) -> Path:
     """The vault ADR-0001 D9 names, from the most specific source available.
 
-    Precedence: explicit argument, then `$DYAK_VAULT`, then the persisted `vault` key in
-    the settings file, then the built-in default directory.
+    Precedence is `settings.resolve`'s, not this function's: the explicit `--vault-path`
+    argument is the flag layer, then `$DYAK_VAULT`, then the persisted `vault` key in the
+    settings file, then the built-in default directory. `settings.resolve` records which of
+    the four won in `Resolved.source`; this function only turns the winner into a path.
 
     The result is a path, not a judgement about it: a vault that does not exist is still what
     the user named, and whether that is fatal is `check_vault`'s question, not this one's.
@@ -399,15 +216,8 @@ def resolve_vault(explicit: str | Path | None = None) -> Path:
 
     Two code paths, one documented default, and they disagreed.
     """
-    if explicit is not None:
-        return Path(explicit).expanduser()
-    configured = os.environ.get(VAULT_ENV, "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    stored = read_settings().get(SETTINGS_KEY, "").strip()
-    if stored:
-        return Path(stored).expanduser()
-    return DEFAULT_VAULT
+    resolved = resolve(VAULT_ENV, flag=explicit, default=str(DEFAULT_VAULT))
+    return Path(resolved.value).expanduser()
 
 
 def check_vault() -> Check:
@@ -455,7 +265,7 @@ def check_settings() -> Check:
     """The settings file as `doctor` reports it: where it is, and what it did with its keys.
 
     #156: `read_settings` had no feedback loop, so a key that no setting reads was
-    indistinguishable from no config at all, and a typo in the one key that does work was
+    indistinguishable from no config at all, and a typo in a key that does work was
     indistinguishable from "not configured". This is the always-on half of the report --
     `doctor` prints it whether or not anything is wrong -- while `report_settings` warns only
     when there is something to warn about.
@@ -506,7 +316,7 @@ def check_llm() -> Check:
     `process` treats an unconfigured or unreachable endpoint as fatal unless `--no-llm` is
     given (#126), so a run never writes a template note by accident.
     """
-    url = os.environ.get(LLM_ENV, "").strip()
+    url = resolve(LLM_ENV).value or ""
     if not url:
         return Check(
             name="llm",
@@ -526,7 +336,7 @@ def check_llm() -> Check:
             # configured, so there is nothing to have failed.
             code=ec.MISSING_DEPENDENCY,
         )
-    model = os.environ.get(LLM_MODEL_ENV, "").strip()
+    model = resolve(LLM_MODEL_ENV).value or ""
     if not model:
         return Check(
             name="llm",
@@ -539,7 +349,7 @@ def check_llm() -> Check:
         request = urllib.request.Request(
             f"{url.rstrip('/')}/models", headers={"Accept": "application/json"}
         )
-        if api_key := os.environ.get(LLM_KEY_ENV):
+        if api_key := resolve(LLM_KEY_ENV).value:
             request.add_header("Authorization", f"Bearer {api_key}")
         with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT) as resp:
             code = resp.status
@@ -571,7 +381,7 @@ def vlm_configured() -> bool:
     half-set pair (`DYAK_VLM_MODEL` without `DYAK_VLM_ENDPOINT`, or the reverse) counts as
     configured, because that is the state `Config.vision_from_env` refuses to resolve.
     """
-    return bool(os.environ.get(VLM_ENV, "").strip() or os.environ.get(VLM_MODEL_ENV, "").strip())
+    return bool(resolve(VLM_ENV).value or resolve(VLM_MODEL_ENV).value)
 
 
 def check_vlm() -> Check:
@@ -590,10 +400,10 @@ def check_vlm() -> Check:
         discover a stage-0 fact, so the check is fatal (`DEPENDENCY_FAILED`, like the text
         role) and `_preflight` refuses the run before it starts.
     """
-    url = os.environ.get(VLM_ENV, "").strip()
-    model = os.environ.get(VLM_MODEL_ENV, "").strip()
+    url = resolve(VLM_ENV).value or ""
+    model = resolve(VLM_MODEL_ENV).value or ""
     if not url and not model:
-        fallback = os.environ.get(LLM_ENV, "").strip()
+        fallback = resolve(LLM_ENV).value or ""
         if fallback:
             return Check(
                 name="vlm",
@@ -633,7 +443,7 @@ def check_vlm() -> Check:
         )
     # The key falls back the same way `Config.vision_from_env` does: a vision-specific key
     # wins, and an unset one inherits the text role's.
-    key = os.environ.get(VLM_KEY_ENV, "").strip() or os.environ.get(LLM_KEY_ENV, "").strip()
+    key = resolve(VLM_KEY_ENV).value or resolve(LLM_KEY_ENV).value or ""
     try:
         request = urllib.request.Request(
             f"{url.rstrip('/')}/models", headers={"Accept": "application/json"}

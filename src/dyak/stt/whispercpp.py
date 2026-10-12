@@ -32,7 +32,6 @@ artefact, and a regression check cannot compare transcripts byte-wise — see #2
 
 from __future__ import annotations
 
-import os
 import urllib.error
 import urllib.request
 import uuid
@@ -40,9 +39,9 @@ from pathlib import Path
 
 from .. import exitcodes as ec
 from .. import runner
-from .backends import DEFAULT_ENDPOINTS, BackendInfo, _env_endpoint
-
-ENV_LANGUAGE = "DYAK_WHISPERCPP_LANGUAGE"
+from ..settings import WHISPERCPP_LANGUAGE_ENV as ENV_LANGUAGE
+from ..settings import WHISPERCPP_URL_ENV, resolve
+from .backends import DEFAULT_ENDPOINTS, BackendInfo
 
 REMEDIATION = (
     "start whisper.cpp and point DYAK_WHISPERCPP_URL at it "
@@ -64,7 +63,12 @@ class HttpWhisperCpp:
     name = "whispercpp"
 
     def __init__(self, base_url: str | None = None) -> None:
-        self.base_url = (base_url or _env_endpoint("whispercpp")).rstrip("/")
+        # `base_url` is the flag layer; then `$DYAK_WHISPERCPP_URL`, then the flat
+        # `whispercpp_url` key in the settings file, then the built-in port.
+        configured = resolve(
+            WHISPERCPP_URL_ENV, flag=base_url, default=DEFAULT_ENDPOINTS["whispercpp"]
+        ).value
+        self.base_url = configured.rstrip("/")
 
     # -- introspection --------------------------------------------------------
 
@@ -159,7 +163,7 @@ class HttpWhisperCpp:
         ]
         # Language is optional and unset by default: whisper.cpp auto-detects, and pinning
         # it would silently mis-transcribe any lecture in another language.
-        language = os.environ.get(ENV_LANGUAGE, "").strip()
+        language = resolve(ENV_LANGUAGE).value or ""
         if language:
             fields.append(("language", language))
         return fields

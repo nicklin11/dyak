@@ -40,23 +40,22 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-import os
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-ENDPOINT_ENV = "DYAK_LLM_ENDPOINT"
-MODEL_ENV = "DYAK_LLM_MODEL"
-KEY_ENV = "DYAK_LLM_KEY"
+from .settings import LLM_ENDPOINT_ENV as ENDPOINT_ENV
+from .settings import LLM_KEY_ENV as KEY_ENV
+from .settings import LLM_MODEL_ENV as MODEL_ENV
+from .settings import VLM_ENDPOINT_ENV as VISION_ENDPOINT_ENV
+from .settings import VLM_KEY_ENV as VISION_KEY_ENV
+from .settings import VLM_MODEL_ENV as VISION_MODEL_ENV
+from .settings import resolve
 
 #: The vision endpoint has its own names, per ADR-0004 D3: the two roles are separate
 #: sections that may point at the same URL, and switching one later must cost one line.
-VISION_ENDPOINT_ENV = "DYAK_VLM_ENDPOINT"
-VISION_MODEL_ENV = "DYAK_VLM_MODEL"
-VISION_KEY_ENV = "DYAK_VLM_KEY"
-
 #: Longest edge sent to the vision endpoint. Stage 4 extracts at 1600 px; a model that
 #: resizes internally sees the same content either way, and the request body is 4/3 the
 #: base64 size, so sending more than the frame costs bytes and buys nothing.
@@ -101,13 +100,13 @@ class Config:
 
     @classmethod
     def from_env(cls) -> Config:
-        endpoint = os.environ.get(ENDPOINT_ENV, "").strip()
-        model = os.environ.get(MODEL_ENV, "").strip()
+        endpoint = resolve(ENDPOINT_ENV).value or ""
+        model = resolve(MODEL_ENV).value or ""
         if not endpoint:
             raise NotConfiguredError(f"set {ENDPOINT_ENV} to enable synthesis, audit and repair")
         if not model:
             raise NotConfiguredError(f"{ENDPOINT_ENV} is set but {MODEL_ENV} is not")
-        key = os.environ.get(KEY_ENV, "").strip() or None
+        key = resolve(KEY_ENV).value
         return cls(endpoint=endpoint.rstrip("/"), model=model, api_key=key)
 
     @property
@@ -132,9 +131,9 @@ class Config:
         -- on this host both are the same gateway, and requiring both sets to be exported
         would make stage 6 unrunnable for anyone who configured only the text side.
         """
-        endpoint = os.environ.get(VISION_ENDPOINT_ENV, "").strip()
-        model = os.environ.get(VISION_MODEL_ENV, "").strip()
-        key = os.environ.get(VISION_KEY_ENV, "").strip() or None
+        endpoint = resolve(VISION_ENDPOINT_ENV).value or ""
+        model = resolve(VISION_MODEL_ENV).value or ""
+        key = resolve(VISION_KEY_ENV).value
         if not endpoint and not model:
             return cls.from_env()
         if not endpoint:
@@ -144,7 +143,7 @@ class Config:
         return cls(
             endpoint=endpoint.rstrip("/"),
             model=model,
-            api_key=key or os.environ.get(KEY_ENV, "").strip() or None,
+            api_key=key or resolve(KEY_ENV).value,
         )
 
     @property
@@ -154,7 +153,7 @@ class Config:
         Recorded in provenance. A reader comparing two bundles needs to know whether the
         vision stage was pointed somewhere deliberately or inherited.
         """
-        return not os.environ.get(VISION_ENDPOINT_ENV, "").strip()
+        return resolve(VISION_ENDPOINT_ENV).value is None
 
 
 @dataclass(frozen=True)

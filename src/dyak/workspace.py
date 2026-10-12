@@ -23,13 +23,14 @@ default even on a single-user box.
 
 from __future__ import annotations
 
-import os
 import shutil
 import stat
 import tempfile
 from pathlib import Path
 
-WORKDIR_ENV = "DYAK_WORKDIR"
+from .settings import WORKDIR_ENV
+from .settings import resolve
+
 PREFIX = "dyak-"
 
 
@@ -38,7 +39,13 @@ class WorkDir:
 
     def __init__(self, *, keep: bool = False, parent: Path | None = None) -> None:
         self.keep = keep
-        base = parent or _parent_from_env()
+        # `DYAK_WORKDIR` sets the *parent* of the managed dir, not the dir itself; a per-run
+        # subdirectory is still created under it so two concurrent runs do not collide on
+        # `audio.wav`. Precedence is `settings.resolve`'s: the `--workdir` argument (flag),
+        # then the environment, then the flat `workdir` key in the settings file, then
+        # `$TMPDIR`. Resolving here rather than behind an `or` keeps the flag layer in the
+        # one place that decides order.
+        base = Path(resolve(WORKDIR_ENV, flag=parent, default=tempfile.gettempdir()).value)
         base.mkdir(parents=True, exist_ok=True)
         # mkdtemp already creates 0700; stated explicitly because the umask of
         # the calling shell otherwise decides it on some platforms.
@@ -99,15 +106,3 @@ class WorkDir:
         target = self.sub(*parts)
         target.mkdir(parents=True, exist_ok=True)
         return target
-
-
-def _parent_from_env() -> Path:
-    """`DYAK_WORKDIR` sets the parent of the managed dir, not the dir itself.
-
-    A per-run subdirectory is still created under it: two concurrent runs on the
-    same machine must not collide on `audio.wav`.
-    """
-    configured = os.environ.get(WORKDIR_ENV, "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    return Path(tempfile.gettempdir())
