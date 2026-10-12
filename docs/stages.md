@@ -29,7 +29,7 @@ constants, not provenance.
 | 6 | per-frame `caption_trace` in `captions.json` | which model captioned this frame, tokens, timing, called or cached |
 | 6 | `caption_status` per frame | `NO_NEW_INFORMATION` says the model declined; it is a success, not an error, and a high share means the screens went unread |
 | 7, 9 | `synth-`/`audit-llm-transcript.json` | every call: full messages, model, tokens, seconds, attempts, `finish_reason` |
-| 1-12 | `timings.json` | wall clock per stage and the total. Written after stage 12, not registered as an artefact. Since #115 stages 2-5 run as two branches, so the per-stage seconds overlap and their sum is larger than the total: the total is the run and each entry is its stage |
+| 1-12 | `timings.json` | wall clock per stage, and their sum in `total_seconds`. Written after stage 12, not registered as an artefact. Since #115 stages 2-5 run as two branches, their seconds overlap and the sum is larger than the run's wall clock: `total_seconds` is the cost of the stages, and `run-state.json`'s `started_at`/`finished_at` are the time the run took |
 | 1-12 | `run-state.json` | the run id, `started_at`/`finished_at`, the stage reached, and `completed`/`interrupted`/`failed`. Written in a `finally`, so an interrupted run's bundle says so (#92) |
 
 `finish_reason` is why the model stopped. `length` means the endpoint's output cap cut it off:

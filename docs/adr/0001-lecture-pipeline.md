@@ -359,6 +359,36 @@ time it was raised. A failing branch does not cancel its sibling, which is what 
 "an artefact that is not published dies with the work dir" true per branch: with the STT
 endpoint down, the bundle still holds the frames and their gate, and stage 6 is never entered.
 
+**Measured, 2026-10-12, on `1_lecture_OCS.mp4`** (4520 s, AV1 1080p — the run the issue quotes),
+two arms back to back on one host with the same endpoints and the same source, each stopped once
+stage 6 had published because stages 7-12 are unchanged:
+
+| stage | parallel | `DYAK_SERIAL=1` |
+|---|---:|---:|
+| 3 `stt` | 333.5 s | 314.9 s |
+| 4 `frames` | 339.2 s | 328.8 s |
+| 5 `quality` | 31.4 s | 32.7 s |
+| **stage 6 starts** | **373.7 s** | **680.8 s** |
+| 6 `caption` | 309.7 s | 294.9 s |
+| **stage 6 published** | **683.4 s** | **975.7 s** |
+
+307 s of the pre-caption half disappeared, 45% of it. The two branch intervals, read off the
+timestamped log, are 6.5 s → 340.1 s and 3.1 s → 373.7 s: the shorter branch is almost entirely
+hidden. The branches share the CPU while they overlap, which is why the saving is 307 s rather
+than the shorter branch's whole duration. Of the 128 files the two arms published, 123 are
+byte-identical. The five that differ are the two clock files, `transcript.json` (which records
+the per-run work-dir path in `wav`), and `captions.json`/`caption-provenance.json` — the vision
+model's own non-determinism, not the fork: the stored pre-change run of the same source differs
+from either arm in exactly those fields, with the same frame order and the same gate verdicts.
+
+Measured with the endpoint refusing `POST /inference` (a stub that answers the stage-0 probe
+with 404, the "no /health to answer" case of `stt/whispercpp.py:129`, and refuses the
+transcription): exit 3, `run-state.json` `failed` with `stages_completed` `[1, 2, 4, 5]`, and a
+bundle holding `manifest.tsv`, `quality.json`, `quality-provenance.json`, `detect.json` and
+`images/`, with no transcript and no stage 6. A genuinely dead endpoint never reaches the
+pipeline — `PROCESS_REQUIRES` includes `stt`, so stage 0 refuses the run — which is why the
+refusal is what is measured.
+
 ### Amendment 2026-10-12 — the required set, and a cross-artefact check (#87)
 
 Stage 12's per-file contract was presence-and-non-empty, and `REQUIRED` named eight root
