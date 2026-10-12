@@ -443,7 +443,7 @@ def _process(args: argparse.Namespace) -> int:
         # Code 4's other half, and the home is the frame/A-V family: code 4's row is
         # `docs/adr/0001-lecture-pipeline.md:328`. It is *not* ADR-0001 D5 (`:191`), which is
         # the audit -- a separate model context that never rewrites; `caption.py:51-53` and
-        # `pipeline.py:88-89` cite D5 for this exit and are wrong (#223).
+        # `pipeline.py:86-87` cite D5 for this exit and are wrong (#223; residual filed as #227).
         #
         # The `considered` guard is load-bearing, not cosmetic: `caption.Report.ok` is false
         # whenever `considered == []` too -- an audio-only source, or a run whose every frame
