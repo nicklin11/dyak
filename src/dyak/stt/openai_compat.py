@@ -48,6 +48,7 @@ import struct
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -195,7 +196,13 @@ class OpenAICompat:
                 remediation=REMEDIATION,
             ) from exc
 
-    def run(self, wav: Path, *, timeout: float) -> bytes:
+    def run(
+        self,
+        wav: Path,
+        *,
+        timeout: float,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> bytes:
         wav = Path(wav)
         boundary = f"dyak-{uuid.uuid4().hex}"
         envelope, closing = self._envelope(boundary, wav.name)
@@ -207,7 +214,12 @@ class OpenAICompat:
             # always sent, extra RIFF chunks and all. The layout is not even parsed, so a
             # wav this code cannot slice still uploads as long as it fits.
             self.chunks = 1
-            return self._post(boundary, self._multipart(boundary, wav), timeout=timeout)
+            if on_progress is not None:
+                on_progress(0, 1)
+            payload = self._post(boundary, self._multipart(boundary, wav), timeout=timeout)
+            if on_progress is not None:
+                on_progress(1, 1)
+            return payload
 
         layout = _wav_layout(wav)
         capacity = _align_down(threshold - overhead - layout.header_bytes, layout.block_align)
@@ -227,22 +239,31 @@ class OpenAICompat:
         )
         chunks = _plan_chunks(layout.data_length, capacity, overlap)
         self.chunks = len(chunks)
-        payloads = [
-            self._post(
-                boundary,
-                self._multipart(
+        # The counter is this run's own uploads, reported as each one returns (#193). It is
+        # observed state, not an estimate: ADR-0001 D7 bans a fabricated bar, and this is not
+        # one. The loop is explicit rather than a comprehension because the callback has to run
+        # between the requests, which a comprehension cannot do.
+        if on_progress is not None:
+            on_progress(0, len(chunks))
+        payloads: list[bytes] = []
+        for chunk in chunks:
+            payloads.append(
+                self._post(
                     boundary,
-                    wav,
-                    # `chunk.offset` is data-relative -- that is what makes the time
-                    # `offset / bytes_per_second` -- so the read seeks past the header.
-                    offset=layout.data_offset + chunk.offset,
-                    length=chunk.length,
-                    header=_wav_header(layout.fmt, chunk.length),
-                ),
-                timeout=_chunk_timeout(timeout, chunk.length, layout.data_length),
+                    self._multipart(
+                        boundary,
+                        wav,
+                        # `chunk.offset` is data-relative -- that is what makes the time
+                        # `offset / bytes_per_second` -- so the read seeks past the header.
+                        offset=layout.data_offset + chunk.offset,
+                        length=chunk.length,
+                        header=_wav_header(layout.fmt, chunk.length),
+                    ),
+                    timeout=_chunk_timeout(timeout, chunk.length, layout.data_length),
+                )
             )
-            for chunk in chunks
-        ]
+            if on_progress is not None:
+                on_progress(len(payloads), len(chunks))
         return self._splice(payloads, chunks, layout.bytes_per_second)
 
     def _post(self, boundary: str, body: bytes, *, timeout: float) -> bytes:

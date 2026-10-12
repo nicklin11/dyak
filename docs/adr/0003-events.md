@@ -56,8 +56,13 @@ breaking change. The stream is a public interface the moment it ships.
 ### D4 — Blocking work is bracketed, not smoothed
 
 Before a blocking request the pipeline emits its estimate interval and the basis for it
-(`expect 3.8min-23min, 4520s of audio, no streaming (D7)`); after it, the actual elapsed. **The
-gap between the two is data**, and it is emitted rather than hidden.
+(`expect 3.8min-23min, 4520s of audio`); after it, the actual elapsed. **The gap between the two
+is data**, and it is emitted rather than hidden. *Amended 2026-10-12 (#186): the interval is
+emitted only where a measurement exists for the backend that will actually run — whisper.cpp's
+measured rate — and a hosted endpoint whose rate this repo has not measured prints `no rate
+measured for this endpoint` instead of borrowing one. `no streaming (D7)` is no longer in the
+line: the hosted route reports the wav slices it observes as they advance (`chunks k/N`), which
+is observed state and not the fabricated bar D7 bans (#193).*
 
 Stage 3 already prints this bracket; D1 generalises it to every blocking stage.
 

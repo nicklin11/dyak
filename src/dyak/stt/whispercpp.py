@@ -35,6 +35,7 @@ from __future__ import annotations
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from .. import exitcodes as ec
@@ -138,7 +139,20 @@ class HttpWhisperCpp:
 
     # -- transcription ---------------------------------------------------------
 
-    def run(self, wav: Path, *, timeout: float) -> bytes:
+    def run(
+        self,
+        wav: Path,
+        *,
+        timeout: float,
+        on_progress: Callable[[int, int], None] | None = None,
+    ) -> bytes:
+        # `on_progress` is accepted and never called, and that is the honest state rather than
+        # an omission (#193): the client's only channel is this one blocking POST /inference,
+        # and the server's own progress output goes to another process's stderr, which this
+        # client cannot read. ADR-0001 D7 records that a per-segment bar is not available
+        # without a change on the whisper server side, and #193's decision records that
+        # whether the current build has a partial/stream mode is *not measured* -- so the
+        # stage-3 start line says "this backend reports no progress" instead of inventing one.
         boundary = f"dyak-{uuid.uuid4().hex}"
         body = self._multipart(boundary, Path(wav), timeout)
         request = urllib.request.Request(

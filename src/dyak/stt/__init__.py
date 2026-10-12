@@ -25,6 +25,7 @@ zero timed words is exit 3.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 from .. import exitcodes as ec
@@ -73,8 +74,18 @@ def backend(name: str | None = None) -> TranscriptionBackend:
     return resolve(name)
 
 
-def transcribe(wav: Path, *, audio_duration: float, backend: str | None = None) -> Transcript:
+def transcribe(
+    wav: Path,
+    *,
+    audio_duration: float,
+    backend: str | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> Transcript:
     """Transcribe `wav` through the selected backend and parse what came back.
+
+    `on_progress` is forwarded to the engine unchanged: units the engine itself observed, never
+    an estimate (#193). Only the OpenAI-compatible route has a unit today -- the chunk counter --
+    and a backend with none simply never calls it.
 
     Raises runner.DependencyError with code 2 if the backend is not usable, 3 if it failed
     or returned nothing usable, and 1 if `backend` names something unknown.
@@ -82,7 +93,7 @@ def transcribe(wav: Path, *, audio_duration: float, backend: str | None = None) 
     engine = resolve(backend)
     engine.check()  # exit 2 before the caller has done any work on this stage's behalf
     timeout = audio_duration * TIMEOUT_PER_REALTIME + TIMEOUT_MARGIN
-    raw = engine.run(wav, timeout=timeout)
+    raw = engine.run(wav, timeout=timeout, on_progress=on_progress)
 
     if not raw.strip():
         raise runner.DependencyError(
