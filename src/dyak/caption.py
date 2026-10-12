@@ -255,11 +255,11 @@ def read_transcript(path: Path) -> tuple[dict | None, str]:
     `None` with an empty reason means the file is absent -- legitimate: a run may have no
     transcript, and stage 12 names the missing required artefact. `None` with a reason means it
     is present and unusable: truncated, not a JSON object, or without a `segments` list. A
-    wrong-shaped container is not read as "no words": measured, that degradation reports every
-    frame it considers as uncovered (captions.json's provenance and the CLI's explain output)
-    and the note loses the frames' text, with no exit code fired -- `caption.ok` is read by
-    nothing (#223). Either way it is a claim about the lecture made from a file that is simply
-    wrong (#201).
+    wrong-shaped container is not read as "no words": measured, it reports every frame it considers
+    as uncovered (captions.json, the CLI's explain output) and the note loses the frames' text
+    (#201). The exit fires now: stage 6's verdict is refused on code 4, guarded on `considered`
+    (`cli.py:442`). Measured through `cli.main`: 4 with a complete note, 7 or 1 with a degraded one
+    (the `cli.py:426` branch runs first), and 0 for an audio-only source -- the `considered` guard.
     """
     if not path.is_file():
         return None, ""
