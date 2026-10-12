@@ -1452,7 +1452,7 @@ check(
 # "Coverage is a gate: too many frames with no transcript means broken A/V sync"
 # (`src/dyak/caption.py:196-197`). Code 4's row is the frame/A-V family
 # (`docs/adr/0001-lecture-pipeline.md:328`); ADR-0001 D5 (`:191`) is the audit, a different
-# decision; `caption.py:51-53` and `pipeline.py:86-87` cite it wrongly (#223; residual filed as #227).
+# decision, and `caption.py:51-56` and `pipeline.py:86-90` carry the same attribution and guard.
 def _uncovered_alignment(frame, pts_ms):
     """A frame stage 6 was allowed to align, with no transcript segment behind it."""
     return dycap.Alignment(
