@@ -1359,6 +1359,16 @@ def unverified_pipeline(source, work, **kw):
     result.report.missing.append(
         {"artefact": "note", "why": "the deliverable itself", "detail": "missing"}
     )
+    # The second half of D3 after #87: not a missing file, but two present files that
+    # contradict each other. It must reach the user with the frame named, on the same code.
+    result.report.inconsistent.append(
+        {
+            "artefact": "captions.json",
+            "frame": "f_0.png",
+            "why": "captions.json must not contradict the gate report it was aligned against",
+            "detail": "captions.json says quality_gate='' for f_0.png, quality.json says 'FAIL'",
+        }
+    )
     return result
 
 
@@ -1376,6 +1386,12 @@ check(
 check(
     "and it names what was missing",
     "MISSING note" in uout.getvalue(),
+    uout.getvalue(),
+)
+check(
+    "#87: and it names the contradiction, with the frame, on the same code path",
+    "INCONSISTENT captions.json:f_0.png" in uout.getvalue()
+    and "quality.json says 'FAIL'" in uout.getvalue(),
     uout.getvalue(),
 )
 dyp.run = fake_pipeline
@@ -2772,9 +2788,11 @@ check(
 # Asserted on the real run above, because that is the only place the real keys exist.
 check(
     "#88: every REQUIRED artefact resolves from the real registry, not from the root listing",
-    {e["artefact"] for e in _r.report.verified} == set(dyro.REQUIRED) if _r is not None else False,
+    {e["artefact"] for e in _r.report.verified} == set(dyro.required_for(tmp / "order_bundle"))
+    if _r is not None
+    else False,
     f"verified={sorted(e['artefact'] for e in _r.report.verified) if _r else None}; "
-    f"required={sorted(dyro.REQUIRED)}",
+    f"required={sorted(dyro.required_for(tmp / 'order_bundle'))}",
 )
 check(
     "#88: and the six whose registry key differs are among them, not silently absent",
@@ -2996,8 +3014,10 @@ check(
 # said so. On run 12 `captions.json` and `quality.json` were never examined, so a corrupted
 # quality gate still exits 0. #87.
 #
-# This does not make the run fail on those files -- that is a contract change and it is not
-# taken here. It makes the gap a number a reader can see and disagree with.
+# The gap is now a number a reader can see *and* three files smaller: #87 promoted
+# `captions.json` and `synth.json` into `REQUIRED` and made `quality.json` required when the
+# source had video. This block still asserts the reporting half -- `unchecked` is what remains
+# outside the check -- and the promotion is asserted below, per file.
 _order_report = json.loads((tmp / "order_bundle" / dyro.REPORT_NAME).read_text(encoding="utf-8"))
 check(
     "report.json records how many files it checked and how many the bundle holds",
@@ -3021,9 +3041,26 @@ check(
     f"bundle={_order_report['files_in_bundle_excluding_this_stage']}",
 )
 check(
-    "captions.json is named as unexamined -- it is the whole product of stage 6",
-    "captions.json" in _order_report["unchecked"],
-    str(_order_report["unchecked"]),
+    "#87: captions.json is verified now, not named as unexamined -- it is stage 6's whole product",
+    "captions.json" in {e["artefact"] for e in _r.report.verified}
+    and "captions.json" not in _order_report["unchecked"],
+    f"verified={sorted(e['artefact'] for e in _r.report.verified)}; "
+    f"unchecked={_order_report['unchecked']}",
+)
+check(
+    "#87: synth.json is verified too, so the coverage and section gates cannot read an absent file",
+    "synth.json" in {e["artefact"] for e in _r.report.verified}
+    and "synth.json" not in _order_report["unchecked"],
+    f"verified={sorted(e['artefact'] for e in _r.report.verified)}",
+)
+check(
+    "#87: quality.json is required because the source had video, and it is verified",
+    _order_report.get("source_had_video") is True
+    and _order_report.get("quality_gate_required") is True
+    and "quality.json" in {e["artefact"] for e in _r.report.verified},
+    f"source_had_video={_order_report.get('source_had_video')} "
+    f"required={_order_report.get('quality_gate_required')} "
+    f"verified={sorted(e['artefact'] for e in _r.report.verified)}",
 )
 _order_expected, _order_rejected = dyro.expected_frames(tmp / "order_bundle")
 check(
@@ -6523,8 +6560,13 @@ def fill_bundle(with_note=True, frame_count=0, manifest_rows=0, zero_byte=()):
             continue
         # The key for the note is "note"; the file on disk is note.md. Writing the key
         # verbatim produced a file literally named "note" and three spurious failures.
+        #
+        # `captions.json` gets valid JSON rather than "x": stage 12 parses it to cross-check
+        # the gate verdicts against `quality.json` (#87), so a one-byte placeholder would fail
+        # the parse rather than the check under test.
+        content = '{"alignments": []}' if name == dycap.REPORT_NAME else "x"
         (bdir / ("note.md" if name == "note" else name)).write_text(
-            "" if name in zero_byte else "x", encoding="utf-8"
+            "" if name in zero_byte else content, encoding="utf-8"
         )
     # Frames live in images/ as .png, and the quality gate writes enhanced .jpg copies
     # beside them named <frame>_q.jpg -- one per frame that passed. The first version of
@@ -6629,6 +6671,192 @@ check(
     "and the failure carries the reason",
     any(m["artefact"] == "note" for m in nol.missing),
     str(nol.missing),
+)
+
+# --- #87: the required set, the conditional gate, and the cross-reference ----------------
+# Stage 12 verified 65 of 144 files and the check it did run was presence-only: a `quality.json`
+# truncated to one byte exited 0 with `frames_found == frames_expected`, and `captions.json` --
+# stage 6's whole product -- was in neither REQUIRED nor OPTIONAL. These tests build those
+# exact states. The cross-reference is the substantive half; `_check` stays presence-only on
+# purpose (#87 rejected byte-size thresholds).
+
+
+def run_report_in(root: Path, stream=None) -> dyro.Report:
+    """Run stage 12 over `root`, resolving the required set the way the stage does."""
+    return dyro.run(
+        root,
+        final_note=root / "note.md",
+        synth_note=root / "note.synth.md",
+        artefacts={name: root / name for name in dyro.required_for(root)},
+        stream=stream or io.StringIO(),
+    )
+
+
+check(
+    "#87: captions.json and synth.json are in the unconditional REQUIRED set",
+    dycap.REPORT_NAME in dyro.REQUIRED and dysy.REPORT_NAME in dyro.REQUIRED,
+    f"required={sorted(dyro.REQUIRED)}",
+)
+
+# (a) Losing either promoted artefact is a named failure, not a silent omission.
+shutil.rmtree(bdir, ignore_errors=True)
+fill_bundle(frame_count=0, manifest_rows=0)
+(bdir / dycap.REPORT_NAME).unlink(missing_ok=True)
+_caps_missing = run_report()
+check(
+    "#87: a bundle without captions.json fails stage 12",
+    not _caps_missing.ok
+    and any(m["artefact"] == dycap.REPORT_NAME and m["why"] for m in _caps_missing.missing),
+    _caps_missing.summary(),
+)
+shutil.rmtree(bdir, ignore_errors=True)
+fill_bundle(frame_count=0, manifest_rows=0)
+(bdir / dysy.REPORT_NAME).unlink(missing_ok=True)
+_synth_missing = run_report()
+check(
+    "#87: a bundle without synth.json fails stage 12",
+    not _synth_missing.ok
+    and any(m["artefact"] == dysy.REPORT_NAME and m["why"] for m in _synth_missing.missing),
+    _synth_missing.summary(),
+)
+
+
+# (b) The cross-reference that would have caught #82. #82's signature in the artefact was
+# `captions.json` carrying `quality_gate: ""` on every frame while `quality.json` recorded one
+# FAIL. Each file was internally consistent; only a comparison between them sees it.
+def _gate_bundle(
+    name: str,
+    *,
+    captions_gate: str,
+    quality_gate: str,
+    has_video: bool = True,
+    quality_raw: str | None = None,
+) -> Path:
+    root = tmp / name
+    shutil.rmtree(root, ignore_errors=True)
+    (root / "images").mkdir(parents=True)
+    (root / "images" / "f_0.png").write_bytes(b"\x89PNG\r\n")
+    (root / "manifest.tsv").write_text(
+        "pts_ms\ttime\tfile\n0\t00:00:00.00\tf_0.png\n", encoding="utf-8"
+    )
+    (root / "note.md").write_text("# note\n", encoding="utf-8")
+    (root / dycap.REPORT_NAME).write_text(
+        json.dumps({"alignments": [{"frame": "f_0.png", "quality_gate": captions_gate}]}),
+        encoding="utf-8",
+    )
+    (root / dyprobe.PROVENANCE_NAME).write_text(
+        json.dumps({"source": {"has_video": has_video}}), encoding="utf-8"
+    )
+    if quality_raw is not None:
+        (root / dyq.REPORT_NAME).write_text(quality_raw, encoding="utf-8")
+    else:
+        (root / dyq.REPORT_NAME).write_text(
+            json.dumps({"frames": [{"name": "f_0.png", "quality_gate": quality_gate}]}),
+            encoding="utf-8",
+        )
+    for extra in dyro.REQUIRED:
+        target = root / ("note.md" if extra == "note" else extra)
+        if not target.exists():
+            target.write_text("x", encoding="utf-8")
+    return root
+
+
+_p82_root = _gate_bundle("p82", captions_gate="", quality_gate="FAIL")
+_p82 = run_report_in(_p82_root)
+check(
+    "#87: captions.json disagreeing with quality.json is a stage-12 failure (#82 shape)",
+    not _p82.ok and bool(_p82.inconsistent),
+    f"ok={_p82.ok} inconsistent={_p82.inconsistent}",
+)
+check(
+    "#87: and the disagreement names the frame and both verdicts",
+    any(
+        e.get("frame") == "f_0.png" and e["artefact"] == dycap.REPORT_NAME and "FAIL" in e["detail"]
+        for e in _p82.inconsistent
+    ),
+    str(_p82.inconsistent),
+)
+check(
+    "#87: both files still verify by presence -- the failure is the contradiction, not absence",
+    {dycap.REPORT_NAME, dyq.REPORT_NAME} <= {e["artefact"] for e in _p82.verified},
+    str([e["artefact"] for e in _p82.verified]),
+)
+
+_agree_root = _gate_bundle("agree", captions_gate="FAIL", quality_gate="FAIL")
+_agree = run_report_in(_agree_root)
+check(
+    "#87: the same bundle is ok when captions.json carries the gate's own verdict",
+    _agree.ok and not _agree.inconsistent,
+    f"ok={_agree.ok} inconsistent={_agree.inconsistent}",
+)
+
+# (c) A corrupt gate report is a failure, not the empty set the old `except JSONDecodeError`
+# returned. Truncated to `{"frames": [` is the shape a half-written file leaves.
+_corrupt_root = _gate_bundle(
+    "corrupt-quality", captions_gate="PASS", quality_gate="PASS", quality_raw='{"frames": ['
+)
+_corrupt = run_report_in(_corrupt_root)
+check(
+    "#87: a truncated quality.json fails stage 12 instead of being silently swallowed",
+    not _corrupt.ok and any(e["artefact"] == dyq.REPORT_NAME for e in _corrupt.inconsistent),
+    f"ok={_corrupt.ok} inconsistent={_corrupt.inconsistent}",
+)
+
+# (d) `quality.json` is required only when the bundle's own source record says the source had
+# video. A wrong unconditional REQUIRED would fail every audio-only bundle, so all three
+# states are asserted: video, audio-only, and a missing record (unknown).
+_video_root = _gate_bundle("cond-video", captions_gate="PASS", quality_gate="PASS")
+check(
+    "#87: quality.json is required when the source record says the source had video",
+    dyro.required_for(_video_root).get(dyq.REPORT_NAME) is not None
+    and run_report_in(_video_root).quality_required,
+    str(sorted(dyro.required_for(_video_root))),
+)
+(_video_root / dyq.REPORT_NAME).unlink()
+_video_missing = run_report_in(_video_root)
+check(
+    "#87: and deleting it from a video bundle is a missing required artefact",
+    not _video_missing.ok and any(m["artefact"] == dyq.REPORT_NAME for m in _video_missing.missing),
+    _video_missing.summary(),
+)
+
+_audio_root = _gate_bundle("cond-audio", captions_gate="", quality_gate="PASS", has_video=False)
+(_audio_root / dyq.REPORT_NAME).unlink()
+_audio = run_report_in(_audio_root)
+check(
+    "#87: an audio-only source keeps quality.json optional -- absence is not a failure",
+    _audio.ok
+    and not _audio.quality_required
+    and _audio.source_had_video is False
+    and any(a["artefact"] == dyq.REPORT_NAME for a in _audio.absent),
+    f"ok={_audio.ok} required={_audio.quality_required} absent={_audio.absent}",
+)
+
+_unknown_root = _gate_bundle("cond-unknown", captions_gate="", quality_gate="PASS")
+(_unknown_root / dyprobe.PROVENANCE_NAME).unlink()
+(_unknown_root / dyq.REPORT_NAME).unlink()
+_unknown = run_report_in(_unknown_root)
+check(
+    "#87: an unknown source record keeps quality.json optional, not falsely required",
+    _unknown.ok and _unknown.quality_required is False and _unknown.source_had_video is None,
+    f"ok={_unknown.ok} source_had_video={_unknown.source_had_video}",
+)
+
+# (e) The exit contract's own description moved with `ok`: it is now also a claim about the
+# cross-reference, and `report-provenance.json` has to say so (#87).
+_prov_text = (tmp / "order_bundle" / dyro.PROVENANCE_NAME).read_text(encoding="utf-8")
+check(
+    "#87: report-provenance.json states that ok covers the cross-reference",
+    "agreement" in _prov_text
+    and "inconsistent" in _prov_text
+    and dycap.REPORT_NAME in _prov_text
+    and dyq.REPORT_NAME in _prov_text,
+    _prov_text[-600:],
+)
+check(
+    "#87: and states where the conditional requirement came from",
+    dyprobe.PROVENANCE_NAME in _prov_text and "quality_gate_required" in _prov_text,
+    _prov_text[-900:],
 )
 
 # --- the note promotion -------------------------------------------------------------
@@ -7019,7 +7247,9 @@ check(
 _covdir = tmp / "coverage-bundle"
 _covdir.mkdir(parents=True, exist_ok=True)
 for _name in dyro.REQUIRED:
-    (_covdir / ("note.md" if _name == "note" else _name)).write_text("x", encoding="utf-8")
+    (_covdir / ("note.md" if _name == "note" else _name)).write_text(
+        '{"alignments": []}' if _name == dycap.REPORT_NAME else "x", encoding="utf-8"
+    )
 dysy.write(dysy.Note(markdown="# n", coverage=0.5), _covdir / dysy.REPORT_NAME)
 
 _cov_report = dyro.run(
@@ -7068,7 +7298,9 @@ check(
 _tdir = tmp / "truncated-bundle"
 _tdir.mkdir(parents=True, exist_ok=True)
 for _name in dyro.REQUIRED:
-    (_tdir / ("note.md" if _name == "note" else _name)).write_text("x", encoding="utf-8")
+    (_tdir / ("note.md" if _name == "note" else _name)).write_text(
+        '{"alignments": []}' if _name == dycap.REPORT_NAME else "x", encoding="utf-8"
+    )
 dysy.write(
     dysy.Note(
         markdown="# n",
