@@ -10,12 +10,12 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Cancel superseded runs. On a fast-moving branch the older run is not evidence of
-# anything once newer commits have landed, and paying for both invites acting on a
-# stale red.
+# Cancel superseded runs, but only a commit's own run may: attempt 1 still kills older runs
+# on its ref (a superseded red is not evidence of anything), while a re-run -- attempt 2+ --
+# must not cancel a newer commit's run, whose CI is the tip's; it waits in the group (#224).
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.run_attempt == 1 }}
 
 permissions:
   contents: read
