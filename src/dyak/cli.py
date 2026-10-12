@@ -442,9 +442,18 @@ def _process(args: argparse.Namespace) -> int:
                 f"dyak: MISSING {entry['artefact']} ({entry['detail']}): {entry['why']}",
                 file=sys.stderr,
             )
+        for entry in result.report.inconsistent:
+            # Not a missing file: both artefacts are present and disagree about a frame, which
+            # is how #82 stayed invisible -- each file was internally consistent (#87).
+            where = entry["artefact"] + (f":{entry['frame']}" if entry.get("frame") else "")
+            print(
+                f"dyak: INCONSISTENT {where} ({entry['detail']}): {entry['why']}",
+                file=sys.stderr,
+            )
         print(
             "dyak:   this is ADR-0001 D3: stages above reported success, and the filesystem "
-            "disagrees. Not exiting 0.",
+            "disagrees -- a required artefact is absent, or two of them contradict each other. "
+            "Not exiting 0.",
             file=sys.stderr,
         )
         return ec.ARTEFACT_VERIFICATION_FAILED
