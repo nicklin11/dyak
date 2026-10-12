@@ -83,8 +83,11 @@ class RunResult:
     #: ADR-0001 D4's verdict. `quality.ok` false means exit 4, reported by the caller.
     quality: quality.Report
     enhanced: list[Path]
-    #: ADR-0001 D5's coverage verdict. `caption.ok` false means the audio and the video are not
-    #: describing the same lecture, which is exit 4 rather than a note with holes in it.
+    #: Code 4's coverage half, the frame/A-V family (`docs/adr/0001-lecture-pipeline.md:328`) --
+    #: *not* ADR-0001 D5 (`:191`), which is the audit. `caption.ok` false means the audio and the
+    #: video are not describing the same lecture: exit 4 rather than a note with holes in it. It
+    #: is false whenever `caption.considered == []` too, so the gate that reads it is guarded on
+    #: `considered` (`src/dyak/cli.py:442`): no frames to align is not a desynced source.
     caption: caption.Report
     #: What the captioning half actually did. Separate from the coverage verdict because they
     #: fail for different reasons: `caption.ok` is about A/V sync, `caption_outcome.ok` is
@@ -93,7 +96,8 @@ class RunResult:
     #: The note. `synth.degraded` is reported, not hidden: a note written by the template
     #: synthesizer is a skeleton, and a reader has to be able to tell.
     note: synth.Note
-    #: ADR-0001 D5's deterministic gate on the note. `lint.ok` false is exit 4.
+    #: Stage 8's mechanical verdict (`docs/adr/0001-lecture-pipeline.md:310`; D6, `:210`); its
+    #: findings are stage 10's repair input, not a gate on the note.
     lint: lint.Report
     #: ADR-0001 D5's audit. `audit.ok` false is exit 5: the note is written and annotated, never
     #: discarded. An audit that could not run says so; it never reads as one that passed.
