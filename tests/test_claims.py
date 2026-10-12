@@ -123,6 +123,47 @@ check(
     f"README {sorted(table_codes)}, code {sorted(ec.DESCRIPTIONS)}",
 )
 
+# --- 3b. exit 6 is described in one voice, at every site that restates it --------------
+# #206 widened four descriptions to `exitcodes.DESCRIPTIONS[6]`'s meaning: code 6 is also
+# produced by a run that stopped at the stage which needed the artefact, not only by stage
+# 12's end-of-run check. The set check above cannot see a re-narrowing -- a narrowed
+# description is still code 6 -- so the sentence is pinned here, per site.
+#
+# The marker is the widened half, not the whole sentence: the ADR appends its own
+# "(ADR-0001 D3)" and `cli.py` rewords the first half, and one literal everywhere would pin
+# prose rather than the claim. The old narrow wording -- "required artefacts could not be
+# verified on disk" -- does not contain it.
+CODE_6_WIDENED = "stopped at the stage"
+CODE_6_DOCS = {
+    "README.md": README,
+    "docs/quality.md": (REPO / "docs" / "quality.md").read_text(encoding="utf-8"),
+    "docs/adr/0001-lecture-pipeline.md": (
+        REPO / "docs" / "adr" / "0001-lecture-pipeline.md"
+    ).read_text(encoding="utf-8"),
+}
+CLI_LINES = (REPO / "src" / "dyak" / "cli.py").read_text(encoding="utf-8").splitlines()
+CODE_6_DESCRIPTIONS = {
+    name: [ln for ln in text.splitlines() if ln.startswith("| 6 |")]
+    for name, text in CODE_6_DOCS.items()
+}
+# `cli.py` states it as a precedence note: the `#   6 -- ` line plus its continuation.
+CODE_6_DESCRIPTIONS["src/dyak/cli.py"] = [
+    f"{CLI_LINES[i].strip()} {CLI_LINES[i + 1].strip()}"
+    for i in range(len(CLI_LINES) - 1)
+    if CLI_LINES[i].strip().startswith("#   6 -- ")
+]
+for _site, _descriptions in CODE_6_DESCRIPTIONS.items():
+    check(
+        f"{_site} has exactly one exit-code-6 description to judge",
+        len(_descriptions) == 1,
+        f"{len(_descriptions)}: {_descriptions}",
+    )
+    check(
+        f"{_site} describes exit 6 with the widened meaning, not stage 12 alone",
+        len(_descriptions) == 1 and CODE_6_WIDENED in _descriptions[0],
+        f"{_descriptions}",
+    )
+
 # --- 4. repo tree allowlist ---------------------------------------------------
 # The file named `[` was a zero-byte artefact that rendered as blob/main/%5B.
 ALLOWED_ROOT = {
@@ -637,10 +678,22 @@ check(
 # #183: the help rendered a bare "(default: <name>/)" -- "(default: glimpse/)" before
 # c2824d7, "(default: dyak/)" after it -- while `Bundle.export_to_vault` appended the
 # lecture name, so the help named the exact shared layout #118 removed: a shared directory
-# made the second export silently replace the first. The layout was pinned
-# (tests/test_stages.py:2748); the sentence was not, and `--help` is the surface a user
-# reads while deciding whether to pass the flag -- docs/running.md:100 states the same
-# default, and section 8 pins only the flag's name.
+# made the second export silently replace the first. The layout is pinned by
+# `#118: two lectures keep two notes (default subdir is per bundle)` in
+# tests/test_stages.py; the sentence was not, and `--help` is the surface a user reads
+# while deciding whether to pass the flag -- docs/running.md:100 states the same default,
+# and section 8 pins only the flag's name.
+#
+# The citation is a check name rather than a line number on purpose: the assertion it named
+# was at :2748 when this comment was written (27bae36) and has moved twice since -- :2778 at
+# c237531, :2791 at c29b8a5 -- and a name is what a reader can grep. Pinned so a rename
+# cannot leave the sentence pointing at nothing.
+STAGES_TEXT = (REPO / "tests" / "test_stages.py").read_text(encoding="utf-8")
+check(
+    "the layout check section 8b names exists in test_stages.py",
+    "#118: two lectures keep two notes (default subdir is per bundle)" in STAGES_TEXT,
+    "the named check is gone: re-point the citation, do not delete this assertion",
+)
 
 
 def _subparser(parser: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:
