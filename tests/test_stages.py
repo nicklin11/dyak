@@ -4687,7 +4687,9 @@ for _label, _raw, _why in (
 # payload reached the user as a JSONDecodeError/AttributeError traceback and Python's exit 1
 # (cli.py:214-220), while {"segments": "x"} was read as "no words": every frame it considers is
 # reported uncovered (captions.json's provenance and the CLI's explain output) and the note loses
-# the frames' text, with no exit code fired -- `caption.ok` is read by nothing (#223). Reading it
+# the frames' text. Since #228 the exit fires -- code 4 (`cli.py:442`), or 7 or 1 first when the
+# note is degraded (`cli.py:426`) -- and only an audio-only source, whose `considered` is empty,
+# still exits 0 on the guard. Reading it
 # as "no words" is still a claim about the lecture made from a wrong-shaped file. Stage 12 has no
 # reader for this artefact; `caption.read_transcript` is it, and `align` now reads the file once.
 for _label, _raw, _why in (
