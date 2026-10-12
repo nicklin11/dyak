@@ -470,6 +470,83 @@ check(
     repr(dyp.resolve(settings.BBOX_SOURCE_ENV, default="geometric")),
 )
 
+# --- 5c. the numeric setting has a working form in the file (#192) -------------
+# `openai_max_upload_bytes` is a number in the environment and in the built-in default, and
+# `docs/running.md:52` documents a bare byte count. A TOML integer in the file must therefore
+# be the value, not a dropped non-string -- and it must reach the consumer's own parser, which
+# stays the authority on whether it is a valid count.
+check(
+    "every numeric setting is an honoured key (#192)",
+    settings.NUMERIC_SETTINGS <= settings.HONOURED_SETTINGS,
+    repr(sorted(settings.NUMERIC_SETTINGS - settings.HONOURED_SETTINGS)),
+)
+
+_bare_ok: dict[str, tuple[str | None, str]] = {}
+for _key in sorted(settings.NUMERIC_SETTINGS):
+    use_file(f"{_key} = 20000\n")
+    _resolved = settings.resolve(f"DYAK_{_key.upper()}", default="0")
+    _bare_ok[_key] = (_resolved.value, _resolved.source)
+check(
+    "every numeric setting resolves from a bare TOML integer (#192)",
+    all(value == "20000" and source == settings.SOURCE_FILE for value, source in _bare_ok.values()),
+    repr(_bare_ok),
+)
+
+use_file("openai_max_upload_bytes = 20000\n")
+_numeric = settings.resolve(settings.OPENAI_MAX_UPLOAD_BYTES_ENV, default="26214400")
+check(
+    "a bare byte count in the file is honoured, not reported as ignored (#192)",
+    _numeric.value == "20000" and _numeric.source == settings.SOURCE_FILE,
+    repr(_numeric),
+)
+check(
+    "the file value reaches the consumer's own parser as bytes (#192)",
+    openai_compat._threshold_bytes(_numeric.value) == 20000,
+    str(openai_compat._threshold_bytes(_numeric.value)),
+)
+_bare_err = io.StringIO()
+with redirect_stderr(_bare_err):
+    settings.report_settings()
+check(
+    "a bare number for a numeric key produces no warning (#192)",
+    _bare_err.getvalue() == "",
+    repr(_bare_err.getvalue()),
+)
+
+# The other half of the symptom in the issue: `doctor` printed the key as honoured *and* as
+# ignored on one line, because `check_settings` has its own `isinstance(v, str)` filter and the
+# file held a number. It reads `_parse_settings` directly, so the coercion must be visible to it
+# too -- a fix in `read_settings` alone would leave this line contradicting itself.
+_report = dyd.check_settings()
+check(
+    "doctor reports the bare numeric key as honoured, not as honoured and ignored (#192)",
+    "honoured: openai_max_upload_bytes" in _report.detail and "ignored" not in _report.detail,
+    _report.detail,
+)
+
+use_file('openai_max_upload_bytes = "20000"\n')
+_quoted = settings.resolve(settings.OPENAI_MAX_UPLOAD_BYTES_ENV)
+check(
+    "the quoted form still works, so an existing file does not break (#192)",
+    _quoted.value == "20000" and _quoted.source == settings.SOURCE_FILE,
+    repr(_quoted),
+)
+
+# The #156 half must not weaken: a number for a *string* key is still a dropped value with a
+# warning. `tests/test_deps.py` pins this too; the two must agree.
+use_file("vault = 42\n")
+_string_err = io.StringIO()
+with redirect_stderr(_string_err):
+    settings.report_settings()
+    _string_read = settings.read_settings()
+check(
+    "a number for a string key is still dropped and warned, so #156 is not weakened (#192)",
+    _string_read == {}
+    and "number" in _string_err.getvalue()
+    and "ignored" in _string_err.getvalue(),
+    f"read={_string_read!r} err={_string_err.getvalue()!r}",
+)
+
 # --- 6. a first run still writes the one key it has always written --------------
 use_file("")
 written = settings.write_settings(Path("/first/run/vault"))
