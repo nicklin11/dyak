@@ -293,12 +293,10 @@ for path in modules:
     for name in names:
         resolved_names.setdefault(name, rel)
     unresolved_calls += [f"{rel}:{line}" for line in unresolved]
-# The endpoint URLs are built from `DEFAULT_ENDPOINTS` keys in `backends.py`; both are
-# literals in `settings.py` now, but the dynamic name is added so the set does not depend on
-# how the message is phrased.
-BACKENDS_SRC = (PKG / "stt" / "backends.py").read_text(encoding="utf-8")
-for backend in re.findall(r'^\s{4}"(\w+)":\s*"http', BACKENDS_SRC, flags=re.M):
-    live_names.add(f"DYAK_{backend.upper()}_URL")
+# No dynamic URL names to add any more: #95 removed `DEFAULT_ENDPOINTS`, so
+# `DYAK_WHISPERCPP_URL` and `DYAK_OPENAI_URL` are ordinary module-level constants in
+# `settings.py` and the string-constant harvest above already sees both. The earlier
+# regex derivation existed only because the names were assembled from the endpoint dict.
 
 honoured_names = {f"DYAK_{key.upper()}" for key in dyd.HONOURED_SETTINGS}
 check(

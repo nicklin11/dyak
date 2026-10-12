@@ -15,6 +15,7 @@ import io
 import os
 import sys
 import tempfile
+import urllib.error
 from contextlib import redirect_stderr
 from pathlib import Path
 
@@ -28,8 +29,10 @@ sys.path.insert(0, str(REPO / "src"))
 
 from dyak import bundle as dyb  # noqa: E402
 from dyak import deps as dyd  # noqa: E402
+from dyak import exitcodes as ec  # noqa: E402
 from dyak import link as dylnk  # noqa: E402
 from dyak import pipeline as dyp  # noqa: E402
+from dyak import runner  # noqa: E402
 from dyak import settings  # noqa: E402
 from dyak import workspace as dyw  # noqa: E402
 from dyak.llm import Config  # noqa: E402
@@ -341,6 +344,123 @@ check(
     "the whisper.cpp endpoint comes from the file",
     whispercpp.HttpWhisperCpp().base_url == "http://file-whisper/v1",
     whispercpp.HttpWhisperCpp().base_url,
+)
+# #95 removed the built-in default only; a configured URL must still resolve through all
+# three real layers. The file value above is the baseline both of these must beat.
+check(
+    "the flag layer still beats the file for the STT URL (#95)",
+    whispercpp.HttpWhisperCpp("http://flag-whisper/v1").base_url == "http://flag-whisper/v1"
+    and openai_compat.OpenAICompat("http://flag-openai/v1").base_url == "http://flag-openai/v1",
+    f"{whispercpp.HttpWhisperCpp('http://flag-whisper/v1').base_url}",
+)
+os.environ[settings.WHISPERCPP_URL_ENV] = "http://env-whisper/v1"
+check(
+    "the environment still beats the file for the STT URL (#95)",
+    whispercpp.HttpWhisperCpp().base_url == "http://env-whisper/v1",
+    whispercpp.HttpWhisperCpp().base_url,
+)
+
+# --- 5b. no URL in any layer is "not configured", not a probe of 10302 (#95) ---
+# Both backends used to pass `default="http://127.0.0.1:10302"` to `settings.resolve`: an
+# unset URL silently probed a raw container port with no auto-start, which is the target
+# #62 measured being reclaimed after 300 s. There is no built-in default now, and the
+# failure must name the missing configuration rather than a refused connection.
+use_file("")
+probes: list[str] = []
+_real_whisper_urlopen = whispercpp.urllib.request.urlopen
+_real_openai_urlopen = openai_compat.urllib.request.urlopen
+
+
+def _forbidden_urlopen(request, timeout=None):
+    """Record the probe and refuse it, so an unexpected one is a clean FAIL, not a crash."""
+    probes.append(getattr(request, "full_url", str(request)))
+    raise urllib.error.URLError(OSError(111, "Connection refused"))
+
+
+whispercpp.urllib.request.urlopen = _forbidden_urlopen
+openai_compat.urllib.request.urlopen = _forbidden_urlopen
+try:
+    unset_exc = None
+    try:
+        sttb.resolve()
+    except runner.DependencyError as exc:
+        unset_exc = exc
+    explicit_excs: dict[str, runner.DependencyError | None] = {}
+    for _cls in (whispercpp.HttpWhisperCpp, openai_compat.OpenAICompat):
+        try:
+            _cls().check()
+        except runner.DependencyError as exc:
+            explicit_excs[_cls.name] = exc
+        else:
+            explicit_excs[_cls.name] = None
+finally:
+    whispercpp.urllib.request.urlopen = _real_whisper_urlopen
+    openai_compat.urllib.request.urlopen = _real_openai_urlopen
+check(
+    "an unset STT URL opens no socket, so 127.0.0.1:10302 is never probed (#95)",
+    not probes,
+    f"probes={probes}",
+)
+check(
+    "an unset STT URL is exit 2 and says it is not configured (#95)",
+    unset_exc is not None
+    and unset_exc.code == ec.MISSING_DEPENDENCY
+    and "not configured" in unset_exc.message.lower(),
+    f"{getattr(unset_exc, 'code', None)} {getattr(unset_exc, 'message', None)}",
+)
+check(
+    "the not-configured remediation names the env var, the proxy and the 300 s reclaim (#95)",
+    unset_exc is not None
+    and "DYAK_WHISPERCPP_URL" in unset_exc.remediation
+    and "100.64.0.1:10301" in unset_exc.remediation
+    and "300 s" in unset_exc.remediation,
+    getattr(unset_exc, "remediation", ""),
+)
+for _name, _exc in explicit_excs.items():
+    check(
+        f"an explicitly selected unconfigured {_name} backend is exit 2 too (#95)",
+        _exc is not None
+        and _exc.code == ec.MISSING_DEPENDENCY
+        and "not configured" in _exc.message.lower(),
+        f"{getattr(_exc, 'code', None)} {getattr(_exc, 'message', None)}",
+    )
+
+# A *configured* URL that refuses is a different state: exit 3, "not reachable". The two
+# must not collapse into one message, because they send the operator to different places.
+use_file('whispercpp_url = "http://127.0.0.1:9"\n')
+check(
+    "a URL in the file is configured, so the backend does not claim otherwise (#95)",
+    getattr(whispercpp.HttpWhisperCpp(), "configured", False),
+    repr(whispercpp.HttpWhisperCpp().base_url),
+)
+
+
+def _refusing_urlopen(request, timeout=None):
+    raise urllib.error.URLError(OSError(111, "Connection refused"))
+
+
+whispercpp.urllib.request.urlopen = _refusing_urlopen
+try:
+    configured_exc = None
+    try:
+        whispercpp.HttpWhisperCpp().check()
+    except runner.DependencyError as exc:
+        configured_exc = exc
+finally:
+    whispercpp.urllib.request.urlopen = _real_whisper_urlopen
+check(
+    "a configured-but-refusing endpoint is exit 3, distinct from not configured (#95)",
+    configured_exc is not None
+    and configured_exc.code == ec.DEPENDENCY_FAILED
+    and "not configured" not in configured_exc.message.lower(),
+    f"{getattr(configured_exc, 'code', None)} {getattr(configured_exc, 'message', None)}",
+)
+check(
+    "the unreachable remediation also names the proxy and the 300 s reclaim (#95)",
+    configured_exc is not None
+    and "100.64.0.1:10301" in configured_exc.remediation
+    and "300 s" in configured_exc.remediation,
+    getattr(configured_exc, "remediation", ""),
 )
 
 use_file('bbox_source = "null"\n')

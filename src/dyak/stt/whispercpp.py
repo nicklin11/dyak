@@ -41,11 +41,19 @@ from .. import exitcodes as ec
 from .. import runner
 from ..settings import WHISPERCPP_LANGUAGE_ENV as ENV_LANGUAGE
 from ..settings import WHISPERCPP_URL_ENV, resolve
-from .backends import DEFAULT_ENDPOINTS, BackendInfo
+from .backends import BackendInfo
 
+# The trap this names is the one #62 measured and #95 decided: `127.0.0.1:10302` is the
+# container directly, with no `_Heartbeat` to refresh the idle marker, so
+# `whisper-idle-stop.timer` reclaims it after 300 s -- mid-request. The supported target is
+# the shipboard proxy, which does refresh the marker. This is a remediation string, not an
+# essay: the reader is mid-failure and needs the address and the reason in one line.
 REMEDIATION = (
-    "start whisper.cpp and point DYAK_WHISPERCPP_URL at it "
-    f"(default {DEFAULT_ENDPOINTS['whispercpp']})"
+    "set DYAK_WHISPERCPP_URL (or the whispercpp_url settings key) to a whisper.cpp "
+    "POST /inference endpoint. The supported target on this host is the shipboard proxy on "
+    "http://100.64.0.1:10301, which refreshes the idle marker; a raw container port such as "
+    "http://127.0.0.1:10302 has no auto-start and is reclaimed after 300 s by "
+    "whisper-idle-stop.timer"
 )
 
 # The server-side guard must outlast the client's, because a client timeout discards a
@@ -64,11 +72,11 @@ class HttpWhisperCpp:
 
     def __init__(self, base_url: str | None = None) -> None:
         # `base_url` is the flag layer; then `$DYAK_WHISPERCPP_URL`, then the flat
-        # `whispercpp_url` key in the settings file, then the built-in port.
-        configured = resolve(
-            WHISPERCPP_URL_ENV, flag=base_url, default=DEFAULT_ENDPOINTS["whispercpp"]
-        ).value
-        self.base_url = configured.rstrip("/")
+        # `whispercpp_url` key in the settings file. There is deliberately no fourth,
+        # built-in layer (#95): an unset URL is "not configured", not a raw container port.
+        resolved = resolve(WHISPERCPP_URL_ENV, flag=base_url)
+        self.configured = resolved.value is not None
+        self.base_url = (resolved.value or "").rstrip("/")
 
     # -- introspection --------------------------------------------------------
 
@@ -83,12 +91,22 @@ class HttpWhisperCpp:
     def info(self) -> BackendInfo:
         return BackendInfo(
             name=self.name,
-            target=self.base_url,
+            target=self.base_url or "(not configured)",
             detail="whisper.cpp native /inference",
             notes=("this build does not serve the OpenAI-compatible /v1/* routes",),
         )
 
     def check(self) -> None:
+        if not self.configured:
+            # Distinct from "configured and unreachable" on purpose: the two send the
+            # operator to different places, and this one must not read as a refused
+            # connection to a port nobody started (#95).
+            raise runner.DependencyError(
+                name=self.name,
+                code=ec.MISSING_DEPENDENCY,
+                message="the whisper.cpp endpoint is not configured",
+                remediation=REMEDIATION,
+            )
         if not self.base_url.startswith(("http://", "https://")):
             raise runner.DependencyError(
                 name=self.name,

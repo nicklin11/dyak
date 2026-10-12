@@ -78,9 +78,15 @@ dyd.subprocess.run = fake_run
 # The model endpoint must never be probed against the real network in this test, and
 # neither must the STT endpoint. Before this pin, `doctor` reached whatever was listening
 # on 127.0.0.1:10302, so the suite's verdict depended on container state.
+#
+# #95 removed the built-in 127.0.0.1:10302 default: an unset URL is now "not configured",
+# not a probe of a raw container port. The failure this suite exercises is the *configured
+# and down* one, so the endpoint is named explicitly; the fake below intercepts every
+# request regardless of the URL.
 os.environ.pop(dyd.LLM_ENV, None)
 real_stt_backend = os.environ.pop(gld_stt.ENV_BACKEND, None)
 os.environ[gld_stt.ENV_BACKEND] = "whispercpp"
+os.environ[dywsc.WHISPERCPP_URL_ENV] = "http://127.0.0.1:10302"
 real_stt_urlopen = dywsc.urllib.request.urlopen
 
 stt_reachable = True
@@ -161,10 +167,47 @@ check("the failing check is named", "stt" in msg, msg)
 check("the unreachable target is named", "127.0.0.1" in out.getvalue(), out.getvalue())
 check("the remediation names the env var", "DYAK_WHISPERCPP_URL" in msg, msg)
 check("shipboard is no longer the reason", "pipx install shipboard" not in msg, msg)
+# #95: the failure path must name the trap the default used to walk into -- the raw
+# container port is not the supported target, the proxy is, and the raw one is reclaimed
+# by the idle timer. Without this the operator gets a URL and no reason.
+check(
+    "the STT remediation names the proxy and the 300 s reclaim (#95)",
+    "100.64.0.1:10301" in msg and "300 s" in msg and "whisper-idle-stop" in msg,
+    msg,
+)
 check(
     "present deps still reported as ok",
     "[ok  ] ffmpeg" in out.getvalue() and "[ok  ] ffprobe" in out.getvalue(),
     out.getvalue(),
+)
+
+# --- 2b. an unset URL is "not configured", not a probe of a dead port (#95) ---
+# #95 removed the built-in 127.0.0.1:10302 default, so this is a third state with its own
+# verdict: exit 2, and the message names the missing configuration rather than a refused
+# connection to a port nobody started. `stt_reachable` is irrelevant here -- an
+# unconfigured backend must fail before it opens a socket.
+_saved_stt_url = os.environ.pop(dywsc.WHISPERCPP_URL_ENV, None)
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    rc_unset = dyc.main(["doctor"])
+if _saved_stt_url is not None:
+    os.environ[dywsc.WHISPERCPP_URL_ENV] = _saved_stt_url
+unset_out, unset_err = out.getvalue(), err.getvalue()
+check(
+    "an unconfigured STT endpoint -> exit 2, not 3 (#95)",
+    rc_unset == ec.MISSING_DEPENDENCY,
+    f"rc={rc_unset}",
+)
+check(
+    "the unconfigured STT failure says it is not configured (#95)",
+    "not configured" in unset_out.lower(),
+    unset_out,
+)
+check(
+    "the unconfigured failure is not a refused connection to the dead port (#95)",
+    "not usable: the whisper.cpp endpoint is not configured" in unset_out
+    and "not reachable" not in unset_err.lower(),
+    unset_out + " || " + unset_err,
 )
 
 # A binary genuinely missing still earns exit 2, distinct from a broken endpoint.
@@ -551,14 +594,15 @@ check(
 # --- #126: preflight must not treat a missing LLM as benign, and must not crash on STT ---
 # Isolated: no STT endpoint reachable, no LLM configured, a vault that does not exist.
 #
-# `DYAK_STT` stays unset so the `auto` path is exercised, but `auto` falls back to the
-# *built-in* endpoints in `stt/backends.py` when nothing overrides them -- and a host with
-# whisper.cpp on the default 127.0.0.1:10302 makes these checks measure the host instead of
-# the code (#175). Both URL variables are honoured on the `auto` path (`settings.resolve`),
-# so they are pointed at a port that is provably dead: bound but never `listen()`ed, which
-# the kernel refuses at once, and held for the rest of this block so no other process can
-# take it. A fixed port (e.g. :1) is not provable, and a bound-then-closed port leaves a gap
-# in which it could be occupied.
+# `DYAK_STT` stays unset so the `auto` path is exercised. Before #95 `auto` fell back to a
+# *built-in* `127.0.0.1:10302`, so a host with whisper.cpp there made these checks measure
+# the host instead of the code (#175); there is no built-in default any more, but the case
+# this block pins is still "configured and unreachable", which is a different state from
+# "not configured". Both URL variables are honoured on the `auto` path
+# (`settings.resolve`), so they are pointed at a port that is provably dead: bound but
+# never `listen()`ed, which the kernel refuses at once, and held for the rest of this block
+# so no other process can take it. A fixed port (e.g. :1) is not provable, and a
+# bound-then-closed port leaves a gap in which it could be occupied.
 _dead = socket.socket()
 _dead.bind(("127.0.0.1", 0))
 _dead_url = f"http://127.0.0.1:{_dead.getsockname()[1]}"
@@ -586,6 +630,15 @@ check(
     and stt_check.code == ec.MISSING_DEPENDENCY
     and bool(stt_check.remediation),
     f"code={getattr(stt_check, 'code', None)!r}",
+)
+check(
+    # The `auto` path reaches this failure too, and it is the path a default install takes,
+    # so the proxy/300 s trap must be named here and not only on the explicit-backend path.
+    "the auto STT refusal names the proxy and the 300 s reclaim (#95)",
+    stt_check is not None
+    and "100.64.0.1:10301" in (stt_check.remediation or "")
+    and "300 s" in (stt_check.remediation or ""),
+    getattr(stt_check, "remediation", ""),
 )
 
 # (b) an unconfigured LLM refuses by default, before any STT or frame cost.
