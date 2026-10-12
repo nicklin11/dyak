@@ -252,9 +252,10 @@ def read_transcript(path: Path) -> tuple[dict | None, str]:
     transcript, and stage 12 names the missing required artefact. `None` with a reason means it
     is present and unusable: truncated, not a JSON object, or without a `segments` list. A
     wrong-shaped container is not read as "no words": measured, that degradation reports every
-    frame as uncovered (captions.json's provenance and the CLI's explain output) and the note
-    loses the frames' text, with no exit code fired -- `caption.ok` is read by nothing (#223).
-    Either way it is a claim about the lecture made from a file that is simply wrong (#201).
+    frame it considers as uncovered (captions.json's provenance and the CLI's explain output)
+    and the note loses the frames' text, with no exit code fired -- `caption.ok` is read by
+    nothing (#223). Either way it is a claim about the lecture made from a file that is simply
+    wrong (#201).
     """
     if not path.is_file():
         return None, ""
