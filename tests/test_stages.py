@@ -3070,11 +3070,14 @@ check(
     str([a["frame"] for a in _order_caps["alignments"] if not a["quality_gate"]]),
 )
 check(
-    # Stage 12's `count_frames` walks the manifest and stats each row. Stage 5 only moves the
-    # frames that *passed* into `images/`, so a correctly gated bundle holds fewer PNGs than the
-    # manifest has rows. Counting the manifest alone made the correct outcome read as
-    # `frames 57/58` and exit 1. Reachable only since #82 -- before it, the gate never fired and
-    # the two counts always agreed.
+    # Stage 12's `count_frames` walks the manifest and stats each row. Stage 5 moves *every*
+    # frame stage 4 produced into `images/` -- `pipeline.run` calls `clear_images` then moves
+    # `produced`; the gate's verdict only decides which of them get an enhanced `_q.jpg`. A
+    # rejected frame is therefore on disk, so the subtraction is not what keeps `ok` true (both
+    # counts agree either way): it keeps the rejection out of `frames_expected` and in
+    # `unchecked`, so ADR-0005 D2's "N states, M uncaptioned is visible" is a number rather than
+    # a silently verified frame. Reachable only since #82 -- before it, the gate never fired and
+    # the subtraction was a no-op.
     "stage 12 counts the gate's rejections as expected, not as missing",
     dyro.count_frames(tmp / "order_bundle")[0] == 1
     and dyro.count_frames(tmp / "order_bundle")[1] == 1,
