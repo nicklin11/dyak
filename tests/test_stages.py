@@ -7459,6 +7459,170 @@ check(
     _prov_text[-900:],
 )
 
+# --- #211: a truncated manifest stops passing silently ------------------------------------
+# `count_frames` stats the manifest's own rows, so the manifest is its own denominator: cut
+# from three rows to one it reported `1/1`, the note covered one of three frames, and the run
+# exited 0 with `uncovered 0.00`. `quality.json` is the other witness -- one verdict per frame
+# stage 5 judged, written from the in-memory list stage 4 returned (`pipeline.py:511` ->
+# `:541`) while stage 6 re-reads the manifest from disk (`caption.py:373`). The finding rides
+# `report.inconsistent`, which `Report.ok` reads and `cli.py:440` turns into exit 6: a guard,
+# not a warning, because a warning leaves a note covering 1 of 3 frames at exit 0.
+
+
+def _manifest_bundle(name: str, *, judged: int, rows: int, has_video: bool = True) -> Path:
+    """A bundle whose manifest lists `rows` of the `judged` frames stage 5 judged."""
+    root = tmp / name
+    shutil.rmtree(root, ignore_errors=True)
+    (root / "images").mkdir(parents=True)
+    for index in range(judged):
+        (root / "images" / f"f_{index}.png").write_bytes(b"\x89PNG\r\n")
+    (root / dyfr.MANIFEST).write_text(
+        dyfr.MANIFEST_HEADER
+        + "\n"
+        + "".join(f"{i * 1000}\t00:00:0{i}.00\tf_{i}.png\n" for i in range(rows)),
+        encoding="utf-8",
+    )
+    (root / dyq.REPORT_NAME).write_text(
+        json.dumps(
+            {"frames": [{"name": f"f_{i}.png", "quality_gate": "PASS"} for i in range(judged)]}
+        ),
+        encoding="utf-8",
+    )
+    # Stage 6 derives its frames from the manifest, so the alignments are exactly the manifest's
+    # rows and the #87 cross-check stays silent. That is the case #211 is about: the two files
+    # stage 12 compared agreed with each other, and both were short.
+    (root / dycap.REPORT_NAME).write_text(
+        json.dumps(
+            {"alignments": [{"frame": f"f_{i}.png", "quality_gate": "PASS"} for i in range(rows)]}
+        ),
+        encoding="utf-8",
+    )
+    (root / "note.md").write_text("# note\n", encoding="utf-8")
+    (root / dyprobe.PROVENANCE_NAME).write_text(
+        json.dumps({"source": {"has_video": has_video}}), encoding="utf-8"
+    )
+    for extra in dyro.REQUIRED:
+        target = root / ("note.md" if extra == "note" else extra)
+        if not target.exists():
+            target.write_text("x", encoding="utf-8")
+    return root
+
+
+_manifest_full = run_report_in(_manifest_bundle("m211-full", judged=3, rows=3))
+check(
+    "#211: a manifest listing every judged frame is ok and silent",
+    _manifest_full.ok
+    and not _manifest_full.inconsistent
+    and (_manifest_full.frames_found, _manifest_full.frames_expected) == (3, 3),
+    f"ok={_manifest_full.ok} inconsistent={_manifest_full.inconsistent} {_manifest_full.summary()}",
+)
+_prov_211 = (tmp / "m211-full" / dyro.PROVENANCE_NAME).read_text(encoding="utf-8")
+check(
+    # The artefact's own description of what `inconsistent` can hold: it named one comparison
+    # and this change adds a second, so the text would otherwise be an incomplete enumeration.
+    "#211: report-provenance.json names the count comparison as part of the cross-reference",
+    dyfr.MANIFEST in _prov_211 and "frame *count*" in _prov_211,
+    _prov_211[-600:],
+)
+
+_manifest_short_stream = io.StringIO()
+_manifest_short = run_report_in(
+    _manifest_bundle("m211-short", judged=3, rows=1), stream=_manifest_short_stream
+)
+check(
+    # The old `frames_found != frames_expected` line stays silent here -- 1 of 1 -- which is why
+    # the new comparison is the only thing that can see this bundle.
+    "#211: a manifest cut to 1 of 3 judged frames fails stage 12 instead of exiting 0",
+    not _manifest_short.ok
+    and len(_manifest_short.inconsistent) == 1
+    and _manifest_short.inconsistent[0]["artefact"] == dyfr.MANIFEST
+    and _manifest_short.inconsistent[0]["detail"] == "1 of 3 frames listed"
+    and "changed afterwards" in _manifest_short.inconsistent[0]["why"]
+    and (_manifest_short.frames_found, _manifest_short.frames_expected) == (1, 1),
+    f"ok={_manifest_short.ok} inconsistent={_manifest_short.inconsistent} "
+    f"{_manifest_short.summary()}",
+)
+check(
+    "#211: and it is printed in the existing INCONSISTENT voice, not a new one",
+    "INCONSISTENT manifest.tsv: 1 of 3 frames listed -- stage 4 wrote it with the frames stage 5"
+    in _manifest_short_stream.getvalue(),
+    repr(_manifest_short_stream.getvalue()[-500:]),
+)
+
+_manifest_header = run_report_in(_manifest_bundle("m211-header", judged=3, rows=0))
+check(
+    # The second silent case, and the one that contradicts `count_frames`' docstring claim that
+    # stage 12 catches a header-only manifest: 0 == 0 makes the old comparison agree.
+    "#211: a header-only manifest is a failure too, not a 0/0 success",
+    not _manifest_header.ok
+    and len(_manifest_header.inconsistent) == 1
+    and _manifest_header.inconsistent[0]["detail"] == "0 of 3 frames listed"
+    and (_manifest_header.frames_found, _manifest_header.frames_expected) == (0, 0),
+    f"ok={_manifest_header.ok} inconsistent={_manifest_header.inconsistent} "
+    f"{_manifest_header.summary()}",
+)
+
+_manifest_trim = run_report_in(_manifest_bundle("m211-trim", judged=1, rows=1))
+check(
+    # The pin that the legitimate case is untouched: a trim re-runs stage 4, which rewrites the
+    # manifest and deletes the old frames, so stage 5 judged the same set and the two counts
+    # agree. One row, one verdict, one image -- and no finding.
+    "#211: a self-consistent trim is not flagged, because the gate judged the trimmed set",
+    _manifest_trim.ok
+    and not _manifest_trim.inconsistent
+    and (_manifest_trim.frames_found, _manifest_trim.frames_expected) == (1, 1),
+    f"ok={_manifest_trim.ok} inconsistent={_manifest_trim.inconsistent}",
+)
+
+_manifest_gone_root = _manifest_bundle("m211-absent", judged=3, rows=3)
+(_manifest_gone_root / dyfr.MANIFEST).unlink()
+_manifest_gone = run_report_in(_manifest_gone_root)
+check(
+    # Absence is REQUIRED's case, not this check's: the run fails as it did before, and the
+    # manifest is named once, as missing, rather than twice.
+    "#211: an absent manifest is a missing required artefact, not a count disagreement",
+    not _manifest_gone.ok
+    and any(m["artefact"] == dyfr.MANIFEST for m in _manifest_gone.missing)
+    and not any(e["artefact"] == dyfr.MANIFEST for e in _manifest_gone.inconsistent),
+    f"ok={_manifest_gone.ok} missing={_manifest_gone.missing} "
+    f"inconsistent={_manifest_gone.inconsistent}",
+)
+
+_manifest_audio_root = _manifest_bundle("m211-audio", judged=3, rows=1, has_video=False)
+(_manifest_audio_root / dyq.REPORT_NAME).unlink()
+_manifest_audio = run_report_in(_manifest_audio_root)
+check(
+    # `verdicts is None` when the gate report is legitimately absent, so there is no count to
+    # compare against -- the same skip `gate_disagreements` makes.
+    "#211: without a gate report there is nothing to compare against, so the check skips",
+    _manifest_audio.ok and not _manifest_audio.inconsistent,
+    f"ok={_manifest_audio.ok} inconsistent={_manifest_audio.inconsistent}",
+)
+
+
+def _short_manifest_pipeline(source, work, **kw):
+    """`fake_pipeline`, with stage 12's real verdict for the truncated bundle."""
+    result = fake_pipeline(source, work, **kw)
+    result.report = _manifest_short
+    return result
+
+
+_short_out = io.StringIO()
+dyp.run = _short_manifest_pipeline
+try:
+    with redirect_stdout(_short_out), redirect_stderr(_short_out):
+        rc_manifest_short = dyc.main(["process", str(src)])
+finally:
+    dyp.run = fake_pipeline
+check(
+    # The guard's whole point, measured through the CLI rather than inferred from `ok`: the run
+    # that extracted three frames and covers one is exit 6, and stderr says which count.
+    "#211: and the truncated bundle's own verdict is exit 6 through the CLI, not 0",
+    rc_manifest_short == ec.ARTEFACT_VERIFICATION_FAILED
+    and "INCONSISTENT manifest.tsv (1 of 3 frames listed)" in _short_out.getvalue(),
+    f"rc={rc_manifest_short}\n{_short_out.getvalue()[-300:]}",
+)
+
 # --- the note promotion -------------------------------------------------------------
 pdir = tmp / "promote"
 pdir.mkdir(parents=True, exist_ok=True)
