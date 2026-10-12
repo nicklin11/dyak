@@ -14,6 +14,7 @@ from . import audit as dya
 from . import deps as dyd
 from . import exitcodes as ec
 from . import bundle as dyb
+from . import caption as dycap
 from . import link as dylnk
 from . import pipeline as dyp
 from . import repair as dyr
@@ -361,7 +362,8 @@ def _process(args: argparse.Namespace) -> int:
     #        about the deliverable, so it outranks the others. When the quality gate also
     #        failed, 5 still wins: the reader is told the note has errors AND, above, that
     #        the frames were soft. Reporting 4 alone would hide the note's own verdict.
-    #   4 -- a content frame was soft. The note exists; its inputs were not.
+    #   4 -- a content frame was soft, or stage 6 left too much of the source uncovered by the
+    #        transcript (broken A/V sync). The note exists; its inputs were not.
     #   6 -- the pipeline ran but required artefacts could not be verified: stage 12's end-of-run
     #        check, or a run that stopped at the stage which needed the artefact (ADR-0001 D3).
     #   1 -- the note is a template, not a model synthesis.
@@ -437,6 +439,32 @@ def _process(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return ec.INCOMPLETE_NOTE
+    if result.caption.considered and not result.caption.ok:
+        # Code 4's other half, and the home is the frame/A-V family: code 4's row is
+        # `docs/adr/0001-lecture-pipeline.md:328`. It is *not* ADR-0001 D5 (`:191`), which is
+        # the audit -- a separate model context that never rewrites; `caption.py:51-53` and
+        # `pipeline.py:88-89` cite D5 for this exit and are wrong (#223).
+        #
+        # The `considered` guard is load-bearing, not cosmetic: `caption.Report.ok` is false
+        # whenever `considered == []` too -- an audio-only source, or a run whose every frame
+        # stage 5 gated out -- and neither has an A/V sync to be broken. Measured on this tree,
+        # the unguarded branch exits 4 on those runs and reddens 12 checks in
+        # `tests/test_stages.py`, the guard's own pin among them (the #223 decision measured 19
+        # on its base, `b9c6518`).
+        #
+        # Last in the ladder on purpose, immediately before the code-6 check: a run that is
+        # both desynced and below the coverage threshold still returns 8, because "less of the
+        # lecture reached the model" is the more specific statement about the note (#117). Any
+        # earlier placement rewrites an existing exit code.
+        print(
+            f"dyak: stage 6 left {len(result.caption.uncovered)} of "
+            f"{len(result.caption.considered)} frames it considered with no transcript "
+            f"coverage ({result.caption.uncovered_share:.0%}, limit "
+            f"{result.caption.uncovered_share_limit:.0%}): the audio and the video are not "
+            f"describing the same lecture. See {dycap.REPORT_NAME} in the bundle.",
+            file=sys.stderr,
+        )
+        return ec.QUALITY_GATE_FAILED
     if not result.report.ok:
         for entry in result.report.missing:
             print(
