@@ -2302,12 +2302,22 @@ chunk_http = ChunkHTTP(
 dyso.urllib.request.urlopen = chunk_http
 # #193: the hosted route's unit is its own uploads, reported as each one returns. Collected
 # here because the callback is the only live signal a reader of this route gets.
-_chunk_seen: list[tuple[int, int]] = []
+# #205: `done` alone is a value the loop could hand over at the end -- recording each callback
+# and firing them after the loop leaves the 0..N sequence identical. So each entry also carries
+# how many uploads are visible in `chunk_http.sent` *at call time*, and the check below
+# requires the two to agree; a deferred callback would observe the final count every time.
+_chunk_seen: list[tuple[int, int, int]] = []
+
+
+def _chunk_progress(done: int, total: int) -> None:
+    _chunk_seen.append((done, total, sum(1 for r in chunk_http.sent if r.data is not None)))
+
+
 tr_chunked = dystt.transcribe(
     chunk_wav,
     audio_duration=1.0,
     backend="openai",
-    on_progress=lambda done, total: _chunk_seen.append((done, total)),
+    on_progress=_chunk_progress,
 )
 _bodies = [r.data for r in chunk_http.sent if r.data is not None]
 check(
@@ -2344,9 +2354,12 @@ check(
     # Acceptance: "the chunk counter advances live". Derived from the observed request count,
     # so the assertion does not hardcode the fixture's geometry -- one `(0, N)` before the
     # first upload and one `(k, N)` after each of the N uploads.
+    # #205: the value sequence alone is what a deferred callback also produces, so the third
+    # element -- uploads visible when the callback ran -- must equal `done` on every entry.
     "the hosted chunk counter advances as each upload returns (#193)",
-    [done for done, _ in _chunk_seen] == list(range(len(_bodies) + 1))
-    and {total for _, total in _chunk_seen} == {len(_bodies)},
+    [done for done, _, _ in _chunk_seen] == list(range(len(_bodies) + 1))
+    and {total for _, total, _ in _chunk_seen} == {len(_bodies)}
+    and all(done == seen for done, _, seen in _chunk_seen),
     str(_chunk_seen),
 )
 

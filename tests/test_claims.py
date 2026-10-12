@@ -510,7 +510,7 @@ check(
 #
 # Direction 1: every `DYAK_*` name that appears as a *string constant* in the
 # source must appear in `docs/running.md`. Constants, not textual grep: a
-# comment (the dead `DYAK_GATEWAY_URL` in `deps.py:377`) is not a live
+# comment (the dead `DYAK_GATEWAY_URL` in `deps.py:497`) is not a live
 # variable, and the docstrings that name one describe a real read. There is no
 # dynamically built name any more: #95 removed `DEFAULT_ENDPOINTS`, so
 # `DYAK_OPENAI_URL` and `DYAK_WHISPERCPP_URL` are ordinary constants in
@@ -540,7 +540,7 @@ check(
 # reference cannot rot into documenting aspirational configuration (#65, #68).
 # The one exception is stated, not inferred from the prose around the name:
 # `DYAK_GATEWAY_URL` appears only in the paragraph that records its removal,
-# the same statement `deps.py:377` records in a comment.
+# the same statement `deps.py:497` records in a comment.
 REMOVED_VARS = {"DYAK_GATEWAY_URL"}
 ghosts = sorted(
     m
@@ -802,11 +802,11 @@ check(
 )
 
 # --- 10b. an amendment does not claim a rename to the same name --------------------
-# #182: `docs/adr/0001-lecture-pipeline.md:64` read "renamed `dyak` → `dyak`" from 0caec8b
-# until this fix. 0caec8b introduced the amendment with the names already collapsed -- it
-# applied the rename it was performing to the sentence describing it -- and c2824d7 applied
-# the next rename to what was left, so each rename made it worse and no single commit is at
-# fault.
+# #182: `docs/adr/0001-lecture-pipeline.md:64` read a self-rename until this fix -- "renamed
+# `glimpse` → `glimpse`" from 0caec8b, "renamed `dyak` → `dyak`" from c2824d7. 0caec8b
+# introduced the amendment with the names already collapsed -- it applied the rename it was
+# performing to the sentence describing it -- and c2824d7 applied the next rename to what was
+# left, so each rename made it worse and no single commit is at fault.
 #
 # A grep for an old name cannot be the guard. `git grep -n glimpse --
 # docs/adr/0001-lecture-pipeline.md` returned nothing while the sentence was wrong: the
@@ -814,10 +814,11 @@ check(
 # *does* contain `glimpse`, so a name-presence check would fail on correct text. What is
 # checkable is the relation between two names, which needs the shape of the sentence.
 #
-# `renamed `a` → `b``, the ASCII `->` form, and the unbackticked mixes. Deliberately the
-# arrow form only: a prose rule ("renamed X to Y") would start passing on wording nobody
-# checked, which is what section 10's COST_MARKERS comment warns about. A reworded amendment
-# is caught by the companion check below instead.
+# The regex takes the arrow shape: `renamed `a` → `b``, the unbackticked mixes, and the ASCII
+# `->` a terminal may substitute for `→`. Deliberately the arrow form only -- a prose rule
+# ("renamed X to Y", no arrow at all) would start passing on wording nobody checked, which is
+# what section 10's COST_MARKERS comment warns about. A reworded amendment is caught by the
+# companion check below instead.
 RENAME_ARROW = re.compile(r"renamed\s+`?([A-Za-z0-9_.-]+)`?\s*(?:→|->)\s*`?([A-Za-z0-9_.-]+)`?")
 renames: list[tuple[str, str, str]] = []  # (where, old, new)
 for _doc in sorted((REPO / "docs").rglob("*.md")):
