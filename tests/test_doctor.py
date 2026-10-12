@@ -14,6 +14,7 @@ real binaries.
 
 import io
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -549,7 +550,21 @@ check(
 
 # --- #126: preflight must not treat a missing LLM as benign, and must not crash on STT ---
 # Isolated: no STT endpoint reachable, no LLM configured, a vault that does not exist.
+#
+# `DYAK_STT` stays unset so the `auto` path is exercised, but `auto` falls back to the
+# *built-in* endpoints in `stt/backends.py` when nothing overrides them -- and a host with
+# whisper.cpp on the default 127.0.0.1:10302 makes these checks measure the host instead of
+# the code (#175). Both URL variables are honoured on the `auto` path (`_env_endpoint`),
+# so they are pointed at a port that is provably dead: bound but never `listen()`ed, which
+# the kernel refuses at once, and held for the rest of this block so no other process can
+# take it. A fixed port (e.g. :1) is not provable, and a bound-then-closed port leaves a gap
+# in which it could be occupied.
+_dead = socket.socket()
+_dead.bind(("127.0.0.1", 0))
+_dead_url = f"http://127.0.0.1:{_dead.getsockname()[1]}"
 os.environ.pop("DYAK_STT", None)
+os.environ["DYAK_WHISPERCPP_URL"] = _dead_url
+os.environ["DYAK_OPENAI_URL"] = _dead_url
 os.environ.pop(dyd.LLM_ENV, None)
 os.environ[dyd.VAULT_ENV] = str(Path(tempfile.mkdtemp()) / "no-vault")
 
@@ -629,6 +644,7 @@ check(
     err_buf.getvalue(),
 )
 
+_dead.close()
 _env.restore(SAVED_ENV)
 
 print()
