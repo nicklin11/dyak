@@ -625,8 +625,8 @@ def run(
     # short file. Stage 5 judged the frames stage 4 returned in memory (`pipeline.py:511` ->
     # `:541`) and `quality.json` records one verdict per judged frame, so it is the witness for
     # the count while the manifest stays the witness for *which* files must exist --
-    # `count_frames`' contract is untouched, and stage 6's own reader is the right one for the
-    # left side because `caption.align` takes its frames from the manifest too (`caption.py:373`).
+    # `count_frames`' contract is untouched, and stage 6's own reader is the right one for the left
+    # side: `caption.align` takes its frames from `read_manifest` (`caption.py:238-243`).
     #
     # A trim is not this case, and that is answered rather than deferred: re-running stage 4 on
     # a trimmed manifest reuses those times, deletes the old frames and rewrites the manifest
