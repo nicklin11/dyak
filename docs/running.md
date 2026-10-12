@@ -32,9 +32,9 @@ Real per-layer precedence across all fields is ADR-0002 territory and tracked in
 | `DYAK_LLM_ENDPOINT` | `llm.py`, `deps.py` | OpenAI-compatible base URL for synthesis (stage 7) and audit (stage 9) |
 | `DYAK_LLM_MODEL` | `llm.py`, `deps.py` | model id sent in the request |
 | `DYAK_LLM_KEY` | `llm.py` | optional; unset means no `Authorization` header |
-| `DYAK_VLM_ENDPOINT` | `llm.py` | stage 6 frame captioning; unset falls back to `DYAK_LLM_ENDPOINT` |
-| `DYAK_VLM_MODEL` | `llm.py` | as above, falls back to `DYAK_LLM_MODEL` |
-| `DYAK_VLM_KEY` | `llm.py` | as above, falls back to `DYAK_LLM_KEY` |
+| `DYAK_VLM_ENDPOINT` | `llm.py`, `deps.py` | stage 6 frame captioning; unset falls back to `DYAK_LLM_ENDPOINT` |
+| `DYAK_VLM_MODEL` | `llm.py`, `deps.py` | as above, falls back to `DYAK_LLM_MODEL` |
+| `DYAK_VLM_KEY` | `llm.py`, `deps.py` | as above, falls back to `DYAK_LLM_KEY` |
 | `DYAK_VAULT` | `deps.py` | the notes directory the note is exported into (any folder; Obsidian is recommended) |
 | `DYAK_SETTINGS` | `deps.py` | the settings *file*, overriding the XDG path |
 | `DYAK_TERMS_DIR` | `link.py` | atomic term notes for stage 11; default `<vault>/mscs/_terms` |
@@ -49,7 +49,9 @@ comment in `deps.py`). Standard Python/XDG variables — `XDG_CONFIG_HOME`, `XDG
 ## `dyak doctor`
 
 Reports missing or conflicting dependencies and exits 2/3 with the reason and remediation.
-Run it before a run, not after a failure.
+Run it before a run, not after a failure. Both model roles are probed: the text endpoint, and
+the vision endpoint stage 6 captions with when `DYAK_VLM_*` is set. An unset vision role is
+reported, not failed — stage 6 falls back to the text pair.
 
 ## `dyak process`
 

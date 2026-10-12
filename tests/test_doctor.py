@@ -274,6 +274,143 @@ dyd.urllib.request.urlopen = real_urlopen
 os.environ.pop(dyd.LLM_ENV, None)
 os.environ.pop(dyd.LLM_MODEL_ENV, None)
 
+
+# --- 6b. the vision role: unset falls back, configured-and-dead is a failure ---
+# #167: `deps.py:561` claimed `check_llm` covered `DYAK_VLM_ENDPOINT`. It never did, so a
+# dead vision endpoint produced a green `doctor` and a stage-6 failure after the
+# transcription and frame extraction had already run -- #81 measured that stage at ~396k
+# input tokens and ~7.7 minutes on a 75-minute lecture. `check_vlm` is the probe, and the
+# two states it has to tell apart are "unset" (a state, stage 6 falls back) and "configured
+# and unreachable" (a dependency failure, refused before the run starts).
+class _ProbeOk:
+    status = 200
+
+    def read(self, _n=-1):
+        return b"ok"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def vision_dead_urlopen(request, timeout=None):
+    """Refuse the vision URL only, so the other probes stay healthy and the failure is isolated."""
+    url = getattr(request, "full_url", str(request))
+    if "/vision" in url:
+        raise dyd.urllib.error.URLError("connection refused")
+    return _ProbeOk()
+
+
+saved_vlm = {k: os.environ.get(k) for k in (dyd.VLM_ENV, dyd.VLM_MODEL_ENV, dyd.VLM_KEY_ENV)}
+for key in saved_vlm:
+    os.environ.pop(key, None)
+os.environ.pop(dyd.LLM_ENV, None)
+os.environ.pop(dyd.LLM_MODEL_ENV, None)
+
+# (a) nothing configured anywhere: a state to report, not a fault.
+c = dyd.check_vlm()
+check("unset vision endpoint is not a failure (#167)", not c.failed, f"ok={c.ok} fatal={c.fatal}")
+check("unset vision endpoint says so (#167)", "not configured" in c.detail, c.detail)
+
+# (b) unset, with a text endpoint to fall back to: stage 6 is served, so still not a fault.
+os.environ[dyd.LLM_ENV] = "http://127.0.0.1:1/inference"
+c = dyd.check_vlm()
+check(
+    "unset vision endpoint reports the text fallback (#167)",
+    c.ok and dyd.LLM_ENV in c.detail,
+    f"ok={c.ok} detail={c.detail}",
+)
+check(
+    "the fallback is not fatal for a run (#167)",
+    not c.failed,
+    f"ok={c.ok} fatal={c.fatal}",
+)
+
+# (c) configured but unreachable: exit 3, fatal, with a remediation -- the whole point.
+os.environ[dyd.VLM_ENV] = "http://127.0.0.1:1/vision"
+os.environ[dyd.VLM_MODEL_ENV] = "some/vision-model"
+dyd.urllib.request.urlopen = vision_dead_urlopen
+c = dyd.check_vlm()
+check("unreachable vision endpoint -> 3 (#167)", c.code == ec.DEPENDENCY_FAILED, f"{c.code}")
+check("unreachable vision endpoint explains itself (#167)", "unreachable" in c.detail, c.detail)
+check(
+    "unreachable vision endpoint has a remediation (#167)", bool(c.remediation), str(c.remediation)
+)
+check("a configured vision endpoint is fatal (#167)", c.failed, f"ok={c.ok} fatal={c.fatal}")
+check(
+    "the unreachable target named is the vision one (#167)",
+    "127.0.0.1:1/vision" in c.detail,
+    c.detail,
+)
+
+# (d) half-configured is a missing dependency, like the text role's equivalent.
+os.environ.pop(dyd.VLM_MODEL_ENV, None)
+c = dyd.check_vlm()
+check(
+    "vision endpoint without a model -> 2 (#167)",
+    c.code == ec.MISSING_DEPENDENCY and bool(c.remediation),
+    f"{c.code} {c.detail}",
+)
+os.environ[dyd.VLM_MODEL_ENV] = "some/vision-model"
+
+# (e) wired into run_all, so `doctor` prints it and its exit code can move.
+names = [c.name for c in dyd.run_all()]
+check("run_all carries the vision check, so doctor reports it (#167)", "vlm" in names, str(names))
+
+# (f) `doctor` itself moves on the unreachable case: reported as a failure, not passed.
+os.environ[dyd.LLM_MODEL_ENV] = "some/model"
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    rc_doctor = dyc.main(["doctor"])
+check(
+    "doctor with a dead configured vision endpoint -> exit 3 (#167)",
+    rc_doctor == ec.DEPENDENCY_FAILED,
+    f"rc={rc_doctor}",
+)
+check("doctor names the vision role as the failure (#167)", "vlm" in err.getvalue(), err.getvalue())
+check(
+    "doctor renders the vision check as failed (#167)",
+    "[FAIL] vlm" in out.getvalue(),
+    out.getvalue(),
+)
+
+# (g) `process` refuses before the run when the vision role is configured and dead.
+err_buf = io.StringIO()
+with redirect_stderr(err_buf):
+    rc_vlm = dyc._preflight()
+check(
+    "a dead configured vision endpoint refuses the run before it starts (#167)",
+    rc_vlm == ec.DEPENDENCY_FAILED,
+    f"rc={rc_vlm}",
+)
+check("the refusal names the vision role (#167)", "vlm" in err_buf.getvalue(), err_buf.getvalue())
+dyd.urllib.request.urlopen = real_urlopen
+
+# (h) an unconfigured vision endpoint is NOT a refusal: stage 6 degrades, the run proceeds.
+for key in (dyd.VLM_ENV, dyd.VLM_MODEL_ENV, dyd.VLM_KEY_ENV, dyd.LLM_ENV, dyd.LLM_MODEL_ENV):
+    os.environ.pop(key, None)
+err_buf = io.StringIO()
+with redirect_stderr(err_buf):
+    rc_vlm_unset = dyc._preflight(no_llm=True)
+check(
+    "an unconfigured vision endpoint does not refuse the run (#167)",
+    rc_vlm_unset == ec.OK,
+    f"rc={rc_vlm_unset} err={err_buf.getvalue()}",
+)
+check(
+    "the unconfigured-vision note names stage 6, not 0-12 (#167)",
+    "stage 6" in err_buf.getvalue() and "0-12" not in err_buf.getvalue(),
+    err_buf.getvalue(),
+)
+
+for key, value in saved_vlm.items():
+    if value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = value
+
 # --- 7. a tool with no --version must not report usage text AS a version -----
 # shipboard has no --version flag; `shipboard --help` prints argparse usage.
 # Labelling that "version" tells the reader nothing and looks like a bug.

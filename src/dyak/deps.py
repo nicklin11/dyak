@@ -24,11 +24,17 @@ from pathlib import Path
 
 from . import exitcodes as ec
 from . import runner, stt
+from .llm import VISION_ENDPOINT_ENV as VLM_ENV
+from .llm import VISION_KEY_ENV as VLM_KEY_ENV
+from .llm import VISION_MODEL_ENV as VLM_MODEL_ENV
 
 VAULT_ENV = "DYAK_VAULT"
 LLM_ENV = "DYAK_LLM_ENDPOINT"
 LLM_MODEL_ENV = "DYAK_LLM_MODEL"
 LLM_KEY_ENV = "DYAK_LLM_KEY"
+#: The vision role's names are imported rather than retyped: ADR-0004 D3 keeps the two roles
+#: separate, and a second literal here could drift from the one `llm.py` actually reads.
+#: `check_vlm` and `vlm_configured` are the readers (#167).
 DEFAULT_VAULT = Path.home() / "Documents/obs_notes"
 PROBE_TIMEOUT = 10.0
 
@@ -545,6 +551,112 @@ def check_llm() -> Check:
     return Check(name="llm", ok=True, detail="reachable", path=url, version=f"{model}, HTTP {code}")
 
 
+def vlm_configured() -> bool:
+    """True when the vision role has at least one of its own names set (ADR-0004 D3).
+
+    `_preflight` uses this to decide whether a broken vision endpoint should refuse the run.
+    "Unset" is a different question and deliberately not fatal: stage 6 falls back to the
+    text pair, and the pipeline is required to run end to end with no model configured. A
+    half-set pair (`DYAK_VLM_MODEL` without `DYAK_VLM_ENDPOINT`, or the reverse) counts as
+    configured, because that is the state `Config.vision_from_env` refuses to resolve.
+    """
+    return bool(os.environ.get(VLM_ENV, "").strip() or os.environ.get(VLM_MODEL_ENV, "").strip())
+
+
+def check_vlm() -> Check:
+    """The vision endpoint stage 6 captions with. The same shape as `check_llm` (#167).
+
+    Two states, and the difference between them is the whole check:
+
+      * **Unset** is a state, not a fault. `Config.vision_from_env` falls back to the text
+        pair when both vision names are unset, so the role is served -- reported, but not a
+        failure. With no fallback either, stage 6 marks every frame `NO_ENDPOINT` and the
+        pipeline still writes a note; the text endpoint's own check covers that case.
+      * **Configured and unreachable** is a dependency failure. Stage 6 needs this role, and
+        without this check the run learns the endpoint is dead there -- after the
+        transcription and frame extraction, which #81 measured as ~396k input tokens and
+        ~7.7 minutes on a 75-minute lecture. That is the most expensive possible moment to
+        discover a stage-0 fact, so the check is fatal (`DEPENDENCY_FAILED`, like the text
+        role) and `_preflight` refuses the run before it starts.
+    """
+    url = os.environ.get(VLM_ENV, "").strip()
+    model = os.environ.get(VLM_MODEL_ENV, "").strip()
+    if not url and not model:
+        fallback = os.environ.get(LLM_ENV, "").strip()
+        if fallback:
+            return Check(
+                name="vlm",
+                ok=True,
+                fatal=False,
+                detail=f"not set — stage 6 falls back to {LLM_ENV} ({fallback})",
+                path=fallback,
+                version="fallback",
+            )
+        return Check(
+            name="vlm",
+            ok=False,
+            fatal=False,
+            detail=(f"not configured (set {VLM_ENV} to caption frames; {LLM_ENV} is the fallback)"),
+            version="skipped",
+            # Not fatal here, so this code is never read today -- but `run_all` promotes a
+            # required check to fatal without giving it a code, and a fatal check whose code
+            # is OK makes `_preflight` print a refusal and then return 0 (#172). Carrying the
+            # code makes that impossible if `vlm` is ever promoted unconditionally.
+            code=ec.MISSING_DEPENDENCY,
+        )
+    if not url:
+        return Check(
+            name="vlm",
+            ok=False,
+            detail=f"{VLM_MODEL_ENV} is set but {VLM_ENV} is not",
+            remediation=f"set {VLM_ENV} to the vision endpoint, or unset {VLM_MODEL_ENV}",
+            code=ec.MISSING_DEPENDENCY,
+        )
+    if not model:
+        return Check(
+            name="vlm",
+            ok=False,
+            detail=f"{VLM_ENV} is set but {VLM_MODEL_ENV} is not",
+            remediation=f"set {VLM_MODEL_ENV} to the model id the endpoint serves",
+            code=ec.MISSING_DEPENDENCY,
+        )
+    # The key falls back the same way `Config.vision_from_env` does: a vision-specific key
+    # wins, and an unset one inherits the text role's.
+    key = os.environ.get(VLM_KEY_ENV, "").strip() or os.environ.get(LLM_KEY_ENV, "").strip()
+    try:
+        request = urllib.request.Request(
+            f"{url.rstrip('/')}/models", headers={"Accept": "application/json"}
+        )
+        if key:
+            request.add_header("Authorization", f"Bearer {key}")
+        with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT) as resp:
+            code = resp.status
+    except urllib.error.HTTPError as exc:
+        return Check(
+            name="vlm",
+            ok=False,
+            detail=f"{url}/models returned HTTP {exc.code}",
+            remediation="check the endpoint path and the key",
+            code=ec.DEPENDENCY_FAILED,
+        )
+    except (urllib.error.URLError, OSError) as exc:
+        return Check(
+            name="vlm",
+            ok=False,
+            detail=f"{url} unreachable: {exc}",
+            remediation="check the endpoint is running and reachable from this host",
+            code=ec.DEPENDENCY_FAILED,
+        )
+    auth = "key set" if key else "no key"
+    return Check(
+        name="vlm",
+        ok=True,
+        detail="reachable",
+        path=url,
+        version=f"{model}, HTTP {code}, {auth}",
+    )
+
+
 def run_all(*, required: frozenset[str] | None = None) -> list[Check]:
     """Every check, with `required` names promoted to fatal.
 
@@ -559,7 +671,7 @@ def run_all(*, required: frozenset[str] | None = None) -> list[Check]:
     # the codebase ever wrote and nothing in the docs ever told a user to set, and it
     # reported the *model* gateway under the name `gateway` while the endpoint the
     # pipeline actually uses is `DYAK_LLM_ENDPOINT` / `DYAK_VLM_ENDPOINT` --
-    # checked by `check_llm`. So a fully working run still printed
+    # checked by `check_llm` and `check_vlm` (#167). So a fully working run still printed
     #
     #     dyak: note: gateway is unavailable, but stages 0-12 do not use it
     #
@@ -570,6 +682,7 @@ def run_all(*, required: frozenset[str] | None = None) -> list[Check]:
         check_numpy(),
         check_stt(),
         check_llm(),
+        check_vlm(),
         check_vault(),
         check_settings(),
     ]
