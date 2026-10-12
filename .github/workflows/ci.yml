@@ -56,18 +56,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg
 
-      - name: Install the package under test
+      # `.[dev]` is also the install `tools/check.sh` runs locally, and it carries the
+      # ruff pin from `pyproject.toml` -- the single place the version is written down
+      # (#166). It used to be repeated here, and a second copy is how this job and a
+      # contributor's shell drift onto builds that disagree: the host's 0.16.10 produced
+      # identical output on two trees this pin tells apart -- one it passes, one it flags
+      # with an E402 -- so it could not see the difference between the state that passed
+      # and the state that failed.
+      - name: Install the package under test, with the pinned dev tooling
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
-
-      # ruff is pinned, and the pin is the version that formatted the tree.
-      # `ruff format` changes its output between releases, so an unpinned ruff makes
-      # `format --check` fail on files nobody touched -- a check that cries wolf gets
-      # disabled. Bumping this pin is a deliberate act: bump it, then reformat the
-      # whole tree in the same commit, so the diff is a reformat and not a surprise.
-      - name: Install ruff (pinned)
-        run: pip install "ruff==0.15.20"
+          pip install -e ".[dev]"
 
       - name: Dependency truth (ADR-0002 D2)
         run: python tests/test_deps.py
