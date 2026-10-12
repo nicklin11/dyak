@@ -106,13 +106,15 @@ dyak process [path] [options]
 
 ### What the progress output looks like
 
-One line per stage, printed when the stage finishes, with the seconds it took. This is a real
+One line per stage, printed when the stage finishes, with the seconds it took. Stage 3 is the
+exception: it announces itself *before* the transcription begins, and on the hosted route prints
+an indented `chunks k/N` line after each upload returns (#193). This is a real
 run — 180 s of lecture 1, seven frames — with the stages that print detail trimmed:
 
 ```
   [1/12] probe       0.0s  video h264 1920x1080, audio aac 48000Hz 2ch, 180.0s
   [2/12] audio       0.2s  audio.wav 180.0s 16000Hz mono, 5.5 MiB
-  [3/12] stt     starting  180s of audio through whisper.cpp on CPU, expect 36s-54s, no streaming (ADR-0001 D7)
+  [3/12] stt     starting  180s of audio through whispercpp at http://100.64.0.1:10301, expect 36s-54s; this backend reports no progress
   [3/12] stt         9.1s  52 segments, 611 timed words, speech to 180.0s of 180.0s audio [whispercpp]
   [4/12] frames     12.5s  7 frames, 2.7 MiB, median gap 9s
   [5/12] quality     3.7s  7/7 frames pass (MEGE 57230-146128, threshold 38303, 7 cropped)
@@ -128,7 +130,9 @@ run — 180 s of lecture 1, seven frames — with the stages that print detail t
 Three things about that shape are worth knowing:
 
 - **`[3/12] stt starting` is not a duplicate.** It appears before the transcription begins, and
-  has no seconds because nothing has elapsed yet. Every other stage prints exactly one line.
+  has no seconds because nothing has elapsed yet. Every other stage prints exactly one line. On
+  the hosted route the indented `chunks k/N` lines appear underneath it as each upload returns;
+  those are not stage lines either.
 - **The gap between lines is the stage's real cost.** Stage 9 above took 752 s of a 1225 s run.
   On a full 75-minute lecture the same run spends most of its wall clock in transcription,
   frame extraction, synthesis and audit, in that order.

@@ -26,6 +26,7 @@ an exit code.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -62,8 +63,16 @@ class TranscriptionBackend(Protocol):
         """
         ...
 
-    def run(self, wav, *, timeout: float) -> bytes:
-        """Transcribe and return the raw payload."""
+    def run(
+        self, wav, *, timeout: float, on_progress: Callable[[int, int], None] | None = None
+    ) -> bytes:
+        """Transcribe and return the raw payload.
+
+        `on_progress` receives `(done, total)` in units this client has *observed*, never an
+        estimate (#193): the only route with a unit today is the OpenAI-compatible one, where
+        it is the count of wav slices uploaded (`openai_compat.py:240-267`). A backend with no
+        unit never calls it, and the stage-3 start line says so instead of inventing a rate.
+        """
         ...
 
     def parameters(self, *, client_timeout: float) -> dict:

@@ -7,10 +7,13 @@ stages 5-12 are not built yet.
 **Progress is reported as stage lines, and the unbuilt stages are named.** ADR-0001 D7's
 reason for stage-level progress is that the STT backend issues one blocking HTTP
 request with no streaming, and a bar that reads 90% during a 23-minute transcribe
-and then sits still is a lie about where the time went. The same argument applies
-to the stages that do not exist yet: a run that stops after stage 3 and reports
-"done" would misrepresent a partial pipeline as a finished one. So the last line
-of every run states what is still missing and which issue tracks it.
+and then sits still is a lie about where the time went. What D7 bans is a *fabricated*
+bar, and a count of units this run itself observed is not one: the hosted route's
+chunk counter is printed as it advances (#193), while whisper.cpp -- which reports
+nothing this client can read -- says so rather than borrowing a rate. The same
+argument applies to the stages that do not exist yet: a run that stops after stage 3
+and reports "done" would misrepresent a partial pipeline as a finished one. So the
+last line of every run states what is still missing and which issue tracks it.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import shutil
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -269,6 +273,29 @@ def _estimate(audio_seconds: float) -> tuple[float, float]:
     return audio_seconds * floor, audio_seconds * slow * HEADROOM
 
 
+def _chunk_line(out) -> Callable[[int, int], None]:
+    """Progress for stage 3: one indented, flushed line per observed unit.
+
+    Indented like the anomaly notes below it, and deliberately without a stage prefix: the
+    start line already carries `[3/12]`, and a second stage-prefixed literal would break
+    `tests/test_claims.py:456`. `chunks` is the unit on the only route that reports one -- a
+    slice of the uploaded wav (`stt/openai_compat.py:240-267`, #125). A backend with a
+    different unit needs the callback to grow one; that is #197, and nothing here invents a
+    unit for a backend that has none (#193).
+    """
+
+    def report(done: int, total: int) -> None:
+        try:
+            out.write(f"           chunks {done}/{total}\n")
+            out.flush()
+        except (OSError, ValueError):
+            # A progress line must not move a run's outcome: `deps.py:280`'s rule for warnings,
+            # applied here because `out` may be a closed file or a stream that went away.
+            return
+
+    return report
+
+
 def publishes_stage7_transcript(sdir: Path, bundle: Bundle) -> dict[str, Path]:
     """Publish stage 7's artefacts out of its work directory, into the bundle.
 
@@ -427,17 +454,39 @@ def _stages(
 
     # --- stage 3: stt ---------------------------------------------------------
     began = time.monotonic()
-    # ADR-0001 D7: the STT backend issues one blocking HTTP request with no streaming, so there
-    # is nothing to report between here and the result line. Stating the
-    # expected cost *before* starting is the only honest option; a bar that sits
-    # silent through the dominant stage is the lie ADR-0001 D7 is written against.
-    lo, hi = _estimate(artefact.duration)
+    # The backend is resolved *before* the line, so the line cannot name one that will not run
+    # (#186): `auto` prefers whisper.cpp but falls back to the OpenAI-compatible route
+    # (`stt/backends.py:129-134`), and the old literal named whisper.cpp and a local CPU
+    # regardless.
+    # `name`/`target` is the pair `stt-provenance.json` records, so the log and the provenance
+    # now agree by construction. The interval is whisper.cpp's own measurement
+    # (`stt/core.py:46-52`); nothing in the tree measures a hosted endpoint's rate, and an
+    # invented one is a worse claim than none -- #32 is where that measurement belongs. Note
+    # the residual gap: a *remote* whisper.cpp still borrows this host's interval, because
+    # nothing classifies the target (loopback vs remote) yet.
+    info = stt.backend().info()
+    rate = (
+        f"expect {_interval(*_estimate(artefact.duration))}"
+        if info.name == "whispercpp"
+        else "no rate measured for this endpoint"
+    )
+    progress = (
+        "this backend reports no progress"
+        if info.name == "whispercpp"
+        else "reporting chunk progress"
+    )
     out.write(
         f"  [3/{IMPLEMENTED}] {'stt'.ljust(7)} starting  {artefact.duration:.0f}s of audio through "
-        f"whisper.cpp on CPU, expect {_interval(lo, hi)}, no streaming (ADR-0001 D7)\n"
+        f"{info.name} at {info.target}, {rate}; {progress}\n"
     )
     out.flush()
-    transcript = stt.transcribe(wav, audio_duration=artefact.duration)
+    transcript = stt.transcribe(
+        wav,
+        audio_duration=artefact.duration,
+        # The resolved name, not the setting: the line's claim and the work cannot diverge.
+        backend=info.name,
+        on_progress=_chunk_line(out),
+    )
     paths = stt.write(transcript, work.path)
     if bundle is not None:
         # Every stage that writes to the work dir has to name what it publishes here, or the
