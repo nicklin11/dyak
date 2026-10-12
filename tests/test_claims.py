@@ -472,6 +472,30 @@ check(
     f"no stage-prefixed pipeline literal mentions {STT_PROGRESS!r}: {_spelling.get('pipeline.py')}",
 )
 
+#: #186: the line used to read "whisper.cpp on CPU" whatever `stt.resolve` picked, and "on CPU"
+#: was a claim about a machine this code never inspects -- `info().target` may name another
+#: host. Pinned here as well as at runtime because the static form catches a literal coming back
+#: in a path the runtime stubs do not exercise.
+check(
+    "#186: the hardcoded hardware claim cannot come back",
+    "on CPU" not in PIPELINE,
+    "pipeline.py still says 'on CPU'",
+)
+
+#: #186: the resolution must happen *before* the line, or the line can name a backend that is
+#: not the one that runs (`stt/backends.py:129-134` falls back to the OpenAI-compatible route).
+#: The runtime half -- that the line is flushed before the blocking call -- is in
+#: tests/test_stages.py; this is the ordering claim, which a source read settles and a stub
+#: cannot. `find`, not `index`: a missing literal must read as -1 and fail this check rather
+#: than raise and take the rest of the suite with it.
+RESOLVED_AT = PIPELINE.find("stt.backend().info()")
+STAGE3_LINE_AT = PIPELINE.find("starting  {artefact.duration")
+check(
+    "#186: the backend is resolved before the stage-3 start line is written",
+    0 <= RESOLVED_AT < STAGE3_LINE_AT,
+    f"resolved at {RESOLVED_AT}, line at {STAGE3_LINE_AT}",
+)
+
 check(
     "the pipeline formats exactly one completion line per stage, with no stage twice",
     all(announced_counts.get(s) == 1 for s in range(gst.FIRST_STAGE, gst.IMPLEMENTED)),

@@ -2300,7 +2300,15 @@ chunk_http = ChunkHTTP(
     ]
 )
 dyso.urllib.request.urlopen = chunk_http
-tr_chunked = dystt.transcribe(chunk_wav, audio_duration=1.0, backend="openai")
+# #193: the hosted route's unit is its own uploads, reported as each one returns. Collected
+# here because the callback is the only live signal a reader of this route gets.
+_chunk_seen: list[tuple[int, int]] = []
+tr_chunked = dystt.transcribe(
+    chunk_wav,
+    audio_duration=1.0,
+    backend="openai",
+    on_progress=lambda done, total: _chunk_seen.append((done, total)),
+)
 _bodies = [r.data for r in chunk_http.sent if r.data is not None]
 check(
     "a wav above the threshold is sliced into several requests",
@@ -2331,6 +2339,15 @@ check(
 check(
     "the whole audio is covered, first sample to last",
     chunk_data.startswith(pcm_of(_bodies[0])) and chunk_data.endswith(pcm_of(_bodies[-1])),
+)
+check(
+    # Acceptance: "the chunk counter advances live". Derived from the observed request count,
+    # so the assertion does not hardcode the fixture's geometry -- one `(0, N)` before the
+    # first upload and one `(k, N)` after each of the N uploads.
+    "the hosted chunk counter advances as each upload returns (#193)",
+    [done for done, _ in _chunk_seen] == list(range(len(_bodies) + 1))
+    and {total for _, total in _chunk_seen} == {len(_bodies)},
+    str(_chunk_seen),
 )
 
 _starts = [word.start for seg in tr_chunked.segments for word in seg.words]
@@ -2376,9 +2393,22 @@ check(
 small_wav = pcm_wav(tmp / "small-125.wav", 0.1)
 small_http = FakeHTTP([b"ok", json.dumps({"segments": [chunk_segment("one", [0.0])]}).encode()])
 dyso.urllib.request.urlopen = small_http
-tr_single = dystt.transcribe(small_wav, audio_duration=0.1, backend="openai")
+_single_seen: list[tuple[int, int]] = []
+tr_single = dystt.transcribe(
+    small_wav,
+    audio_duration=0.1,
+    backend="openai",
+    on_progress=lambda done, total: _single_seen.append((done, total)),
+)
 _single_posts = [r.data for r in small_http.sent if r.data is not None]
 check("a wav under the threshold is one request", len(_single_posts) == 1, str(len(_single_posts)))
+check(
+    # The one-request branch is not silent either: it reports the single unit it is about to
+    # upload and then that it returned, which is what a reader sees instead of a bare wait.
+    "the single-request route reports its one unit, start and finish (#193)",
+    _single_seen == [(0, 1), (1, 1)],
+    str(_single_seen),
+)
 check("and its body is the file verbatim", small_wav.read_bytes() in _single_posts[0])
 check(
     "and provenance says a single upload",
@@ -2944,6 +2974,7 @@ dyp.frames.run = fake_frames_run
 dyp.quality.run = spy_quality_run
 real_probe_run, real_audio_run = dyp.probe.probe, dyp.audio.extract
 real_stt_run, real_stt_write = dyp.stt.transcribe, dyp.stt.write
+real_stt_backend = dyp.stt.backend
 real_require = dyp.probe.require_supported
 real_coverage = dyp.audio.check_coverage
 real_rates = dyp.stt.RATE_RANGE
@@ -2965,12 +2996,57 @@ dyp.audio.extract = lambda _p, wav: (
     dypa.AudioArtefact(path=wav, duration=1.0, sample_rate=16000, channels=1, size_bytes=4),
 )[1]
 dyp.audio.check_coverage = lambda _i, _a: ""
-dyp.stt.transcribe = lambda wav, *, audio_duration: dyst.Transcript(
-    wav=wav,
-    audio_duration=audio_duration,
-    segments=(),
-    backend="spy",
+
+
+class _FlushRecorder(io.StringIO):
+    """A stream that counts flushes, so "flushed before the blocking call" is assertable.
+
+    `io.StringIO.flush` is a no-op, and a check that only reads `getvalue()` cannot tell a
+    written line from a flushed one -- which is the half of #100/#193 a redirected log cares
+    about.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.flushes = 0
+
+    def flush(self) -> None:
+        self.flushes += 1
+        super().flush()
+
+
+# The stage-3 line goes here, not to the suite's stdout, so the assertions read the same bytes
+# a user's redirected log would hold.
+captured = _FlushRecorder()
+# #186/#193: the line must name the backend that will actually run, and it must already be in
+# the stream when the blocking call is entered. The stub resolves `openai`, so on unmodified
+# main -- whose line is the literal "whisper.cpp on CPU" -- the target assertion is the half
+# that fails; the flush half already held for that one line.
+dyp.stt.backend = lambda *a, **k: SimpleNamespace(
+    info=lambda: dysb.BackendInfo(name="openai", target="https://stt.example/v1")
 )
+
+
+def _order_stt_spy(wav, *, audio_duration, backend=None, on_progress=None):
+    """Stands in for the blocking call, and asserts what is already in the stream."""
+    seen["stt_backend"] = backend
+    check(
+        "#193: the resolved backend's start line is in the stream, flushed, before the "
+        "blocking call returns",
+        captured.flushes >= 1
+        and "starting" in captured.getvalue()
+        and "https://stt.example/v1" in captured.getvalue(),
+        f"flushes={captured.flushes} stream={captured.getvalue()!r}",
+    )
+    if on_progress is not None:
+        # The real pipeline hands stage 3's callback down here, so the artefact check below
+        # runs against a line that was really rendered by `pipeline._chunk_line`.
+        on_progress(0, 1)
+        on_progress(1, 1)
+    return dyst.Transcript(wav=wav, audio_duration=audio_duration, segments=(), backend="spy")
+
+
+dyp.stt.transcribe = _order_stt_spy
 # Keyed "json", not "transcript.json": `stt.write` returns short keys and stage 6 reads
 # `paths["json"]`. A stub with the wrong keys is how the first end-to-end run of this stage
 # died on a KeyError that no test could see.
@@ -3016,6 +3092,7 @@ try:
         src,
         dyw.WorkDir(parent=work_probe),
         bundle=dyb.Bundle.open(src, output_dir=str(tmp / "order_bundle")),
+        stream=captured,
     )
     check("the real pipeline.run reached the end", True)
 except BaseException as _exc:
@@ -3027,6 +3104,7 @@ finally:
     dyp.run, dyp.frames.run, dyp.quality.run = real_run, dyfr.run, REAL_QUALITY_RUN
     dyp.probe.probe, dyp.audio.extract = real_probe_run, real_audio_run
     dyp.stt.transcribe, dyp.stt.write = real_stt_run, real_stt_write
+    dyp.stt.backend = real_stt_backend
     dyp.probe.require_supported, dyp.audio.check_coverage = real_require, real_coverage
     dyp.stt.RATE_RANGE = real_rates
 check(
@@ -3039,6 +3117,31 @@ check(
     "the frames still reach the bundle afterwards",
     len(list((tmp / "order_bundle" / "images").glob("*.png"))) == 2,
     str(sorted(q.name for q in (tmp / "order_bundle" / "images").glob("*"))),
+)
+check(
+    # #186: the line's claim and the work cannot diverge -- the resolved name is handed to
+    # `stt.transcribe`, not re-resolved inside it.
+    "the resolved backend name is handed to the work, not only printed",
+    seen.get("stt_backend") == "openai",
+    str(seen.get("stt_backend")),
+)
+check(
+    "#193: the progress lines reach the stream",
+    "           chunks 0/1" in captured.getvalue()
+    and "           chunks 1/1" in captured.getvalue(),
+    repr(captured.getvalue()[-300:]),
+)
+# The bundle holds every artefact this run published, and the note is one of them. Not the word
+# `chunk`: `stt-provenance.json` legitimately carries a `"chunking"` block (#125).
+_progress_hits = [
+    str(path.relative_to(tmp))
+    for path in (tmp / "order_bundle").rglob("*")
+    if path.is_file() and "           chunks " in path.read_text(encoding="utf-8", errors="replace")
+]
+check(
+    "#193: and no progress text enters any artefact",
+    not _progress_hits,
+    str(_progress_hits),
 )
 
 
@@ -3086,6 +3189,135 @@ check(
     "from pipeline.run"
     in (tmp / "order_bundle" / dyro.PROVENANCE_NAME).read_text(encoding="utf-8"),
     "the provenance does not explain the run_id field",
+)
+
+
+# --- #186: the start line names the backend that will actually run ---------------------
+# `auto` prefers whisper.cpp but falls back to the OpenAI-compatible route
+# (`stt/backends.py:129-134`), and the line used to say "whisper.cpp on CPU" whatever ran. The
+# interval has the same defect: `_estimate` is this host's whisper.cpp measurement
+# (`stt/core.py:46-52`), and nothing in the tree measures a hosted endpoint's rate. Driven
+# through the real `pipeline.run` -- stubbing `pipeline.run` is how the original ordering bug
+# stayed invisible -- with stages 1-2 faked and `transcribe` raising to stop the run right after
+# the line, so the line is the real code's output and not a re-implementation of it.
+class _StopAtStt(Exception):
+    pass
+
+
+def _stage3_line(name: str, target: str) -> str:
+    """The real stage-3 start line, for one stubbed backend resolution."""
+    out_stream = io.StringIO()
+    saved = (
+        dyp.probe.probe,
+        dyp.probe.require_supported,
+        dyp.audio.extract,
+        dyp.audio.check_coverage,
+        dyp.stt.backend,
+        dyp.stt.transcribe,
+    )
+    dyp.probe.probe = lambda _p: dyprobe.MediaInfo(
+        path=_p,
+        duration=180.0,
+        has_video=True,
+        has_audio=True,
+        video_codec="vp8",
+        width=16,
+        height=16,
+        audio_codec="opus",
+        sample_rate=48000,
+        channels=2,
+    )
+    dyp.probe.require_supported = lambda _i: None
+    dyp.audio.extract = lambda _p, wav: (
+        wav.write_bytes(b"RIFF"),
+        dypa.AudioArtefact(path=wav, duration=180.0, sample_rate=16000, channels=1, size_bytes=4),
+    )[1]
+    dyp.audio.check_coverage = lambda _i, _a: ""
+    dyp.stt.backend = lambda *a, **k: SimpleNamespace(
+        info=lambda: dysb.BackendInfo(name=name, target=target)
+    )
+
+    def _stop(*a, **k):
+        raise _StopAtStt()
+
+    dyp.stt.transcribe = _stop
+    try:
+        with tempfile.TemporaryDirectory() as _td:
+            source = Path(_td) / "line.mp4"
+            source.write_bytes(b"x")
+            out_dir = Path(_td) / "bundle"
+            out_dir.mkdir()
+            try:
+                dyp.run(
+                    source,
+                    dyw.WorkDir(parent=Path(_td)),
+                    bundle=dyb.Bundle.open(source, output_dir=str(out_dir), overwrite=False),
+                    stream=out_stream,
+                )
+            except _StopAtStt:
+                pass
+    finally:
+        (
+            dyp.probe.probe,
+            dyp.probe.require_supported,
+            dyp.audio.extract,
+            dyp.audio.check_coverage,
+            dyp.stt.backend,
+            dyp.stt.transcribe,
+        ) = saved
+    return out_stream.getvalue()
+
+
+whispercpp_line = _stage3_line("whispercpp", "http://100.64.0.1:10301")
+check(
+    "#186: the whisper.cpp line names the backend and its target, and keeps its own interval",
+    "starting" in whispercpp_line
+    and "whispercpp at http://100.64.0.1:10301" in whispercpp_line
+    and "expect " in whispercpp_line
+    and "on CPU" not in whispercpp_line,
+    repr(whispercpp_line),
+)
+
+hosted_line = _stage3_line("openai", "https://stt.example/v1")
+check(
+    "#186: the hosted line names the endpoint and does not borrow whisper.cpp's interval",
+    "starting" in hosted_line
+    and "openai at https://stt.example/v1" in hosted_line
+    and "expect " not in hosted_line
+    and "no rate measured for this endpoint" in hosted_line,
+    repr(hosted_line),
+)
+
+
+class _BrokenStream:
+    """A stream whose writes fail, to pin the rule that progress cannot move an outcome."""
+
+    def write(self, text):
+        raise OSError("no space left on device")
+
+    def flush(self):
+        raise OSError("no space left on device")
+
+
+_progress_recorder = _FlushRecorder()
+dyp._chunk_line(_progress_recorder)(0, 3)
+check(
+    "#193: a progress line is flushed, so a redirected log sees it before the next request",
+    _progress_recorder.getvalue() == "           chunks 0/3\n" and _progress_recorder.flushes == 1,
+    f"{_progress_recorder.getvalue()!r} flushes={_progress_recorder.flushes}",
+)
+
+_progress_raised = None
+try:
+    dyp._chunk_line(_BrokenStream())(1, 2)
+except BaseException as exc:
+    # Any escape is the failure being tested. A progress line must not decide a run's outcome:
+    # `deps.py:280`'s rule for warnings, applied to the stream (#193).
+    _progress_raised = repr(exc)
+check(
+    "#193: a progress write that fails cannot move the run's outcome",
+    _progress_raised is None,
+    str(_progress_raised),
 )
 
 
@@ -6542,7 +6774,15 @@ def _cap_stub_modules():
         return {"json": d / "transcript.json"}
 
     dyp.stt = _Stub(
-        transcribe=lambda wav, audio_duration: _Stub(anomalies=(), summary=lambda: "x"),
+        # `pipeline.run` resolves the backend before the start line (#186), so a stub that
+        # replaces the whole module needs `backend` and the two new `transcribe` keywords or
+        # the run dies before the stage this test is about.
+        backend=lambda *a, **k: SimpleNamespace(
+            info=lambda: dysb.BackendInfo(name="whispercpp", target="stub://whispercpp")
+        ),
+        transcribe=lambda wav, audio_duration, backend=None, on_progress=None: _Stub(
+            anomalies=(), summary=lambda: "x"
+        ),
         write=_cap_stt_write,
         RATE_RANGE=dysttc.RATE_RANGE,
         WARMUP_SECONDS=dysttc.WARMUP_SECONDS,
@@ -6655,7 +6895,14 @@ def _vc_stub_modules():
         return {"json": target, "txt": d / "transcript.txt"}
 
     dyp.stt = _Stub(
-        transcribe=lambda wav, audio_duration: _Stub(anomalies=(), summary=lambda: "x"),
+        # Same widening as `_cap_stub_modules`: stage 3 now resolves a backend and passes the
+        # resolved name plus the progress callback down (#186, #193).
+        backend=lambda *a, **k: SimpleNamespace(
+            info=lambda: dysb.BackendInfo(name="whispercpp", target="stub://whispercpp")
+        ),
+        transcribe=lambda wav, audio_duration, backend=None, on_progress=None: _Stub(
+            anomalies=(), summary=lambda: "x"
+        ),
         write=_vc_stt_write,
         RATE_RANGE=dysttc.RATE_RANGE,
         WARMUP_SECONDS=dysttc.WARMUP_SECONDS,
