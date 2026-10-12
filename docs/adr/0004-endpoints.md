@@ -23,23 +23,34 @@ the vault (ADR-0001 D9).
 
 ### D1 — One configuration file, environment overrides on top
 
-`~/.config/dyak/config.toml`. Precedence: **environment > file > built-in default**.
+`$DYAK_SETTINGS` if set, else `$XDG_CONFIG_HOME/dyak/settings.toml` (the shipped name is
+`settings.toml`, not `config.toml`). Precedence: **CLI flag > environment > file > built-in
+default**. The flag layer was added by #52: the file is now a real third layer, resolved in one
+place (`settings.resolve`), so a flag an operator passes always beats a value in the file.
 
-The file holds URLs, model ids and non-secret settings. Keys come from the environment only,
-so the file is safe to keep in a dotfiles repository and the vault sync cannot leak a
-credential.
+The file holds URLs, model ids and non-secret settings, as **flat keys** named after the
+environment variable lowercased (`llm_endpoint`, `vlm_model`). Credentials come from the
+environment only, so the file is safe to keep in a dotfiles repository and the vault sync
+cannot leak a credential.
 
 ### D2 — `dyak config set|get|list`, validating as it writes
 
-Validates on write: the URL parses, the key is present in the environment. Hand-editing the
-file stays supported — the CLI is a convenience, not the only path. This is the whole "fast
-configuration" deliverable.
+**Not implemented.** Hand-editing the file is the supported path today. The subcommand is
+deliberately deprioritised: #52's owner decision is "make config work and scope everything
+doctor checks", and the resolver and the breadth come first. Validating as it writes remains
+the shape if it is built.
 
 ### D3 — Vision and text are separate sections
 
 `[vision]` and `[text]`, each with its own URL, model id and key variable. They may point at
 the same endpoint. Keeping them separate means switching either one later costs one line
 rather than a refactor.
+
+**Shipped as separate flat keys, not TOML tables.** The roles are separate exactly as decided —
+`vlm_endpoint` / `vlm_model` / `vlm_key` beside `llm_endpoint` / `llm_model` / `llm_key`, with
+the vision role falling back to the text one when unset. TOML tables are out of scope (#52
+owner decision 1), so the section *shape* changed while the separation this decision is about
+did not.
 
 ### D4 — Provenance is recorded in the artefact, not in the run log
 

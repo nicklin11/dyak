@@ -61,13 +61,14 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .settings import TERMS_DIR_ENV as TERMS_ENV
+from .settings import resolve
 
 LINKED_NOTE = "note.linked.md"
 REPORT_NAME = "link.json"
 PROVENANCE_NAME = "link-provenance.json"
 ALL_ARTEFACTS = (LINKED_NOTE, REPORT_NAME, PROVENANCE_NAME)
 
-TERMS_ENV = "DYAK_TERMS_DIR"
 DEFAULT_GLOB = "Лекция*.md"
 #: The directory name under a vault that holds the courses, and the one that holds terms.
 COURSES_DIRNAME = "mscs"
@@ -82,11 +83,13 @@ def resolve_terms_dir(
 ) -> Path | None:
     """Terms directory, most specific source first.
 
-    Explicit argument, then `$DYAK_TERMS_DIR`, then `<vault>/mscs/_terms`. Returns None
-    when none of them names a directory that exists -- which the caller must report, because
-    a link stage that ran against zero terms is not a link stage that found nothing to link.
+    Explicit argument, then `$DYAK_TERMS_DIR`, then `<vault>/mscs/_terms`. The environment
+    value now also falls through to the flat `terms_dir` key in the settings file, via
+    `settings.resolve`. Returns None when none of them names a directory that exists -- which
+    the caller must report, because a link stage that ran against zero terms is not a link
+    stage that found nothing to link.
     """
-    for candidate in (explicit, os.environ.get(TERMS_ENV) or None, _under_vault(vault)):
+    for candidate in (explicit, resolve(TERMS_ENV).value, _under_vault(vault)):
         if candidate is None:
             continue
         path = Path(candidate).expanduser()

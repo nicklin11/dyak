@@ -7,7 +7,6 @@ a tool does, so `dyak --help` and each subcommand's help can.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -20,6 +19,7 @@ from . import pipeline as dyp
 from . import repair as dyr
 from . import runner
 from . import synth as dysy
+from .settings import SOURCE_DEFAULT
 from .deps import PROCESS_REQUIRES, Check, run_all, worst_code
 from .workspace import WorkDir
 
@@ -258,10 +258,13 @@ def _process(args: argparse.Namespace) -> int:
             # First run: nothing named a vault, so write the one used down to a file.
             # A default nobody can find is a default nobody will change, and this is meant
             # to be settable rather than compiled in -- which needs somewhere to set it.
+            # Nothing named a vault anywhere: not `--vault-path`, not `$DYAK_VAULT`, not the
+            # settings file. `resolve` reports which layer won, so the check is a statement
+            # about the resolver rather than a second read of the environment.
             unset_everywhere = (
                 not dyd.settings_path().is_file()
-                and not os.environ.get(dyd.VAULT_ENV, "").strip()
-                and getattr(args, "vault_path", None) is None
+                and dyd.resolve(dyd.VAULT_ENV, flag=getattr(args, "vault_path", None)).source
+                == SOURCE_DEFAULT
             )
             written = None
             if unset_everywhere:
@@ -557,14 +560,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_process.add_argument(
         "--workdir",
         metavar="DIR",
-        help="parent directory for the managed work dir (default: $TMPDIR, or $DYAK_WORKDIR)",
+        help=(
+            "parent directory for the managed work dir "
+            "(default: $DYAK_WORKDIR, the `workdir` settings key, or $TMPDIR)"
+        ),
     )
     p_process.add_argument(
         "--output-dir",
         metavar="DIR",
         help=(
-            "where to write the output bundle (default: "
-            "$XDG_STATE_HOME/dyak/<lecture>, or ~/.local/state/dyak/<lecture> if unset)"
+            "where to write the output bundle (default: $DYAK_OUTPUT_DIR, the `output_dir` "
+            "settings key, or $XDG_STATE_HOME/dyak/<lecture> — "
+            "~/.local/state/dyak/<lecture> when XDG_STATE_HOME is unset)"
         ),
     )
     p_process.add_argument(
@@ -639,9 +646,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--terms-dir",
         metavar="DIR",
         help=(
-            "atomic term notes for stage 11. Default: $DYAK_TERMS_DIR, then "
-            "<vault-path>/mscs/_terms. Without it the note is written unlinked and the "
-            "stage says so."
+            "atomic term notes for stage 11. Default: $DYAK_TERMS_DIR, the `terms_dir` "
+            "settings key, then <vault-path>/mscs/_terms. Without it the note is written "
+            "unlinked and the stage says so."
         ),
     )
     p_process.set_defaults(fn=_process)
@@ -661,8 +668,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="term vocabulary: link / index / check the vault's atomic term notes",
         description=(
             "Ported from ~/.local/bin/mscs-termlink (issue #8). The terms directory is "
-            "resolved from --terms-dir, then $DYAK_TERMS_DIR, then "
-            "<--vault-path>/mscs/_terms."
+            "resolved from --terms-dir, then $DYAK_TERMS_DIR, then the `terms_dir` settings "
+            "key, then <--vault-path>/mscs/_terms."
         ),
     )
     term_sub = p_term.add_subparsers(dest="term_cmd", required=True)

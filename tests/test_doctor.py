@@ -554,7 +554,7 @@ check(
 # `DYAK_STT` stays unset so the `auto` path is exercised, but `auto` falls back to the
 # *built-in* endpoints in `stt/backends.py` when nothing overrides them -- and a host with
 # whisper.cpp on the default 127.0.0.1:10302 makes these checks measure the host instead of
-# the code (#175). Both URL variables are honoured on the `auto` path (`_env_endpoint`),
+# the code (#175). Both URL variables are honoured on the `auto` path (`settings.resolve`),
 # so they are pointed at a port that is provably dead: bound but never `listen()`ed, which
 # the kernel refuses at once, and held for the rest of this block so no other process can
 # take it. A fixed port (e.g. :1) is not provable, and a bound-then-closed port leaves a gap

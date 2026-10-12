@@ -16,7 +16,6 @@ of every run states what is still missing and which issue tracks it.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import sys
 import time
@@ -43,6 +42,7 @@ from . import (
 )
 from . import llm
 from .bundle import Bundle
+from .settings import BBOX_SOURCE_ENV, resolve
 from .workspace import WorkDir
 
 # Re-exported, not defined here. `quality` and `caption` write progress lines that need the
@@ -487,7 +487,7 @@ def _stages(
     # looking at.
     began = time.monotonic()
     qs = quality.Settings()
-    bbox_source = os.environ.get("DYAK_BBOX_SOURCE", "geometric")
+    bbox_source = resolve(BBOX_SOURCE_ENV, default="geometric").value
     quality.resolve_estimator(bbox_source)
     qreport = quality.run(produced, work.path, settings=qs, bbox_source=bbox_source, stream=out)
 

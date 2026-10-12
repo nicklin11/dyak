@@ -26,6 +26,8 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .settings import OUTPUT_DIR_ENV, resolve
+
 NOTE_NAME = "note.md"
 AUDIT_NAME = "audit.md"
 IMAGES = "images"
@@ -143,12 +145,14 @@ class Bundle:
     ) -> Bundle:
         """Resolve the bundle root and create it.
 
-        Precedence: `--output-dir` > `DYAK_OUTPUT_DIR` > `$XDG_STATE_HOME/dyak`.
-        The name comes from the source file's stem unless an explicit directory was given,
-        in which case that directory *is* the bundle root -- `--output-dir /tmp/x` must not
-        produce `/tmp/x/1_lecture_OCS`, which is a different path than the user asked for.
+        Precedence: `--output-dir` (flag) > `DYAK_OUTPUT_DIR` > the flat `output_dir` key in
+        the settings file > `$XDG_STATE_HOME/dyak`. The environment value is not a special
+        case: `settings.resolve` decides the order and the flag is passed in as its flag
+        layer. The name comes from the source file's stem unless an explicit directory was
+        given, in which case that directory *is* the bundle root -- `--output-dir /tmp/x` must
+        not produce `/tmp/x/1_lecture_OCS`, which is a different path than the user asked for.
         """
-        explicit = output_dir or os.environ.get("DYAK_OUTPUT_DIR", "").strip() or None
+        explicit = resolve(OUTPUT_DIR_ENV, flag=output_dir).value
         if explicit:
             root = Path(explicit).expanduser().resolve()
         else:

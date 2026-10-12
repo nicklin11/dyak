@@ -26,13 +26,11 @@ an exit code.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from .. import runner
-
-ENV_BACKEND = "DYAK_STT"
+from .. import runner, settings
+from ..settings import STT_BACKEND_ENV as ENV_BACKEND
 
 DEFAULT_ENDPOINTS = {
     "whispercpp": "http://127.0.0.1:10302",
@@ -82,20 +80,18 @@ class TranscriptionBackend(Protocol):
         ...
 
 
-def _env_endpoint(name: str) -> str:
-    return os.environ.get(f"DYAK_{name.upper()}_URL", DEFAULT_ENDPOINTS[name]).rstrip("/")
-
-
 def resolve(name: str | None = None) -> TranscriptionBackend:
     """Pick a backend. `DYAK_STT` wins; otherwise whisper.cpp native, then OpenAI.
 
-    Both candidates are HTTP endpoints. `auto` probes them in that order and takes the first
+    The selection now also honours the flat `stt` key in the settings file: the explicit
+    argument is the flag layer, then the environment, then the file, then `auto`. Both
+    candidates are HTTP endpoints. `auto` probes them in that order and takes the first
     that answers, because a local whisper.cpp keeps the audio on the machine and a configured
     OpenAI-compatible endpoint does not -- so the local one is preferred when both are up.
     """
     from . import openai_compat, whispercpp
 
-    chosen = name or os.environ.get(ENV_BACKEND) or "auto"
+    chosen = settings.resolve(ENV_BACKEND, flag=name, default="auto").value
     if chosen == "auto":
         for factory in (whispercpp.HttpWhisperCpp, openai_compat.OpenAICompat):
             backend = factory()

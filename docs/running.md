@@ -4,29 +4,49 @@ This file is the full reference. [`tests/test_claims.py`](../tests/test_claims.p
 every `DYAK_*` variable the code reads and every flag and subcommand `cli.py` registers
 appears here, so the table cannot rot silently.
 
-Two sources of configuration, in the order the code consults them:
+Three sources of configuration, in the order the code consults them:
 
 1. an explicit CLI flag (`--vault-path`, `--terms-dir`, ...)
 2. the corresponding `DYAK_*` environment variable
+3. the settings file (`$DYAK_SETTINGS`, else `$XDG_CONFIG_HOME/dyak/settings.toml`)
 
-The settings file (`$DYAK_SETTINGS`, else `$XDG_CONFIG_HOME/dyak/settings.toml`) is not a
-general third layer. It is read in one place, `deps.resolve_vault`, for the one key it holds,
-`vault`; an LLM endpoint, a VLM model or an STT backend put there has no effect. The vault is
-the only setting that consults it — `--vault-path`, then `$DYAK_VAULT`, then `vault` in the
-settings file, then the built-in default — and the file is written on a first run with nothing
-configured.
+and then the built-in default. One function, `settings.resolve`, decides that order; no call
+site reads an environment variable for a setting itself. The result records which layer won
+(`flag` / `env` / `file` / `default`), which is what lets a warning or `dyak doctor` name the
+source rather than re-derive it.
 
-Real per-layer precedence across all fields is ADR-0002 territory and tracked in
-[#52](https://github.com/nicklin11/dyak/issues/52).
+The settings file is a real third layer. Keys are **flat**, and a key's name is the
+environment variable lowercased:
+
+```toml
+vault = "/path/to/vault"
+stt = "whispercpp"
+whispercpp_url = "http://127.0.0.1:10302"
+llm_endpoint = "http://127.0.0.1:10300/v1"
+llm_model = "qwen3.6-35b"
+```
+
+Every run-affecting `DYAK_*` variable in the table below can be set this way — `llm_endpoint`
+is settable in the file exactly as `DYAK_LLM_ENDPOINT` is in the environment. `DYAK_SETTINGS`
+is the one exception: it names the file being read, so the file cannot carry it. TOML tables
+(`[llm]`) are not supported; a table is dropped with a warning rather than read as a nested
+setting. A key the code does not define — including a typo like `llm_endpont` — is reported on
+stderr and not honoured, so a misspelled key fails loudly instead of falling back to a default
+in silence. The file is written on a first run with nothing configured.
+
+Precedence is the resolver's, tracked in
+[#52](https://github.com/nicklin11/dyak/issues/52). The `dyak config set|get|list` subcommand
+that ADR-0004 D2 describes is **not implemented**; editing the file by hand is the supported
+path.
 
 ## Process: environment variables
 
 | variable | read by | purpose, default |
 |---|---|---|
 | `DYAK_STT` | `stt/backends.py` | backend selection: `auto` (default), `whispercpp`, `openai`. `auto` probes whisper-cpp first, so with both configured the local one keeps the recording on the host; neither reachable exits 2 |
-| `DYAK_WHISPERCPP_URL` | `stt/backends.py` | whisper.cpp `POST /inference` endpoint; default `http://127.0.0.1:10302` |
+| `DYAK_WHISPERCPP_URL` | `stt/whispercpp.py` | whisper.cpp `POST /inference` endpoint; default `http://127.0.0.1:10302` |
 | `DYAK_WHISPERCPP_LANGUAGE` | `stt/whispercpp.py` | pin the language; unset means autodetect |
-| `DYAK_OPENAI_URL` | `stt/backends.py` | hosted STT endpoint (OpenAI-compatible `/v1/audio/transcriptions`); default same port |
+| `DYAK_OPENAI_URL` | `stt/openai_compat.py` | hosted STT endpoint (OpenAI-compatible `/v1/audio/transcriptions`); default same port |
 | `DYAK_OPENAI_KEY` | `stt/openai_compat.py` | key for the hosted STT endpoint |
 | `DYAK_OPENAI_MODEL` | `stt/openai_compat.py` | model id; default `whisper-1` |
 | `DYAK_LLM_ENDPOINT` | `llm.py`, `deps.py` | OpenAI-compatible base URL for synthesis (stage 7) and audit (stage 9) |
@@ -36,11 +56,15 @@ Real per-layer precedence across all fields is ADR-0002 territory and tracked in
 | `DYAK_VLM_MODEL` | `llm.py`, `deps.py` | as above, falls back to `DYAK_LLM_MODEL` |
 | `DYAK_VLM_KEY` | `llm.py`, `deps.py` | as above, falls back to `DYAK_LLM_KEY` |
 | `DYAK_VAULT` | `deps.py` | the notes directory the note is exported into (any folder; Obsidian is recommended) |
-| `DYAK_SETTINGS` | `deps.py` | the settings *file*, overriding the XDG path |
+| `DYAK_SETTINGS` | `settings.py` | the settings *file*, overriding the XDG path; the one variable the settings file cannot carry |
 | `DYAK_TERMS_DIR` | `link.py` | atomic term notes for stage 11; default `<vault>/mscs/_terms` |
 | `DYAK_OUTPUT_DIR` | `bundle.py` | where the bundle goes; default `$XDG_STATE_HOME/dyak/<lecture>`, or `~/.local/state/dyak/<lecture>` when `XDG_STATE_HOME` is unset |
 | `DYAK_WORKDIR` | `workspace.py` | parent of the managed work dir (scratch: `audio.wav` etc.); default `$TMPDIR` |
 | `DYAK_BBOX_SOURCE` | `pipeline.py` | stage 5 estimator name; the registry holds `geometric` (default) and `null` (`quality.ESTIMATORS`) |
+
+Every row above except `DYAK_SETTINGS` is also a flat key in the settings file — the variable
+name lowercased (`llm_endpoint`, `whispercpp_url`, ...) — and is read through `settings.resolve`
+in the module named here.
 
 `DYAK_GATEWAY_URL` is not read anywhere: the check that read it was removed (see the
 comment in `deps.py`). Standard Python/XDG variables — `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
@@ -73,7 +97,7 @@ dyak process [path] [options]
 | `--no-llm` | run without an LLM endpoint: the note is the template skeleton, not a model's. Without this flag `process` refuses to start when `DYAK_LLM_ENDPOINT` is unset or unreachable (#126) |
 | `--keep-workdir` | keep the work dir even when the run succeeds |
 | `--glossary FILE` | ASR term glossary for stages 9 and 10, in the `\| variant \| canonical \| domain \| date \|` format. Without it the term-drift rule finds nothing and the audit says so |
-| `--terms-dir DIR` | atomic term notes for stage 11. Default: `$DYAK_TERMS_DIR`, then `<vault-path>/mscs/_terms`. Without it the note is written unlinked and the stage says so |
+| `--terms-dir DIR` | atomic term notes for stage 11. Default: `$DYAK_TERMS_DIR`, the `terms_dir` settings key, then `<vault-path>/mscs/_terms`. Without it the note is written unlinked and the stage says so |
 
 ### What the progress output looks like
 
@@ -146,4 +170,4 @@ Ported from `mscs-termlink`. `link` injects wikilinks into Markdown notes (dry r
 `--write`); `index` reports which lectures mention which term and writes `_index.md` on
 `--write` (`--only-used` omits terms used nowhere); `check` runs diagnostics on the terms
 directory and the lecture notes. The terms directory resolves from `--terms-dir`, then
-`$DYAK_TERMS_DIR`, then `<--vault-path>/mscs/_terms`.
+`$DYAK_TERMS_DIR`, then the `terms_dir` settings key, then `<--vault-path>/mscs/_terms`.

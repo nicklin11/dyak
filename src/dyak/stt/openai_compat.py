@@ -18,7 +18,6 @@ rather than letting stages 5-7 fall back to guesswork.
 from __future__ import annotations
 
 import json
-import os
 import urllib.error
 import urllib.request
 import uuid
@@ -26,14 +25,14 @@ from pathlib import Path
 
 from .. import exitcodes as ec
 from .. import runner
-from .backends import DEFAULT_ENDPOINTS, BackendInfo, _env_endpoint
+from ..settings import OPENAI_KEY_ENV as ENV_KEY
+from ..settings import OPENAI_MODEL_ENV as ENV_MODEL
+from ..settings import OPENAI_URL_ENV, resolve
+from .backends import DEFAULT_ENDPOINTS, BackendInfo
 
 REMEDIATION = (
     f"set DYAK_OPENAI_URL to an OpenAI-compatible endpoint (default {DEFAULT_ENDPOINTS['openai']})"
 )
-
-ENV_KEY = "DYAK_OPENAI_KEY"
-ENV_MODEL = "DYAK_OPENAI_MODEL"
 
 CHUNK = 1 << 20
 
@@ -44,9 +43,14 @@ class OpenAICompat:
     name = "openai"
 
     def __init__(self, base_url: str | None = None) -> None:
-        self.base_url = (base_url or _env_endpoint("openai")).rstrip("/")
-        self.model = os.environ.get(ENV_MODEL, "whisper-1")
-        self.key = os.environ.get(ENV_KEY)
+        # `base_url` is the flag layer; then `$DYAK_OPENAI_URL`, then the flat `openai_url`
+        # key in the settings file, then the built-in port.
+        configured = resolve(
+            OPENAI_URL_ENV, flag=base_url, default=DEFAULT_ENDPOINTS["openai"]
+        ).value
+        self.base_url = configured.rstrip("/")
+        self.model = resolve(ENV_MODEL, default="whisper-1").value
+        self.key = resolve(ENV_KEY).value
 
     def available(self) -> bool:
         try:
