@@ -292,6 +292,42 @@ check(
 )
 stt_probe_error = None
 
+# A non-2xx answer is a verdict, not a licence to proceed (#196). `HTTPError` is raised for
+# every non-2xx status and the probe used to `return` on all of them, so a proxy answering
+# 502/503 while the container boots read as "reachable": measured against a local server,
+# `doctor` printed `[ok  ] stt` and exited 0 for 502, 503 and 500 alike. 404/405 stay
+# reachable -- a build with no /health to answer is what that branch was written for -- and
+# the sibling OpenAI-compatible probe narrows to the same shape (openai_compat.py:178-190).
+for _status in (500, 502, 503):
+    stt_probe_error = urllib.error.HTTPError(
+        "u", _status, "err", {}, io.BytesIO(b'{"error":"backend not ready"}')
+    )
+    c = dyd.check_stt()
+    check(
+        f"an HTTP {_status} from the health endpoint is exit 3, not 'reachable' (#196)",
+        c.code == ec.DEPENDENCY_FAILED and f"HTTP {_status}" in c.detail,
+        f"code={c.code} detail={c.detail}",
+    )
+stt_probe_error = urllib.error.HTTPError("u", 404, "Not Found", {}, None)
+c = dyd.check_stt()
+check(
+    "a 404 on /health is still reachable -- that build has no /health (#196)",
+    c.ok and c.code == ec.OK,
+    f"ok={c.ok} code={c.code} detail={c.detail}",
+)
+os.environ.pop(gld_stt.ENV_BACKEND, None)
+stt_probe_error = urllib.error.HTTPError(
+    "u", 502, "Bad Gateway", {}, io.BytesIO(b'{"error":"backend not ready"}')
+)
+c = dyd.check_stt()
+check(
+    "a 502 is exit 2 on the auto path, where a refused probe already is (#196)",
+    c.code == ec.MISSING_DEPENDENCY,
+    f"code={c.code} detail={c.detail}",
+)
+os.environ[gld_stt.ENV_BACKEND] = "whispercpp"
+stt_probe_error = None
+
 # The refused case is unchanged: 3 on the explicit backend, 2 on the `auto` path a default
 # install takes. Both are refusals; only the code differs, and this fix must not move either.
 stt_reachable = False

@@ -126,9 +126,23 @@ class HttpWhisperCpp:
             # (`deps.py:360`) and `vlm` probes already spend, so the three cannot disagree.
             with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT) as response:
                 response.read(1)
-        except urllib.error.HTTPError:
-            # Some builds serve /inference without /health. Not fatal.
-            return
+        except urllib.error.HTTPError as exc:
+            # 404/405 are the build with no /health to answer, which is the case this branch
+            # was written for. Every other status is the endpoint's own verdict on this
+            # request: a proxy answering 502/503 while the container boots was reported as
+            # reachable, so `doctor` printed `[ok  ] stt` and exited 0 and `_preflight` let a
+            # run start that stage 3 then failed after the audio extraction was paid for
+            # (#196). The message is the sibling probe's wording (`openai_compat.py:187`) and
+            # the body is what `run()` already reports for the same status (`:186`).
+            if exc.code in (404, 405):
+                return
+            raise runner.DependencyError(
+                name=self.name,
+                code=ec.DEPENDENCY_FAILED,
+                message=f"the endpoint answered GET /health with HTTP {exc.code}",
+                stderr=exc.read()[:2000],
+                remediation=REMEDIATION,
+            ) from exc
         except (urllib.error.URLError, OSError) as exc:
             raise runner.DependencyError(
                 name=self.name,
