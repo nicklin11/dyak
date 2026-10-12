@@ -573,9 +573,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Turn a lecture recording into a structured, audited Markdown note. "
         f"Stages {dyp.FIRST_STAGE}-{dyp.IMPLEMENTED} are implemented. process exits 0 "
         f"only when stage 12 has verified the artefacts on disk: {ec.AUDIT_FINDINGS} if "
-        f"the audit found errors, {ec.QUALITY_GATE_FAILED} if frames were soft, "
-        f"{ec.ARTEFACT_VERIFICATION_FAILED} if artefacts could not be verified, and "
-        f"{ec.DEPENDENCY_FAILED} if a dependency or vault export failed.",
+        f"the audit found errors, {ec.QUALITY_GATE_FAILED} if frames were soft or a source's "
+        f"audio and video disagreed, {ec.ARTEFACT_VERIFICATION_FAILED} if artefacts could not "
+        f"be verified, and {ec.DEPENDENCY_FAILED} if a dependency or vault export failed.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
