@@ -53,6 +53,7 @@ from pathlib import Path
 
 from .. import exitcodes as ec
 from .. import runner
+from ..deps import PROBE_TIMEOUT
 from ..settings import OPENAI_KEY_ENV as ENV_KEY
 from ..settings import OPENAI_MAX_UPLOAD_BYTES_ENV as ENV_MAX_UPLOAD
 from ..settings import OPENAI_MODEL_ENV as ENV_MODEL
@@ -167,7 +168,11 @@ class OpenAICompat:
             request = urllib.request.Request(
                 f"{self.base_url}/v1/models", headers=headers, method="GET"
             )
-            with urllib.request.urlopen(request, timeout=5.0) as response:
+            # The stage-0 probe budget, not a bare literal (#189): `deps.py:48`'s
+            # `PROBE_TIMEOUT` is what `check_llm`/`check_vlm` spend, and a hosted endpoint
+            # that is cold or slow to first byte is not "unreachable" inside that budget.
+            # This is the probe only -- `run()` keeps the caller's transcription budget.
+            with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT) as response:
                 response.read(1)
         except urllib.error.HTTPError as exc:
             # 401/404 mean the server is there. A wrong key or a build without /v1/models
