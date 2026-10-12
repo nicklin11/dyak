@@ -620,6 +620,43 @@ def run(
     # never compared them. Read the gate report once and hand it to the comparison.
     verdicts, quality_error = read_quality_gate(root)
     report.inconsistent = gate_disagreements(root, verdicts, quality_error)
+    # #211: the manifest stops being the only witness of *how many* frames the run produced.
+    # `count_frames` below stats the manifest's own rows, so it is its own denominator: a
+    # manifest cut from three rows to one reports `1/1`, the note covers one of three frames,
+    # and the run exits 0 with `uncovered 0.00` because the coverage denominator is that same
+    # short file. Stage 5 judged the frames stage 4 returned in memory (`pipeline.py:511` ->
+    # `:541`) and `quality.json` records one verdict per judged frame, so it is the witness for
+    # the count while the manifest stays the witness for *which* files must exist --
+    # `count_frames`' contract is untouched, and stage 6's own reader is the right one for the
+    # left side because `caption.align` takes its frames from the manifest too (`caption.py:373`).
+    #
+    # A trim is not this case, and that is answered rather than deferred: re-running stage 4 on
+    # a trimmed manifest reuses those times, deletes the old frames and rewrites the manifest
+    # (`frames.py:295-318`) before stage 5 judges the same set, so a self-consistent trim agrees
+    # here and stays exit 0.
+    #
+    # The honest limit: a manifest already short *before* stage 5 runs cannot be told apart from
+    # a trim, and it is also the case where every artefact agrees -- the bundle really does hold
+    # only those frames, and nothing in it can say it was ever longer.
+    #
+    # Absence is not this check's case: the manifest is in REQUIRED, so a missing one is a
+    # `MISSING` entry and exit 6 already, and listing it here too would put one artefact in both
+    # lists. `verdicts is None` is the audio-only (or unreadable-gate) case, where there is no
+    # count to compare against -- the same skip `gate_disagreements` makes.
+    manifest_path = root / frames.MANIFEST
+    if verdicts is not None and manifest_path.is_file():
+        listed = len(caption.read_manifest(manifest_path))
+        if listed != len(verdicts):
+            report.inconsistent.append(
+                {
+                    "artefact": frames.MANIFEST,
+                    "detail": f"{listed} of {len(verdicts)} frames listed",
+                    "why": (
+                        "stage 4 wrote it with the frames stage 5 then judged; a shorter one "
+                        "was changed afterwards"
+                    ),
+                }
+            )
 
     report.frames_expected, report.frames_found = count_frames(root)
     # Read back, never recomputed: the coverage figure is stage 7's measurement of what it
@@ -721,7 +758,10 @@ def provenance(report: Report) -> str:
                 f"{quality.REPORT_NAME}'s verdict for the same frame. A disagreement, or an "
                 f"unreadable {quality.REPORT_NAME}, is named in 'inconsistent' and fails the "
                 "run. This is the check that would have caught #82 from the bundle alone: the "
-                "two files were each internally consistent and contradicted each other."
+                "two files were each internally consistent and contradicted each other. "
+                f"{frames.MANIFEST} is compared with the same verdicts for the frame *count*: "
+                "stage 4 wrote it with the frames stage 5 judged, so a manifest listing fewer "
+                "of them was changed afterwards, and it is named here too (#211)."
             ),
             "run_id": report.run_id,
             "started_at": report.started_at,
