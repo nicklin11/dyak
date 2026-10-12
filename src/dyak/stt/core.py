@@ -150,7 +150,21 @@ class Transcript:
         )
 
 
-def parse(raw: bytes, *, source: str) -> tuple[tuple[Segment, ...], tuple[str, ...]]:
+def segment_dicts(raw: bytes, *, source: str) -> tuple[list, tuple[str, ...]]:
+    """The raw segment entries from either envelope, **unmodified**.
+
+    The envelope is the only thing that differs between backends, and this is the one
+    place that knows its shape -- shared by `parse` (which normalises the entries into
+    `Segment`s) and the OpenAI-compatible chunk splice (which must offset the entries
+    without discarding the raw fields `parse` does not keep, `t_dtw` among them).
+
+    Two envelopes exist and the difference is not cosmetic. Measured against the live
+    server: whisper.cpp `POST /inference` returns an **object**
+    ({task, language, duration, text, segments, ...}); a bare **array** is what some
+    servers and proxies return instead. The segment contents are the same
+    (`words` with word/start/end/t_dtw/probability, float seconds); only the wrapper
+    differs. Guessing one shape would have failed against the other.
+    """
     try:
         payload = json.loads(raw.decode("utf-8", errors="replace"))
     except json.JSONDecodeError as exc:
@@ -162,15 +176,9 @@ def parse(raw: bytes, *, source: str) -> tuple[tuple[Segment, ...], tuple[str, .
             remediation="run the backend by hand to see what it prints",
         ) from exc
 
-    # Two envelopes exist and the difference is not cosmetic. Measured against the live
-    # server: whisper.cpp `POST /inference` returns an **object**
-    # ({task, language, duration, text, segments, ...}); a bare **array** is what some
-    # servers and proxies return instead. The segment contents are the same
-    # (`words` with word/start/end/t_dtw/probability, float seconds); only the wrapper
-    # differs. Guessing one shape would have failed against the other.
-    envelope = "array"
+    anomalies: list[str] = []
     if isinstance(payload, dict):
-        envelope = "object"
+        anomalies.append(f"payload arrived as an object with a 'segments' key ({source})")
         segments_raw = payload.get("segments")
         if segments_raw is None:
             # Timings were never returned. One segment carrying the whole text is honest
@@ -190,11 +198,14 @@ def parse(raw: bytes, *, source: str) -> tuple[tuple[Segment, ...], tuple[str, .
                 "[...]; check the backend build"
             ),
         )
+    return payload, tuple(anomalies)
+
+
+def parse(raw: bytes, *, source: str) -> tuple[tuple[Segment, ...], tuple[str, ...]]:
+    payload, envelope_anomalies = segment_dicts(raw, source=source)
 
     segments: list[Segment] = []
-    anomalies: list[str] = []
-    if envelope == "object":
-        anomalies.append(f"payload arrived as an object with a 'segments' key ({source})")
+    anomalies: list[str] = list(envelope_anomalies)
     previous_end = -1.0
 
     for index, item in enumerate(payload):

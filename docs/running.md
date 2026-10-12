@@ -49,6 +49,7 @@ path.
 | `DYAK_OPENAI_URL` | `stt/openai_compat.py` | hosted STT endpoint (OpenAI-compatible `/v1/audio/transcriptions`). **No built-in default** (#95): unset means "not configured", not the whisper.cpp port |
 | `DYAK_OPENAI_KEY` | `stt/openai_compat.py` | key for the hosted STT endpoint |
 | `DYAK_OPENAI_MODEL` | `stt/openai_compat.py` | model id; default `whisper-1` |
+| `DYAK_OPENAI_MAX_UPLOAD_BYTES` | `stt/openai_compat.py` | per-upload ceiling of the hosted STT route, in bytes; a longer wav is sliced into chunks below it and their word timings spliced, with the sample bytes copied verbatim. Default `26214400` (25 MiB, the documented hosted limit). Bytes, not a unit-suffixed string: `25M` would have to guess between 25,000,000 and 26,214,400, and a wrong guess is the request that exceeds the limit |
 | `DYAK_LLM_ENDPOINT` | `llm.py`, `deps.py` | OpenAI-compatible base URL for synthesis (stage 7) and audit (stage 9) |
 | `DYAK_LLM_MODEL` | `llm.py`, `deps.py` | model id sent in the request |
 | `DYAK_LLM_KEY` | `llm.py` | optional; unset means no `Authorization` header |
