@@ -1029,3 +1029,25 @@ Two backends remain, with opposite trust properties: a local whisper.cpp keeps t
 on the machine; an OpenAI-compatible endpoint sends both audio and transcripts off it. The
 `stt` check prints which one is active and states which of the two is in force. Previously the
 trust boundary was inferable only by reading this ADR.
+
+## 2026-10-12 — D2 amended: the STT endpoint has no built-in default (#95)
+
+The code shipped `DEFAULT_ENDPOINTS = {"whispercpp": "http://127.0.0.1:10302", "openai":
+"http://127.0.0.1:10302"}` and passed it as the last `resolve()` layer. Both entries are the
+**raw container port**: no auto-start, no wake-on-first-request, and no `_Heartbeat` to
+refresh the marker `whisper-idle-stop.timer` reads. An operator who accepted the default got
+exactly the coincidence #62 measured — a 300 s reclaim mid-request, survived only when the
+request happened to route through shipboard's proxy on `100.64.0.1:10301`, which does refresh
+the marker. The default was therefore not a default in any useful sense: it named a target
+whose lifecycle this project does not control.
+
+**The default is removed, not replaced.** An unset URL is now its own state — *not
+configured* — distinct from *configured and unreachable*, which `TranscriptionBackend.check()`
+already required. An unconfigured backend fails before opening a socket, so `auto` never
+probes `127.0.0.1:10302`; the error names `DYAK_WHISPERCPP_URL` (or the `whispercpp_url`
+settings key) and the supported proxy. `doctor`'s failure path carries the raw-port-vs-proxy
+distinction and the 300 s reclaim.
+
+`WHISPER_REQUEST_TIMEOUT` (client-side) and the timer itself are out of scope: the timer
+lives in shipboard. This amendment is about what *dyak* defaults to and what *dyak* tells the
+operator. Tracked as #95; the measured history is #62.

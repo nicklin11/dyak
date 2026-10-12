@@ -28,10 +28,11 @@ from .. import runner
 from ..settings import OPENAI_KEY_ENV as ENV_KEY
 from ..settings import OPENAI_MODEL_ENV as ENV_MODEL
 from ..settings import OPENAI_URL_ENV, resolve
-from .backends import DEFAULT_ENDPOINTS, BackendInfo
+from .backends import BackendInfo
 
 REMEDIATION = (
-    f"set DYAK_OPENAI_URL to an OpenAI-compatible endpoint (default {DEFAULT_ENDPOINTS['openai']})"
+    "set DYAK_OPENAI_URL (or the openai_url settings key) to an OpenAI-compatible "
+    "/v1/audio/transcriptions endpoint"
 )
 
 CHUNK = 1 << 20
@@ -44,11 +45,11 @@ class OpenAICompat:
 
     def __init__(self, base_url: str | None = None) -> None:
         # `base_url` is the flag layer; then `$DYAK_OPENAI_URL`, then the flat `openai_url`
-        # key in the settings file, then the built-in port.
-        configured = resolve(
-            OPENAI_URL_ENV, flag=base_url, default=DEFAULT_ENDPOINTS["openai"]
-        ).value
-        self.base_url = configured.rstrip("/")
+        # key in the settings file. No built-in layer (#95): an unset URL is "not
+        # configured", not a probe of the whisper.cpp container port.
+        resolved = resolve(OPENAI_URL_ENV, flag=base_url)
+        self.configured = resolved.value is not None
+        self.base_url = (resolved.value or "").rstrip("/")
         self.model = resolve(ENV_MODEL, default="whisper-1").value
         self.key = resolve(ENV_KEY).value
 
@@ -62,7 +63,7 @@ class OpenAICompat:
     def info(self) -> BackendInfo:
         return BackendInfo(
             name=self.name,
-            target=self.base_url,
+            target=self.base_url or "(not configured)",
             detail=f"OpenAI-compatible /v1/audio/transcriptions, model={self.model}",
             notes=(
                 "no API key configured" if not self.key else "API key present",
@@ -71,6 +72,13 @@ class OpenAICompat:
         )
 
     def check(self) -> None:
+        if not self.configured:
+            raise runner.DependencyError(
+                name=self.name,
+                code=ec.MISSING_DEPENDENCY,
+                message="the OpenAI-compatible STT endpoint is not configured",
+                remediation=REMEDIATION,
+            )
         if not self.base_url.startswith(("http://", "https://")):
             raise runner.DependencyError(
                 name=self.name,

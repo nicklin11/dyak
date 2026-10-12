@@ -484,11 +484,10 @@ check(
 # Direction 1: every `DYAK_*` name that appears as a *string constant* in the
 # source must appear in `docs/running.md`. Constants, not textual grep: a
 # comment (the dead `DYAK_GATEWAY_URL` in `deps.py:377`) is not a live
-# variable, and the docstrings that name one describe a real read. The one
-# dynamic name, `f"DYAK_{name.upper()}_URL"`, resolves to `DYAK_OPENAI_URL`
-# and `DYAK_WHISPERCPP_URL` against `DEFAULT_ENDPOINTS`; both also surface as
-# literals in error messages the code can emit, but they are added explicitly so
-# the set does not depend on the phrasing of a message.
+# variable, and the docstrings that name one describe a real read. There is no
+# dynamically built name any more: #95 removed `DEFAULT_ENDPOINTS`, so
+# `DYAK_OPENAI_URL` and `DYAK_WHISPERCPP_URL` are ordinary constants in
+# `settings.py` and the constant harvest below already sees both.
 RUNNING = (REPO / "docs" / "running.md").read_text(encoding="utf-8")
 
 live_vars: set[str] = set()
@@ -497,11 +496,6 @@ for src_path in sorted((REPO / "src" / "dyak").rglob("*.py")):
     for node in ast.walk(src_tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             live_vars.update(re.findall(r"DYAK_[A-Z_]+", node.value))
-# the dynamically built names, matched against `DEFAULT_ENDPOINTS` keys
-BACKENDS_SRC = (REPO / "src" / "dyak" / "stt" / "backends.py").read_text(encoding="utf-8")
-backend_names = re.findall(r'^\s{4}"(\w+)":\s*"http', BACKENDS_SRC, flags=re.M)
-for backend in backend_names:
-    live_vars.add(f"DYAK_{backend.upper()}_URL")
 
 missing_from_docs = sorted(v for v in live_vars if v not in RUNNING)
 check(

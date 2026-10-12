@@ -30,12 +30,8 @@ from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from .. import runner, settings
+from ..settings import OPENAI_URL_ENV, WHISPERCPP_URL_ENV
 from ..settings import STT_BACKEND_ENV as ENV_BACKEND
-
-DEFAULT_ENDPOINTS = {
-    "whispercpp": "http://127.0.0.1:10302",
-    "openai": "http://127.0.0.1:10302",
-}
 
 
 @dataclass(frozen=True)
@@ -80,6 +76,30 @@ class TranscriptionBackend(Protocol):
         ...
 
 
+#: The #95 remediation tail, shared by both `auto` failures. One string, so the raw-port
+#: trap is named identically whether nothing is configured or the configured endpoint is
+#: down -- the operator reaches `doctor` through either door and needs the same reason.
+_PROXY_TRAP = (
+    "the supported target is the shipboard proxy on http://100.64.0.1:10301, which "
+    "refreshes the idle marker, unlike a raw container port such as 127.0.0.1:10302, "
+    "reclaimed after 300 s by whisper-idle-stop.timer"
+)
+
+
+def _endpoint_configured() -> bool:
+    """Whether a flag/env/file layer supplied an STT URL at all (#95).
+
+    `auto` has two failures that are both exit 2 but send the operator to different places:
+    *nothing is configured*, and *something is configured but down*. The backend factories
+    resolve the URL themselves; this asks the same resolver the same question the `auto`
+    path can ask, so the two answers cannot diverge. Neither call passes a flag because
+    `auto` constructs the backends with no argument -- there is no flag layer to reach.
+    """
+    return bool(
+        settings.resolve(WHISPERCPP_URL_ENV).value or settings.resolve(OPENAI_URL_ENV).value
+    )
+
+
 def resolve(name: str | None = None) -> TranscriptionBackend:
     """Pick a backend. `DYAK_STT` wins; otherwise whisper.cpp native, then OpenAI.
 
@@ -88,6 +108,12 @@ def resolve(name: str | None = None) -> TranscriptionBackend:
     candidates are HTTP endpoints. `auto` probes them in that order and takes the first
     that answers, because a local whisper.cpp keeps the audio on the machine and a configured
     OpenAI-compatible endpoint does not -- so the local one is preferred when both are up.
+
+    **There is no built-in endpoint (#95).** An unset URL means "not configured", not
+    "probe `127.0.0.1:10302`": that was a raw container port with no auto-start, and the
+    idle timer reclaimed it after 300 s -- exactly the coincidence #62 measured. An
+    unconfigured backend fails its own `check()` before any socket is opened, so `auto`
+    never touches a port nobody started.
     """
     from . import openai_compat, whispercpp
 
@@ -97,14 +123,27 @@ def resolve(name: str | None = None) -> TranscriptionBackend:
             backend = factory()
             if backend.available():
                 return backend
+        if not _endpoint_configured():
+            raise runner.DependencyError(
+                name="stt",
+                code=2,
+                message="the STT endpoint is not configured: no whisper.cpp or "
+                "OpenAI-compatible URL is set in any layer",
+                remediation=(
+                    "set DYAK_WHISPERCPP_URL (or whispercpp_url in the settings file) to a "
+                    f"whisper.cpp /inference endpoint -- {_PROXY_TRAP} -- or set "
+                    "DYAK_OPENAI_URL for an OpenAI-compatible endpoint"
+                ),
+            )
         raise runner.DependencyError(
             name="stt",
             code=2,
             message="no transcription backend is reachable; set DYAK_STT to one of "
             "whispercpp, openai",
             remediation=(
-                "start whisper.cpp and set DYAK_WHISPERCPP_URL, or point "
-                "DYAK_OPENAI_URL at an OpenAI-compatible endpoint"
+                "start whisper.cpp and set DYAK_WHISPERCPP_URL (or whispercpp_url in the "
+                f"settings file) -- {_PROXY_TRAP} -- or point DYAK_OPENAI_URL at an "
+                "OpenAI-compatible endpoint"
             ),
         )
 

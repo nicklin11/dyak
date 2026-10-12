@@ -164,6 +164,12 @@ def check_stt() -> Check:
     trust properties -- a local whisper.cpp keeps the lecture on this machine, an
     OpenAI-compatible endpoint does not -- and an operator should not have to read the README
     to learn that their recording left the host.
+
+    The failure path carries the backend's own remediation, which is where #95 puts the
+    raw-port-vs-proxy distinction: `127.0.0.1:10302` is the container with no auto-start,
+    reclaimed after 300 s by `whisper-idle-stop.timer`, while the shipboard proxy on
+    `http://100.64.0.1:10301` refreshes the idle marker. An unset URL is a third state --
+    "not configured" -- and the backend reports that too, without probing the dead port.
     """
     # `resolve` raises when nothing answers (#126). That is this check's verdict, not a crash.
     try:

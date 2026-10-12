@@ -21,7 +21,7 @@ environment variable lowercased:
 ```toml
 vault = "/path/to/vault"
 stt = "whispercpp"
-whispercpp_url = "http://127.0.0.1:10302"
+whispercpp_url = "http://100.64.0.1:10301"
 llm_endpoint = "http://127.0.0.1:10300/v1"
 llm_model = "qwen3.6-35b"
 ```
@@ -43,10 +43,10 @@ path.
 
 | variable | read by | purpose, default |
 |---|---|---|
-| `DYAK_STT` | `stt/backends.py` | backend selection: `auto` (default), `whispercpp`, `openai`. `auto` probes whisper-cpp first, so with both configured the local one keeps the recording on the host; neither reachable exits 2 |
-| `DYAK_WHISPERCPP_URL` | `stt/whispercpp.py` | whisper.cpp `POST /inference` endpoint; default `http://127.0.0.1:10302` |
+| `DYAK_STT` | `stt/backends.py` | backend selection: `auto` (default), `whispercpp`, `openai`. `auto` probes whisper-cpp first, so with both configured the local one keeps the recording on the host; neither configured or reachable exits 2 |
+| `DYAK_WHISPERCPP_URL` | `stt/whispercpp.py` | whisper.cpp `POST /inference` endpoint. **No built-in default** (#95): unset means "not configured" (exit 2), not a probe of `127.0.0.1:10302`. The supported target is the shipboard proxy on `http://100.64.0.1:10301`, which refreshes the idle marker; a raw container port has no auto-start and is reclaimed after 300 s by `whisper-idle-stop.timer` |
 | `DYAK_WHISPERCPP_LANGUAGE` | `stt/whispercpp.py` | pin the language; unset means autodetect |
-| `DYAK_OPENAI_URL` | `stt/openai_compat.py` | hosted STT endpoint (OpenAI-compatible `/v1/audio/transcriptions`); default same port |
+| `DYAK_OPENAI_URL` | `stt/openai_compat.py` | hosted STT endpoint (OpenAI-compatible `/v1/audio/transcriptions`). **No built-in default** (#95): unset means "not configured", not the whisper.cpp port |
 | `DYAK_OPENAI_KEY` | `stt/openai_compat.py` | key for the hosted STT endpoint |
 | `DYAK_OPENAI_MODEL` | `stt/openai_compat.py` | model id; default `whisper-1` |
 | `DYAK_LLM_ENDPOINT` | `llm.py`, `deps.py` | OpenAI-compatible base URL for synthesis (stage 7) and audit (stage 9) |

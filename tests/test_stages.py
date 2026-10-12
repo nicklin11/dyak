@@ -868,8 +868,13 @@ check("a full-length extraction does not warn", ok is None, str(ok))
 # not of the code under test: with whisper.cpp up the suite would POST the synthetic wav
 # to the real server. The backend is pinned here so the section tests one backend, and
 # autodetection is tested separately in section 9 with both branches controlled.
+#
+# #95 removed the built-in `127.0.0.1:10302` default, so the endpoint this section fakes
+# must now be named explicitly. `FAKED_NETLOCS` below matches on netloc, and this is the
+# netloc it matches -- the pin keeps the section on the fake and off the real network.
 real_stt_backend = os.environ.get("DYAK_STT")
 os.environ["DYAK_STT"] = "whispercpp"
+os.environ["DYAK_WHISPERCPP_URL"] = "http://127.0.0.1:10302"
 
 REAL_SEGMENTS = [
     {
@@ -2116,6 +2121,9 @@ check(
 )
 
 # -- OpenAI-compatible: the envelope differs, the segments do not -----------------
+# #95 removed the built-in endpoint default, so this backend must be named explicitly to be
+# "configured". `urlopen` is replaced below, so the value only has to make it configured.
+os.environ["DYAK_OPENAI_URL"] = "http://127.0.0.1:10302"
 http = FakeHTTP(
     [b"ok", json.dumps({"task": "transcribe", "text": "x", "segments": _http_segment}).encode()]
 )
