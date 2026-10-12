@@ -7325,14 +7325,18 @@ with tempfile.TemporaryDirectory() as _vc_td:
     _vc_prev_chat = dyle.chat
     dyle.chat = _vc_chat
 
+    _vc_streams: list[io.StringIO] = []
+
     def _vc_pass() -> int:
         _vc_calls.clear()
+        stream = io.StringIO()
+        _vc_streams.append(stream)
         try:
             REAL_PIPELINE_RUN(
                 _vc_src,
                 dyw.WorkDir(keep=False, parent=_vc_root),
                 bundle=dyb.Bundle.open(_vc_src, output_dir=str(_vc_out), overwrite=False),
-                stream=io.StringIO(),
+                stream=stream,
             )
         except _StopAfterCaption:
             pass
@@ -7340,8 +7344,10 @@ with tempfile.TemporaryDirectory() as _vc_td:
 
     try:
         _vc_cold = _vc_pass()
-        # The bundle now holds captions.json. A second run clears the root first, which is
-        # exactly what used to take the cache away before stage 6 could read it.
+        # The bundle now holds captions.json. A second run clears the root first -- which is
+        # exactly what used to take the cache away before stage 6 could read it -- and this
+        # run's own stream says so. The clear itself is pinned by the #219 section below; what
+        # this asserts is that it happened before stage 6 read the copy.
         _vc_warm = _vc_pass()
     finally:
         dyle.chat = _vc_prev_chat
@@ -7378,6 +7384,193 @@ with tempfile.TemporaryDirectory() as _vc_td:
         )
         >= 3,
         "the warm run lost the alignment",
+    )
+    check(
+        # #219: the claim this section made in a comment -- "a second run clears the root
+        # first" -- asserted on the stream `pipeline.run` wrote, not inferred from the cache
+        # surviving. Delete `bundle.clear_root()` from `pipeline.run` and this goes red.
+        "#121/#219: the warm run cleared the first run's root before stage 6 read the cache",
+        "bundle    cleared" in _vc_streams[1].getvalue(),
+        repr(_vc_streams[1].getvalue()[:300]),
+    )
+
+
+# --- #219: the run-level root clear is pinned ------------------------------------------
+# The clear is correct and was unpinned. `pipeline.run` calls `bundle.clear_root()` before
+# anything is written (`pipeline.py:409`), and nothing failed if that line went: the #121 test
+# above copies the caption cache before the clear, the stale-`audit.json` test below is
+# deliberately independent of it ("even with the clear deliberately skipped"), and
+# `tests/test_claims.py:839-845` is about the `RUN_ARTEFACTS` constant. So "a second run clears
+# the root first" was a comment with no assertion behind it.
+#
+# The pin is the case the clear exists for. Run 1 with the LLM synthesizer publishes
+# `synth-llm-transcript.json` (`synth.py:827-828`); run 2 uses the template synthesizer, which
+# records no calls and writes no transcript. Run 2's root must therefore not hold run 1's file
+# -- and run 2's own record (`report.json`'s `superseded_by_this_run`, from `pipeline.py:718`)
+# must name it. Stages 1-6 are the stubs above; 7-11 are the smallest fakes that let the run
+# reach stage 12, because `report.json` is what carries the record. Stage 12 is real -- a
+# stubbed one would assert the stub.
+_cr_llm = [False]
+
+
+def _cr_synth_run(captions, txt, source, sdir, *, config=None, title="", stream=None):
+    """Stage 7. The LLM synthesizer records its calls; the template one records none."""
+    sdir = Path(sdir)
+    sdir.mkdir(parents=True, exist_ok=True)
+    (sdir / dysy.NOTE_NAME).write_text("# note\n", encoding="utf-8")
+    for name in (dysy.REPORT_NAME, dysy.PROVENANCE_NAME):
+        (sdir / name).write_text("{}", encoding="utf-8")
+    if _cr_llm[0]:
+        (sdir / dysy.LLM_TRANSCRIPT_NAME).write_text("[]", encoding="utf-8")
+    return _Stub(
+        synthesizer="llm" if _cr_llm[0] else "template",
+        markdown="# note\n",
+        filled=1,
+        degraded=False,
+    )
+
+
+def _cr_lint_run(note, images, ldir, *, stream=None):
+    ldir = Path(ldir)
+    ldir.mkdir(parents=True, exist_ok=True)
+    for name in (dyln.REPORT_NAME, dyln.PROVENANCE_NAME):
+        (ldir / name).write_text("{}", encoding="utf-8")
+    return _Stub(summary=lambda: "0 findings")
+
+
+def _cr_audit_run(note, txt, adir, *, glossary_path=None, config=None, stream=None):
+    adir = Path(adir)
+    adir.mkdir(parents=True, exist_ok=True)
+    for name in dyau.ALL_ARTEFACTS:
+        (adir / name).write_text("{}", encoding="utf-8")
+    return _Stub(summary=lambda: "0 findings")
+
+
+def _cr_repair_run(
+    note, audit_path, rdir, *, glossary_path=None, lint_report_path=None, stream=None
+):
+    rdir = Path(rdir)
+    rdir.mkdir(parents=True, exist_ok=True)
+    for name in (dyrep.REPAIRED_NOTE, dyrep.REPORT_NAME, dyrep.PROVENANCE_NAME):
+        (rdir / name).write_text("{}", encoding="utf-8")
+    return _Stub(summary=lambda: "0 repairs")
+
+
+def _cr_link_run(note, ldir, *, terms_dir=None, stream=None):
+    ldir = Path(ldir)
+    ldir.mkdir(parents=True, exist_ok=True)
+    for name in dylk.ALL_ARTEFACTS:
+        (ldir / name).write_text("{}", encoding="utf-8")
+    return _Stub(summary=lambda: "0 links")
+
+
+with tempfile.TemporaryDirectory() as _cr_td:
+    _cr_root = Path(_cr_td)
+    _cr_src = _cr_root / "lecture.mp4"
+    _cr_src.write_bytes(b"x")
+    _cr_out = _cr_root / "bundle"
+    _cr_out.mkdir()
+    _cr_env = {k: os.environ.get(k) for k in ("DYAK_VLM_ENDPOINT", "DYAK_VLM_MODEL")}
+    os.environ["DYAK_VLM_ENDPOINT"] = "http://vision.invalid/v1"
+    os.environ["DYAK_VLM_MODEL"] = "fake-vision"
+    _cr_real = (
+        dyp.probe,
+        dyp.audio,
+        dyp.stt,
+        dyp.frames,
+        dyp.quality,
+        dyp.caption,
+        dyp.synth,
+        dyp.lint,
+        dyp.audit,
+        dyp.repair,
+        dyp.link,
+    )
+    _vc_stub_modules()
+    # `pipeline.synth` is the module object, so the stub has to carry the names `pipeline.py`
+    # reads off it -- `NOTE_NAME`, `STAGE7_ARTEFACTS`, `LLM_TRANSCRIPT_NAME`, `SECTIONS` --
+    # not just `run`. `report.py` imports `synth` itself and keeps reading the real one.
+    dyp.synth = _Stub(
+        run=_cr_synth_run,
+        NOTE_NAME=dysy.NOTE_NAME,
+        LLM_TRANSCRIPT_NAME=dysy.LLM_TRANSCRIPT_NAME,
+        STAGE7_ARTEFACTS=dysy.STAGE7_ARTEFACTS,
+        SECTIONS=dysy.SECTIONS,
+    )
+    dyp.lint = _Stub(
+        run=_cr_lint_run, REPORT_NAME=dyln.REPORT_NAME, PROVENANCE_NAME=dyln.PROVENANCE_NAME
+    )
+    dyp.audit = _Stub(
+        run=_cr_audit_run, REPORT_NAME=dyau.REPORT_NAME, ALL_ARTEFACTS=dyau.ALL_ARTEFACTS
+    )
+    dyp.repair = _Stub(
+        run=_cr_repair_run,
+        REPAIRED_NOTE=dyrep.REPAIRED_NOTE,
+        REPORT_NAME=dyrep.REPORT_NAME,
+        PROVENANCE_NAME=dyrep.PROVENANCE_NAME,
+    )
+    dyp.link = _Stub(
+        run=_cr_link_run,
+        ALL_ARTEFACTS=dylk.ALL_ARTEFACTS,
+        LINKED_NOTE=dylk.LINKED_NOTE,
+        resolve_terms_dir=dylk.resolve_terms_dir,
+    )
+    _cr_prev_chat = dyle.chat
+    dyle.chat = _vc_chat
+
+    def _cr_pass(llm: bool) -> dict:
+        _cr_llm[0] = llm
+        REAL_PIPELINE_RUN(
+            _cr_src,
+            dyw.WorkDir(keep=False, parent=_cr_root),
+            bundle=dyb.Bundle.open(_cr_src, output_dir=str(_cr_out), overwrite=False),
+            stream=io.StringIO(),
+        )
+        return json.loads((_cr_out / dyro.REPORT_NAME).read_text(encoding="utf-8"))
+
+    _cr_error = ""
+    _cr_first: dict = {}
+    _cr_second: dict = {}
+    _cr_had_transcript = False
+    try:
+        _cr_first = _cr_pass(llm=True)
+        _cr_had_transcript = (_cr_out / dysy.LLM_TRANSCRIPT_NAME).is_file()
+        _cr_second = _cr_pass(llm=False)
+    except BaseException as _cr_exc:
+        # A raise is a red check, not a dead suite: the message goes into both details below.
+        _cr_error = repr(_cr_exc)
+    finally:
+        dyle.chat = _cr_prev_chat
+        for _key, _value in _cr_env.items():
+            if _value is None:
+                os.environ.pop(_key, None)
+            else:
+                os.environ[_key] = _value
+        (
+            dyp.probe,
+            dyp.audio,
+            dyp.stt,
+            dyp.frames,
+            dyp.quality,
+            dyp.caption,
+            dyp.synth,
+            dyp.lint,
+            dyp.audit,
+            dyp.repair,
+            dyp.link,
+        ) = _cr_real
+    check(
+        "#219: run 1 (LLM synthesizer) published the transcript, and cleared nothing",
+        _cr_had_transcript and _cr_first.get("superseded_by_this_run") == [],
+        f"transcript={_cr_had_transcript} "
+        f"superseded={_cr_first.get('superseded_by_this_run')!r} error={_cr_error}",
+    )
+    check(
+        "#219: a template re-run clears the previous run's transcript, and names it",
+        not (_cr_out / dysy.LLM_TRANSCRIPT_NAME).is_file()
+        and dysy.LLM_TRANSCRIPT_NAME in _cr_second.get("superseded_by_this_run", []),
+        f"present={(_cr_out / dysy.LLM_TRANSCRIPT_NAME).is_file()} "
+        f"superseded={_cr_second.get('superseded_by_this_run')!r} error={_cr_error}",
     )
 
 

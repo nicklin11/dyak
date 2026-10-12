@@ -222,9 +222,11 @@ class Bundle:
         directory per test, so the bundle is never dirty when the tests look at it.
 
         Only names in `RUN_ARTEFACTS` are removed. `--output-dir DIR` makes `DIR` the bundle
-        root, and a user who points it at a directory holding anything of their own keeps it:
-        this is deliberately narrower than `overwrite=True`, which `rmtree`s the whole thing.
-        Directories are never touched, so `images/` is left to `clear_images`.
+        root, and a user who points it at a directory holding anything of their own keeps it.
+        `overwrite=True` is not wider than this: `Bundle.open` calls `clear_root` and then
+        `clear_images` (`:165-171`), so the flag is these two rules and nothing else -- there
+        is no `rmtree` anywhere in this module. Directories are never touched, so `images/` is
+        left to `clear_images`.
         """
         if not self.root.is_dir():
             return []

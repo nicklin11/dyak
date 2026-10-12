@@ -93,7 +93,7 @@ dyak process [path] [options]
 | `path` | video or audio file |
 | `--workdir DIR` | parent directory for the managed work dir (default: `$TMPDIR`, or `DYAK_WORKDIR`) |
 | `--output-dir DIR` | where to write the output bundle (default: `$XDG_STATE_HOME/dyak/<lecture>`, or `~/.local/state/dyak/<lecture>` if unset) |
-| `--overwrite` | replace an existing output bundle instead of writing into it |
+| `--overwrite` | empty an existing output bundle's root before the run starts. Its one observable difference today: without it, `pipeline.run` copies the previous run's `captions.json` aside before the root clear (`pipeline.py:407-409`), and stage 6 reuses those captions; with it the root is already empty, so stage 6 re-captions every frame. Everything else the flag does, the run's own clear does anyway |
 | `--vault-path DIR` | copy the finished bundle into this vault; never a pipeline blocker. Defaults to the configured vault, and the run writes into it either way — use `--no-vault-export` to keep the note in the bundle only |
 | `--no-vault-export` | finish the bundle without copying it into the vault |
 | `--vault-images` | also copy `images/` into the vault. Off by default: the frames are most of the bytes (50 of 59 MiB on lecture 1) and the note refers to none of them, so they stay in the bundle as the pipeline's evidence |
