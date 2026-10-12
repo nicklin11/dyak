@@ -496,6 +496,59 @@ check(
     f"resolved at {RESOLVED_AT}, line at {STAGE3_LINE_AT}",
 )
 
+# --- #197: one renderer, one write site per loop ---------------------------------------
+#: #197: the continuation line's shape, spelled once. `pipeline._chunk_line` delegates to
+#: `stages.progress_line` and the three model-calling loops call it, so a second copy of the
+#: format string -- which is how the four callers would drift apart -- fails here.
+CONTINUATION = "           {unit} {done}/{total}"
+_continuation_in = [
+    str(path.relative_to(REPO))
+    for path in sorted((REPO / "src" / "dyak").rglob("*.py"))
+    if CONTINUATION in path.read_text(encoding="utf-8")
+]
+check(
+    "#197: the continuation line is rendered in exactly one place",
+    _continuation_in == ["src/dyak/stages.py"],
+    f"spelled in {_continuation_in}",
+)
+
+#: The call each counting loop makes, and the blocking call it must precede. The unit word is
+#: part of the claim: `sections` in two stages is the same word for the same reason -- a
+#: SECTIONS entry and a note section are both "the next section" to a reader -- and stage 6's
+#: `frames` is the frame it is about to caption.
+_LOOPS = (
+    ("caption.py", 'progress_line(out, "frames"', "reply = llm.chat("),
+    ("synth.py", 'progress_line(out, "sections"', "outcome = synthesizer.section("),
+    ("audit.py", 'progress_line(progress, "sections"', "reply = llm.chat("),
+)
+_loop_sources = {m: (REPO / "src" / "dyak" / m).read_text(encoding="utf-8") for m, _, _ in _LOOPS}
+check(
+    "#197: and every counting loop writes its line before that unit's blocking call",
+    all(
+        line in _loop_sources[m]
+        and call in _loop_sources[m]
+        and 0 <= _loop_sources[m].index(line) < _loop_sources[m].index(call)
+        for m, line, call in _LOOPS
+    ),
+    str(
+        {
+            m: (
+                _loop_sources[m].find(line),
+                _loop_sources[m].find(call),
+            )
+            for m, line, call in _LOOPS
+        }
+    ),
+)
+
+check(
+    # Stage 3's adapter, not a fourth spelling: the unit travels as an argument and the shape
+    # stays in `stages.py`.
+    "#197: and stage 3 delegates to it instead of spelling the shape again",
+    'progress_line(out, "chunks"' in PIPELINE and "           chunks " not in PIPELINE,
+    "pipeline.py still spells the continuation shape itself",
+)
+
 check(
     "the pipeline formats exactly one completion line per stage, with no stage twice",
     all(announced_counts.get(s) == 1 for s in range(gst.FIRST_STAGE, gst.IMPLEMENTED)),

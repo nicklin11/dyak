@@ -58,6 +58,7 @@ from dyak import link as dylk  # noqa: E402
 from dyak import report as dyro  # noqa: E402
 from dyak import repair as dyrep  # noqa: E402
 from dyak import stt as dyst  # noqa: E402
+from dyak import stages as dys  # noqa: E402
 from dyak import probe as dyprobe  # noqa: E402
 from dyak import runner as dyr  # noqa: E402
 from dyak import stt as dystt  # noqa: E402
@@ -3028,6 +3029,16 @@ class _FlushRecorder(io.StringIO):
         super().flush()
 
 
+def _continuation(text: str, unit: str) -> str:
+    """The last `           {unit} k/N` line in `text`, or `""` when there is none.
+
+    The #205/#206 standard needs "what the stream held at call time" to be compared, and a
+    snapshot can hold earlier units' lines; the last one is the line this call just saw.
+    """
+    lines = [line for line in text.splitlines() if line.startswith(f"           {unit} ")]
+    return lines[-1] if lines else ""
+
+
 # The stage-3 line goes here, not to the suite's stdout, so the assertions read the same bytes
 # a user's redirected log would hold.
 captured = _FlushRecorder()
@@ -3145,14 +3156,19 @@ check(
     repr(captured.getvalue()[-300:]),
 )
 # The bundle holds every artefact this run published, and the note is one of them. Not the word
-# `chunk`: `stt-provenance.json` legitimately carries a `"chunking"` block (#125).
+# `chunk`: `stt-provenance.json` legitimately carries a `"chunking"` block (#125). #197 extends
+# the same scan to the unit words stages 6, 7 and 9 use, because those stages write their lines
+# through the same renderer and their loops run inside the same bundle.
+_progress_markers = ("           chunks ", "           frames ", "           sections ")
 _progress_hits = [
-    str(path.relative_to(tmp))
+    f"{path.relative_to(tmp)}: {marker!r}"
     for path in (tmp / "order_bundle").rglob("*")
-    if path.is_file() and "           chunks " in path.read_text(encoding="utf-8", errors="replace")
+    if path.is_file()
+    for marker in _progress_markers
+    if marker in path.read_text(encoding="utf-8", errors="replace")
 ]
 check(
-    "#193: and no progress text enters any artefact",
+    "#193/#197: and no progress text enters any artefact",
     not _progress_hits,
     str(_progress_hits),
 )
@@ -3331,6 +3347,29 @@ check(
     "#193: a progress write that fails cannot move the run's outcome",
     _progress_raised is None,
     str(_progress_raised),
+)
+
+# #197: one renderer, four callers. Stage 3's adapter is pinned above; the text, the single
+# flush and the swallowed failure are pinned once here, and the per-stage blocks below pin that
+# each loop calls it before its unit's blocking call.
+_unit_recorder = _FlushRecorder()
+dys.progress_line(_unit_recorder, "frames", 0, 3)
+check(
+    "#197: the shared renderer writes one indented, prefix-free, flushed line",
+    _unit_recorder.getvalue() == "           frames 0/3\n" and _unit_recorder.flushes == 1,
+    f"{_unit_recorder.getvalue()!r} flushes={_unit_recorder.flushes}",
+)
+
+_unit_raised = None
+try:
+    dys.progress_line(_BrokenStream(), "sections", 1, 8)
+except BaseException as exc:
+    # Same rule as above, on the shared renderer rather than through stage 3's adapter.
+    _unit_raised = repr(exc)
+check(
+    "#197: and a failing unit line cannot move an outcome either",
+    _unit_raised is None,
+    str(_unit_raised),
 )
 
 
@@ -4526,15 +4565,23 @@ os.environ["DYAK_VLM_ENDPOINT"] = "http://vision.invalid/v1"
 os.environ["DYAK_VLM_MODEL"] = "fake-vision"
 
 
+# #197: what the stream held when this call started. A value sequence alone is what a write
+# deferred to the end of the loop also produces, so the stub records the stream itself and the
+# check below requires the two to agree (#205).
+_vision_stream = _FlushRecorder()
+_vision_snapshots: list[str] = []
+
+
 def _fake_vision_chat(messages, config, **kwargs):
     _seen_messages.append((messages, config))
+    _vision_snapshots.append(_vision_stream.getvalue())
     return _caption_reply()
 
 
 dyle.chat = _fake_vision_chat
 try:
     vdest = ctmp / "vision_out"
-    vreport, voutcome = dycap.run(cmanifest, ctrans, cquality, cimg, vdest, stream=io.StringIO())
+    vreport, voutcome = dycap.run(cmanifest, ctrans, cquality, cimg, vdest, stream=_vision_stream)
     vcache = json.loads((vdest / dycap.REPORT_NAME).read_text())["captions"]
     # Guard first: `all()` over an empty sequence is True, and three of these assertions
     # were vacuously green before the frames existed. Every check below states how many
@@ -4543,6 +4590,21 @@ try:
         "there is at least one frame to caption, and one was",
         len(vreport.considered) >= 2 and voutcome.captioned == len(vreport.considered),
         f"considered={len(vreport.considered)} captioned={voutcome.captioned}",
+    )
+    check(
+        # #197: stage 6's unit is a considered frame and the line is written before that
+        # frame's call, so the snapshot taken at the call site holds *this* index. A write
+        # deferred to the end of the loop holds nothing at the first call (or N/N at all of
+        # them), and this is the check that tells the two apart.
+        "stage 6 announces each frame before its call, and the count never freezes (#197)",
+        [_continuation(snap, "frames") for snap in _vision_snapshots]
+        == [
+            f"           frames {i}/{len(vreport.considered)}"
+            for i in range(len(_vision_snapshots))
+        ]
+        and len(_vision_snapshots) == len(vreport.considered),
+        f"{[_continuation(s, 'frames') for s in _vision_snapshots]} "
+        f"for {len(vreport.considered)} considered frames",
     )
     check(
         "every captioned frame carries status OK and non-empty text",
@@ -4632,6 +4694,7 @@ try:
         (vdest / dycap.REPORT_NAME).read_text(encoding="utf-8"), encoding="utf-8"
     )
     _seen_messages.clear()
+    _warm_stream = _FlushRecorder()
     _warm = dycap.run(
         cmanifest,
         ctrans,
@@ -4639,12 +4702,30 @@ try:
         cimg,
         ctmp / "warm_out",
         cache_source=_bucket / dycap.REPORT_NAME,
-        stream=io.StringIO(),
+        stream=_warm_stream,
     )
     check(
         "the cache is read from cache_source, not from the scratch destination",
         _warm[1].reused == len(_warm[0].considered) and _warm[1].captioned == 0,
         f"captioned={_warm[1].captioned} reused={_warm[1].reused} of {len(_warm[0].considered)}",
+    )
+    _warm_lines = [
+        line
+        for line in _warm_stream.getvalue().splitlines()
+        if line.startswith("           frames ")
+    ]
+    check(
+        # #197: the write is the first statement of the loop body, so a frame that leaves by
+        # the cache `continue` advances the counter too. This run issues no request at all, and
+        # the sequence still covers every considered frame -- which a write placed after the
+        # cache check could not do.
+        "a cached frame advances the counter too: the write precedes the cache check (#197)",
+        _warm_lines
+        == [
+            f"           frames {i}/{len(_warm[0].considered)}"
+            for i in range(len(_warm[0].considered))
+        ],
+        f"{_warm_lines} for {len(_warm[0].considered)} considered frames",
     )
     check(
         "and a warm run issues no requests at all, which is the whole point of the cache",
@@ -5217,6 +5298,33 @@ check(
     "the skill's brief is in the prompt under «Что в нём должно быть» (#84)",
     f"Что в нём должно быть: {dysy.SECTIONS[0][2]}" in _brief_prompt,
     _brief_prompt[:300],
+)
+
+# --- #197: stage 7 says which section it is on, before that section's call -----------------
+# `synthesise` makes one blocking call per SECTIONS entry, so the loop owns an observable unit.
+# The stub records what the stream held at call time -- a value sequence alone is what a write
+# deferred to the end of the loop also produces (#205).
+_synth_stream = _FlushRecorder()
+_synth_snapshots: list[str] = []
+
+
+class _RecordingSynth:
+    name = "recording"
+
+    def section(self, section, transcript):
+        _synth_snapshots.append(_synth_stream.getvalue())
+        return dysy.SectionBody(text="тело")
+
+
+dysy.synthesise(_WIRE, "текст", src_path, _RecordingSynth(), stream=_synth_stream)
+check(
+    # The first line is 0/8 and the sequence must reach 7/8: `before` means the last line is
+    # (N-1)/N, and a sequence that stops short is a counter that froze on some exit path.
+    "stage 7 announces each section before its call, first line 0/8 and no gap (#197)",
+    [_continuation(snap, "sections") for snap in _synth_snapshots]
+    == [f"           sections {i}/{len(dysy.SECTIONS)}" for i in range(len(_synth_snapshots))]
+    and len(_synth_snapshots) == len(dysy.SECTIONS),
+    f"{[_continuation(s, 'sections') for s in _synth_snapshots]} for {len(dysy.SECTIONS)} sections",
 )
 
 # The eight headings are the model's to write nothing about.
@@ -6080,6 +6188,78 @@ GOOD_LINE = (
 )
 
 real_chat = dyle.chat
+
+# --- #197: stage 9 says which section it is on, before that section's call -----------------
+# `tier2_critic` makes one blocking call per note section, so the loop owns an observable unit
+# even though ADR-0003's Context used to call the stage one request. The stub records what the
+# stream held at call time (#205), not just the sequence a deferred write would also produce.
+_audit_stream = _FlushRecorder()
+_audit_snapshots: list[str] = []
+_cap_stream = _FlushRecorder()
+_cap_snapshots: list[str] = []
+
+
+class _RecordingCritic:
+    def __init__(self, stream, snapshots, text="OK"):
+        self.stream = stream
+        self.snapshots = snapshots
+        self.text = text
+
+    def __call__(self, messages, config, **kw):
+        self.snapshots.append(self.stream.getvalue())
+        return dyle.Reply(
+            text=self.text,
+            model="stub",
+            prompt_tokens=1,
+            completion_tokens=1,
+            seconds=0.0,
+            attempts=1,
+        )
+
+
+_critic_cfg = dyle.Config(endpoint="http://x/v1", model="m")
+dyle.chat = _RecordingCritic(_audit_stream, _audit_snapshots)
+try:
+    _cnt, _cdrop, _ccov = dyau.tier2_critic(
+        clean_note, LECT, _critic_cfg, dyle.Transcript(), stream=_audit_stream
+    )
+finally:
+    dyle.chat = real_chat
+check(
+    "stage 9 announces each section before its call, first line 0/N and no gap (#197)",
+    [_continuation(snap, "sections") for snap in _audit_snapshots]
+    == [f"           sections {i}/{_ccov['sections']}" for i in range(len(_audit_snapshots))]
+    and len(_audit_snapshots) == _ccov["sections"] > 0,
+    f"{[_continuation(s, 'sections') for s in _audit_snapshots]} of {_ccov['sections']} sections",
+)
+
+# The cap is the exit path that makes "before" load-bearing here.
+dyle.chat = _RecordingCritic(_cap_stream, _cap_snapshots, text=GOOD_LINE)
+try:
+    _capped, _, _capcov = dyau.tier2_critic(
+        clean_note, LECT, _critic_cfg, dyle.Transcript(), limit=1, stream=_cap_stream
+    )
+finally:
+    dyle.chat = real_chat
+_cap_lines = [
+    line for line in _cap_stream.getvalue().splitlines() if line.startswith("           sections ")
+]
+check(
+    # The cap is what makes "before" load-bearing here: sections 2..N leave the loop by the cap
+    # `continue`, so only one call happens -- and a counter written after the call would stop at
+    # 1/N. The lines are read off the stream, because a skipped section makes no call for the
+    # stub to record.
+    "a section skipped by the cap still advances the counter (#197)",
+    _capcov["capped"]
+    and len(_capped) == 1
+    and [_continuation(snap, "sections") for snap in _cap_snapshots]
+    == [f"           sections 0/{_capcov['sections']}"]
+    and _cap_lines
+    == [f"           sections {i}/{_capcov['sections']}" for i in range(_capcov["sections"])],
+    f"{_cap_lines} of {_capcov['sections']} sections, capped={_capcov['capped']}, "
+    f"findings={len(_capped)}, snapshots={_cap_snapshots}",
+)
+
 dyle.chat = CriticStub(GOOD_LINE)
 try:
     trace = dyle.Transcript()

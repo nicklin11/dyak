@@ -106,9 +106,13 @@ dyak process [path] [options]
 
 ### What the progress output looks like
 
-One line per stage, printed when the stage finishes, with the seconds it took. Stage 3 is the
-exception: it announces itself *before* the transcription begins, and on the hosted route prints
-an indented `chunks k/N` line after each upload returns (#193). This is a real
+One line per stage, printed when the stage finishes, with the seconds it took. Four stages also
+write *continuation* lines while they work: stage 3 announces itself before the transcription
+begins and, on the hosted route, prints an indented `chunks k/N` after each upload returns
+(#193); stages 6, 7 and 9 print an indented `frames k/N` or `sections k/N` before each unit's
+blocking call (#197). The count is the units **examined** so far — a cached, capped or skipped
+unit still advances it, so it can pass a stage's own "reviewed" figure — and it carries no clock,
+because no rate has been measured for the vision or text endpoint. This is a real
 run — 180 s of lecture 1, seven frames — with the stages that print detail trimmed:
 
 ```
@@ -118,9 +122,12 @@ run — 180 s of lecture 1, seven frames — with the stages that print detail t
   [3/12] stt         9.1s  52 segments, 611 timed words, speech to 180.0s of 180.0s audio [whispercpp]
   [4/12] frames     12.5s  7 frames, 2.7 MiB, median gap 9s
   [5/12] quality     3.7s  7/7 frames pass (MEGE 57230-146128, threshold 38303, 7 cropped)
+           frames 0/7
   [6/12] caption   119.5s  7 frames aligned, 493 words, 0 without transcript coverage
+           sections 0/8
   [7/12] synth     327.7s  llm, 66 lines, 7/8 sections filled  DEGRADED
   [8/12] lint        0.0s  9 checks, clean
+           sections 0/8
   [9/12] audit     752.1s  4 rules, 0 errors, 7 warnings, 4 discarded, tier 2 ran, 7 findings, 4 discarded, 5/8 sections reviewed (capped at 6 findings)
   [10/12] repair      0.0s  nothing to repair
   [11/12] link        0.0s  34 terms, inserted 2 links across 1 files
@@ -130,9 +137,10 @@ run — 180 s of lecture 1, seven frames — with the stages that print detail t
 Three things about that shape are worth knowing:
 
 - **`[3/12] stt starting` is not a duplicate.** It appears before the transcription begins, and
-  has no seconds because nothing has elapsed yet. Every other stage prints exactly one line. On
-  the hosted route the indented `chunks k/N` lines appear underneath it as each upload returns;
-  those are not stage lines either.
+  has no seconds because nothing has elapsed yet. Every other stage prints exactly one line, but
+  four of them also print indented continuation lines underneath: `chunks k/N` on the hosted STT
+  route, `frames k/N` in stage 6 and `sections k/N` in stages 7 and 9, written before each
+  unit's call. Those are not stage lines either, and only each loop's first line is shown above.
 - **The gap between lines is the stage's real cost.** Stage 9 above took 752 s of a 1225 s run.
   On a full 75-minute lecture the same run spends most of its wall clock in transcription,
   frame extraction, synthesis and audit, in that order.
@@ -148,9 +156,9 @@ The run then closes with the transcript summary, the total, and the bundle path.
 dyak process lecture.mp4 > run.log 2>&1
 ```
 
-`run.log` is live. Every stage line, per-frame caption line and audit finding reaches the file
-before the next stage begins — the streams are reconfigured line-buffered at the entrypoint, so
-`tail -f run.log` tracks the run instead of showing nothing until it exits.
+`run.log` is live. Every stage line, continuation counter line, per-frame caption line and audit
+finding reaches the file before the next stage begins — the streams are reconfigured line-buffered
+at the entrypoint, so `tail -f run.log` tracks the run instead of showing nothing until it exits.
 
 This was not true until #100, and the failure was worth recording. CPython block-buffers
 `sys.stdout` in 8192-byte chunks when fd 1 is not a tty, and the pipeline flushed exactly once,

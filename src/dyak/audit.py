@@ -52,7 +52,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import llm
+from . import llm, stages
 
 REPORT_NAME = "audit.json"
 PROVENANCE_NAME = "audit-provenance.json"
@@ -555,6 +555,7 @@ def tier2_critic(
     config: llm.Config,
     llm_log: llm.Transcript,
     limit: int = 6,
+    stream=None,
 ) -> tuple[list[Finding], list[dict], dict]:
     """A zero-shot critic that is given the transcript it is auditing the note against.
 
@@ -565,7 +566,15 @@ def tier2_critic(
     Cost, stated: each request carries the section *and* the whole transcript, so the
     stage is N times the transcript in context. That is ADR-0001's own estimate for this
     stage (~106k tokens for a 90-minute lecture), not an accident of the implementation.
+
+    `stream` is appended rather than made keyword-only, so the existing positional callers
+    keep working (#197). It is the parameter, not the local `out` below -- `out` is the
+    findings list here, and `audit()`'s stream binding happens after this call.
     """
+    # The counter counts units *examined*, so on a capped audit it can reach `sections 7/8`
+    # while the result line says `5/8 sections reviewed`: the cap being visible, not a
+    # contradiction (#197).
+    progress = stream if stream is not None else sys.stdout
     sections = re.split(r"^## ", markdown, flags=re.M)[1:]
     reviewed: list[str] = []
     truncated: list[str] = []
@@ -576,7 +585,11 @@ def tier2_critic(
     # not spent the budget -- letting abstentions consume it would stop the audit reaching
     # the sections where the errors actually are.
     findings_so_far = 0
-    for part in sections:
+    for index, part in enumerate(sections):
+        # First statement of the body, before the cap and empty-body checks (#197): a section
+        # skipped by either still advances the counter, so the cap cannot freeze it. The unit
+        # is a note section, and the first line is `sections 0/N` with no interval.
+        stages.progress_line(progress, "sections", index, len(sections))
         if findings_so_far >= limit:
             skipped += 1
             continue
@@ -676,7 +689,12 @@ def audit(
     else:
         try:
             found, dropped, coverage = tier2_critic(
-                markdown, transcript, config, llm_transcript or llm.Transcript(), tier2_limit
+                markdown,
+                transcript,
+                config,
+                llm_transcript or llm.Transcript(),
+                tier2_limit,
+                stream=stream,
             )
         except llm.NotConfiguredError as exc:
             report.tier2 = f"NOT_CONFIGURED: {exc}"
