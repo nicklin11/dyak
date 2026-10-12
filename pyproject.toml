@@ -14,6 +14,20 @@ requires-python = ">=3.11"
 # incomparable, so the dependency buys the fix.
 dependencies = ["numpy>=1.26"]
 
+# The lint pin, written down here and nowhere else -- CI installs this extra
+# (`pip install -e ".[dev]"`) instead of repeating the version, so a local run and CI
+# cannot end up on different ruff builds (#166). They did: the host had 0.16.10, whose
+# output was identical on two trees the pin tells apart -- 123 findings and zero E402 on
+# both, where the pin passes one and flags a single E402 on the other. A local "ruff is
+# clean" was therefore not evidence about CI, and PR #158 merged a red Lint step on it.
+#
+# `ruff format` changes its output between releases, so an unpinned ruff also makes
+# `format --check` fail on files nobody touched -- a check that cries wolf gets
+# disabled. Bumping the pin is a deliberate act: bump it, then reformat the whole tree
+# in the same commit, so the diff is a reformat and not a surprise.
+[project.optional-dependencies]
+dev = ["ruff==0.15.20"]
+
 [project.scripts]
 dyak = "dyak.cli:main"
 

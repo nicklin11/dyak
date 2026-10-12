@@ -68,6 +68,35 @@ bundle contains and who wrote each file: [`docs/artefacts.md`](docs/artefacts.md
 | 9 | a section the model wrote was cut off at the output limit; its ending is missing |
 | 130 | interrupted by the user; work dir kept |
 
+## Development
+
+CI and a local run have to measure the same ruff, so the pin lives in `pyproject.toml`'s
+`dev` extra and nowhere else. One command runs what CI's `check` job runs:
+
+```
+tools/check.sh
+```
+
+It reads the pinned version out of `pyproject.toml`, uses a `ruff` on `PATH` only when it is
+exactly that build (otherwise it runs that same version through `pipx run --spec`), and then
+runs `ruff check`, `ruff format --check` and the five suites. `pip install -e ".[dev]"` puts
+the pinned ruff in your own environment.
+
+This matters because the two builds disagree on the same tree. On `15fef1f` the host's
+0.16.10 reports 123 findings where the pin passes; on `4a3f67e` the host still reports the
+same 123, while the pin reports one `E402` — the finding that turned CI's Lint step red. The
+host's output is identical on both, so it cannot tell the passing tree from the failing one.
+To compare two revisions, use the pinned binary on both:
+
+```
+git archive <rev> | tar -x -C /tmp/tree
+ruff check src tests --output-format=concise | sed 's/:[0-9]*:[0-9]*:/:/' | sort > /tmp/tree.txt
+comm -13 /tmp/before.txt /tmp/after.txt
+```
+
+The `git archive` extraction is the point: a working tree can carry staged or untracked
+files the revision does not have.
+
 ## Where the rest is
 
 - [`docs/`](docs/README.md) — one-line index. [`running.md`](docs/running.md) (configuration),
