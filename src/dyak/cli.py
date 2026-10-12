@@ -617,8 +617,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "where inside the vault the bundle lands, relative to it "
-            f"(default: {dyb.DEFAULT_EXPORT_SUBDIR}/). Not optional in practice: a bundle is "
-            "~188 files, and the vault root holds the user's own notes"
+            f"(default: <vault>/{dyb.DEFAULT_EXPORT_SUBDIR}/<lecture>/, one directory per "
+            "lecture, #118). Not optional in practice: a bundle is ~188 files, and the vault "
+            "root holds the user's own notes"
         ),
     )
     p_process.add_argument(

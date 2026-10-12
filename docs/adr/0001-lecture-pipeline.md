@@ -61,18 +61,25 @@ the repository description and the skill description can. Names containing `ai`,
 `auto` or `smart` were rejected — they make a promise that cannot be verified before
 running the tool, and they go stale when the backing model changes.
 
-**Amendment 2026-10-02 — renamed `dyak` → `dyak`.** The rule above is unchanged;
-only the name is. Recorded because this section previously named `dyak` as the
+**Amendment 2026-10-02 — renamed `snitchin` → `glimpse`.** The rule above is unchanged;
+only the name is. Recorded because this section previously named `snitchin` as the
 choice, and an ADR that names a different package than the repository ships is a
 document that actively misleads.
 
+**Status: historical — the package was renamed again to `dyak` (`c2824d7`), which is the
+name D1 states above and the repository ships.** The two notes below describe `glimpse`, the
+name chosen at the time, and are kept as the record of what was weighed then. A mechanical
+rename rewrote this amendment's own text: `0caec8b` applied its `snitchin` → `glimpse`
+substitution to the sentence describing that rename, and `c2824d7` applied the next one to
+what was left.
+
 Two honest notes on the new name:
 
-- It sits closer to the line the rule draws than `dyak` did. A "dyak" suggests
+- It sits closer to the line the rule draws than `snitchin` did. A "glimpse" suggests
   a partial view, and this tool produces a complete, audited note. The mitigation is
   the same one that always applied: the description, `--help` and the skill text
   carry the meaning, and they are what another agent reads first.
-- `dyak` is **taken on PyPI** ("Hierarchical visual models in C++ and Python").
+- `glimpse` is **taken on PyPI** ("Hierarchical visual models in C++ and Python").
   That is irrelevant for a `pipx install` from git, and only becomes a problem if
   the package is ever published under that name. Recorded now so the collision is not
   rediscovered later.

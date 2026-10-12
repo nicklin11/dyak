@@ -20,10 +20,12 @@ The rule these share: a hand-maintained table in prose is a claim, and the only
 thing that makes it true is a check that fails when it stops being true.
 """
 
+import argparse
 import ast
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -37,6 +39,7 @@ SAVED_ENV = _env.isolate()
 from dyak import audit  # noqa: E402
 from dyak import bundle as dyb  # noqa: E402
 from dyak import caption  # noqa: E402
+from dyak import cli as dyc  # noqa: E402
 from dyak import deps  # noqa: E402
 from dyak import exitcodes as ec  # noqa: E402
 from dyak import frames  # noqa: E402
@@ -553,6 +556,68 @@ check(
     f"only {len(registered)} names known: {sorted(registered)}",
 )
 
+# --- 8b. the --vault-subdir default the help states is the one the export uses --------
+# #183: the help rendered a bare "(default: <name>/)" -- "(default: glimpse/)" before
+# c2824d7, "(default: dyak/)" after it -- while `Bundle.export_to_vault` appended the
+# lecture name, so the help named the exact shared layout #118 removed: a shared directory
+# made the second export silently replace the first. The layout was pinned
+# (tests/test_stages.py:2748); the sentence was not, and `--help` is the surface a user
+# reads while deciding whether to pass the flag -- docs/running.md:100 states the same
+# default, and section 8 pins only the flag's name.
+
+
+def _subparser(parser: argparse.ArgumentParser, name: str) -> argparse.ArgumentParser:
+    """The parser for a subcommand. `argparse` exposes no public accessor for this."""
+    action = next(a for a in parser._actions if getattr(a, "dest", None) == "cmd")
+    return action.choices[name]
+
+
+PROCESS_PARSER = _subparser(dyc.build_parser(), "process")
+VAULT_SUBDIR_HELP = next(a.help for a in PROCESS_PARSER._actions if a.dest == "vault_subdir")
+#: Spelled out rather than derived from `DEFAULT_EXPORT_SUBDIR`: the point is that a change to
+#: the constant or to the layout fails here, so a human re-reads the help and the docs row.
+GOLDEN_SUBDIR_DEFAULT = "default: <vault>/dyak/<lecture>/, one directory per lecture, #118"
+check(
+    "--vault-subdir's help states the per-lecture default, not the bare subdir",
+    GOLDEN_SUBDIR_DEFAULT in VAULT_SUBDIR_HELP and "default: dyak/)" not in VAULT_SUBDIR_HELP,
+    VAULT_SUBDIR_HELP,
+)
+check(
+    "the subdir the help names is the one DEFAULT_EXPORT_SUBDIR is interpolated into",
+    f"<vault>/{dyb.DEFAULT_EXPORT_SUBDIR}/<lecture>/" in VAULT_SUBDIR_HELP,
+    VAULT_SUBDIR_HELP,
+)
+
+# The help's `<lecture>` is not a placeholder to be trusted: it is the claim that a bundle
+# lands in a directory of its own. `export_to_vault(subdir=None)` is the code that decides
+# that, so the claim is checked against it rather than against the sentence it came from.
+with tempfile.TemporaryDirectory() as _tmp:
+    _bundle_root = Path(_tmp) / "bundle" / "lecture-1"
+    _bundle_root.mkdir(parents=True)
+    (_bundle_root / "note.md").write_text("note", encoding="utf-8")
+    _vault = Path(_tmp) / "vault"
+    _vault.mkdir()
+    _bundle = dyb.Bundle(root=_bundle_root, artefacts={"note": _bundle_root / "note.md"})
+    _bundle.export_to_vault(_vault)
+    _landed = _vault / dyb.DEFAULT_EXPORT_SUBDIR / _bundle_root.name / "note.md"
+    # Asserted inside the `with`: outside it the temporary vault is already gone, and a
+    # missing file would read as a failed export rather than as a deleted fixture.
+    check(
+        "the per-lecture directory the help names is where export_to_vault lands a bundle",
+        _landed.is_file(),
+        f"expected {_landed}",
+    )
+
+#: Measured on the tree: `argparse`'s formatter wraps to the terminal width, and this sentence
+#: breaks after "is" at `COLUMNS=80` while it is one line at `COLUMNS=200`. So the golden
+#: substring is asserted against `action.help` (unwrapped) and this check normalises the render
+#: to prove the same string actually reaches the user.
+check(
+    "the pinned sentence reaches the rendered help",
+    GOLDEN_SUBDIR_DEFAULT in " ".join(PROCESS_PARSER.format_help().split()),
+    PROCESS_PARSER.format_help(),
+)
+
 # --- 9. bundle.RUN_ARTEFACTS is the set `clear_root` deletes ------------------------
 # `Bundle.clear_root` removes exactly the names in `RUN_ARTEFACTS` before each run, and that
 # set is written as literals in `bundle.py` because importing the stage modules there would
@@ -710,6 +775,40 @@ check(
     "the dollar-figure check actually finds figures to judge",
     len(figures) >= 4,
     f"only {len(figures)} found, so the check above guards nothing: {figures}",
+)
+
+# --- 10b. an amendment does not claim a rename to the same name --------------------
+# #182: `docs/adr/0001-lecture-pipeline.md:64` read "renamed `dyak` → `dyak`" from 0caec8b
+# until this fix. 0caec8b introduced the amendment with the names already collapsed -- it
+# applied the rename it was performing to the sentence describing it -- and c2824d7 applied
+# the next rename to what was left, so each rename made it worse and no single commit is at
+# fault.
+#
+# A grep for an old name cannot be the guard. `git grep -n glimpse --
+# docs/adr/0001-lecture-pipeline.md` returned nothing while the sentence was wrong: the
+# corrupted text contains only the name that is current. And after the fix the same file
+# *does* contain `glimpse`, so a name-presence check would fail on correct text. What is
+# checkable is the relation between two names, which needs the shape of the sentence.
+#
+# `renamed `a` → `b``, the ASCII `->` form, and the unbackticked mixes. Deliberately the
+# arrow form only: a prose rule ("renamed X to Y") would start passing on wording nobody
+# checked, which is what section 10's COST_MARKERS comment warns about. A reworded amendment
+# is caught by the companion check below instead.
+RENAME_ARROW = re.compile(r"renamed\s+`?([A-Za-z0-9_.-]+)`?\s*(?:→|->)\s*`?([A-Za-z0-9_.-]+)`?")
+renames: list[tuple[str, str, str]] = []  # (where, old, new)
+for _doc in sorted((REPO / "docs").rglob("*.md")):
+    for _old, _new in RENAME_ARROW.findall(_doc.read_text(encoding="utf-8")):
+        renames.append((str(_doc.relative_to(REPO)), _old, _new))
+self_renames = [f"{where}: {old} -> {new}" for where, old, new in renames if old == new]
+check(
+    "no document claims a package was renamed to the name it already had",
+    not self_renames,
+    "; ".join(self_renames),
+)
+check(
+    "the rename-shape check actually finds a rename to judge",
+    renames,
+    f"no `renamed X -> Y` sentence matched in docs/: {renames}",
 )
 
 # --- 11. every suite in tests/ is invoked by CI ---------------------------------------
