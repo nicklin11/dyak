@@ -278,7 +278,7 @@ def _chunk_line(out) -> Callable[[int, int], None]:
 
     Indented like the anomaly notes below it, and deliberately without a stage prefix: the
     start line already carries `[3/12]`, and a second stage-prefixed literal would break
-    `tests/test_claims.py:456`. `chunks` is the unit on the only route that reports one -- a
+    `tests/test_claims.py:459-463`. `chunks` is the unit on the only route that reports one -- a
     slice of the uploaded wav (`stt/openai_compat.py:240-267`, #125). A backend with a
     different unit needs the callback to grow one; that is #197, and nothing here invents a
     unit for a backend that has none (#193).
