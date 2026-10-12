@@ -24,6 +24,7 @@ import pathlib
 import re
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -2183,6 +2184,267 @@ check(
 # A 401 on /v1/models means the server is there with a bad key -- not "nothing listening".
 dyso.urllib.request.urlopen = FakeHTTP([urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)])
 check("a 401 on /v1/models is not fatal", dyso.OpenAICompat("http://127.0.0.1:1").check() is None)
+
+
+# -- #125: a hosted endpoint's upload ceiling, sliced rather than exceeded --------
+# 16 kHz mono 16-bit is 32 KiB/s, so a 75-minute lecture is ~140 MiB against the documented
+# 25 MB limit, and the body was assembled as one `bytes` object. The route now slices the wav
+# below a configured threshold and splices word timings. Four things are pinned here: the
+# request body is bounded by the setting, the timed-word stream survives the seam without
+# duplication, a chunk that loses its words fails loudly instead of silently, and provenance
+# distinguishes a sliced upload from a single one. The endpoint is mocked throughout.
+
+
+def pcm_wav(path: Path, seconds: float, sample_rate: int = 16000) -> Path:
+    """A real 16 kHz mono PCM wav, so the slicer has a RIFF header to read.
+
+    A ramp rather than silence: silence makes "the sample bytes were copied verbatim" true
+    for any slice, which is the claim the no-re-encode decision rests on.
+    """
+    frames = int(sample_rate * seconds)
+    data = b"".join(struct.pack("<h", (i % 30000) - 15000) for i in range(frames))
+    fmt = struct.pack("<HHIIHH", 1, 1, sample_rate, sample_rate * 2, 2, 16)
+    path.write_bytes(
+        b"RIFF"
+        + struct.pack("<I", 36 + len(data))
+        + b"WAVE"
+        + b"fmt "
+        + struct.pack("<I", 16)
+        + fmt
+        + b"data"
+        + struct.pack("<I", len(data))
+        + data
+    )
+    return path
+
+
+class ChunkHTTP:
+    """Serves the /v1/models probe, then one payload per chunk; records every request."""
+
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+        self.sent = []
+
+    def __call__(self, request, timeout=None):
+        self.sent.append(request)
+        if request.data is None:  # the check() probe, not a transcription
+            return _Response(b"ok")
+        return _Response(self.payloads.pop(0))
+
+
+def chunk_segment(text, starts, extra=()):
+    """One verbose_json segment whose words sit at `starts` seconds into its own chunk."""
+    words = [
+        {"word": f" w{i}", "start": s, "end": s + 0.05, "t_dtw": -1, "probability": 0.9}
+        for i, s in enumerate(starts)
+    ]
+    words.extend(extra)
+    return {
+        "id": 0,
+        "text": text,
+        "start": 0.0,
+        "end": max([s for s in starts] + [0.0]) + 0.05,
+        "words": words,
+    }
+
+
+def pcm_of(body: bytes) -> bytes:
+    """The PCM bytes of the wav embedded in a multipart body, per its own data size field."""
+    start = body.index(b"RIFF")
+    size = struct.unpack("<I", body[start + 40 : start + 44])[0]
+    return body[start + 44 : start + 44 + size]
+
+
+_prev_limit = os.environ.get("DYAK_OPENAI_MAX_UPLOAD_BYTES")
+_limit = 20000
+os.environ["DYAK_OPENAI_MAX_UPLOAD_BYTES"] = str(_limit)
+
+chunk_wav = pcm_wav(tmp / "lecture-125.wav", 1.0)  # 32044 bytes -> three requests at 20000
+chunk_data = chunk_wav.read_bytes()[44:]
+
+# Chunk 0's third word starts at 0.55 s, past the keep range its chunk hands to chunk 1
+# (~0.30 s): the decoder emits words at a chunk's tail, and the splice must drop that one
+# there and take the word from chunk 1 instead. That is the seam, and the overlap is the
+# reason there is a second reading of it at all.
+chunk_http = ChunkHTTP(
+    [
+        json.dumps(
+            {
+                "task": "transcribe",
+                "text": "x",
+                "segments": [
+                    chunk_segment(
+                        "one", [0.0, 0.1], [{"word": " SPILL", "start": 0.55, "end": 0.6}]
+                    )
+                ],
+            }
+        ).encode(),
+        json.dumps({"segments": [chunk_segment("two", [0.0, 0.1])]}).encode(),
+        json.dumps({"segments": [chunk_segment("three", [0.0, 0.1])]}).encode(),
+    ]
+)
+dyso.urllib.request.urlopen = chunk_http
+tr_chunked = dystt.transcribe(chunk_wav, audio_duration=1.0, backend="openai")
+_bodies = [r.data for r in chunk_http.sent if r.data is not None]
+check(
+    "a wav above the threshold is sliced into several requests",
+    len(_bodies) >= 2,
+    f"{len(_bodies)} requests",
+)
+check(
+    # The acceptance criterion is a bound on the body, not the fact that a request happened.
+    "every chunk request body is within the configured threshold",
+    all(len(body) <= _limit for body in _bodies),
+    str([len(body) for body in _bodies]),
+)
+check(
+    "no chunk body carries the whole file",
+    all(len(body) < chunk_wav.stat().st_size for body in _bodies),
+    f"file {chunk_wav.stat().st_size}, bodies {[len(b) for b in _bodies]}",
+)
+check(
+    "each chunk body is a self-contained wav with its own sizes",
+    all(body.count(b"RIFF") == 1 and pcm_of(body) for body in _bodies),
+    str([len(pcm_of(b)) for b in _bodies]),
+)
+check(
+    # No re-encode: every chunk's PCM is a verbatim slice of the source's sample bytes.
+    "the sample bytes are copied, not re-encoded",
+    all(pcm_of(body) in chunk_data for body in _bodies),
+)
+check(
+    "the whole audio is covered, first sample to last",
+    chunk_data.startswith(pcm_of(_bodies[0])) and chunk_data.endswith(pcm_of(_bodies[-1])),
+)
+
+_starts = [word.start for seg in tr_chunked.segments for word in seg.words]
+check(
+    "word timings survive the splice: every chunk contributes its kept words",
+    tr_chunked.timed_words == 6,
+    f"{tr_chunked.timed_words} timed words",
+)
+check(
+    "the spilled tail word is dropped at the seam, not duplicated",
+    " SPILL" not in [word.text for seg in tr_chunked.segments for word in seg.words],
+)
+check(
+    "the word at the seam is kept once, from the chunk that owns it",
+    len(set(round(s, 6) for s in _starts)) == len(_starts),
+    str([round(s, 4) for s in _starts]),
+)
+check(
+    "later chunks' words are offset by their chunk's start",
+    _starts == sorted(_starts) and _starts[2] > 0.25,
+    str([round(s, 4) for s in _starts]),
+)
+check(
+    "transcribe's coverage check passes on the spliced result",
+    tr_chunked.timed_words > 0 and tr_chunked.coverage > 0,
+    f"{tr_chunked.timed_words} words, coverage {tr_chunked.coverage:.3f}",
+)
+check(
+    "the raw payload keeps the server's other fields",
+    json.loads(tr_chunked.raw_payload)["segments"][0]["words"][0]["t_dtw"] == -1,
+)
+check(
+    # "a reader must be able to tell a chunked upload from a single one."
+    "provenance records the slicing, its threshold and the geometry",
+    tr_chunked.parameters["chunking"]["chunks"] == len(_bodies) >= 2
+    and tr_chunked.parameters["chunking"]["threshold_bytes"] == _limit
+    and tr_chunked.parameters["chunking"]["overlap_seconds"] > 0,
+    str(tr_chunked.parameters["chunking"]),
+)
+
+# Under the limit the route is exactly what it was: one request, the file verbatim, so a wav
+# this code cannot slice still uploads as long as it fits.
+small_wav = pcm_wav(tmp / "small-125.wav", 0.1)
+small_http = FakeHTTP([b"ok", json.dumps({"segments": [chunk_segment("one", [0.0])]}).encode()])
+dyso.urllib.request.urlopen = small_http
+tr_single = dystt.transcribe(small_wav, audio_duration=0.1, backend="openai")
+_single_posts = [r.data for r in small_http.sent if r.data is not None]
+check("a wav under the threshold is one request", len(_single_posts) == 1, str(len(_single_posts)))
+check("and its body is the file verbatim", small_wav.read_bytes() in _single_posts[0])
+check(
+    "and provenance says a single upload",
+    tr_single.parameters["chunking"]["chunks"] == 1,
+    str(tr_single.parameters["chunking"]),
+)
+
+# A server that ignores timestamp_granularities for one chunk while another chunk has words
+# would slip past the whole-result coverage check, and the loss would be silent. This is the
+# failure mode the per-chunk check exists for.
+bad_http = ChunkHTTP(
+    [
+        json.dumps({"segments": [chunk_segment("one", [0.0])]}).encode(),
+        json.dumps({"text": "no timings at all"}).encode(),
+        json.dumps({"segments": [chunk_segment("three", [0.0])]}).encode(),
+    ]
+)
+dyso.urllib.request.urlopen = bad_http
+exc = raises(dystt.transcribe, chunk_wav, audio_duration=1.0, backend="openai")
+check(
+    "a chunk with segments but no words -> exit 3",
+    exc is not None and exc.code == ec.DEPENDENCY_FAILED,
+    f"{getattr(exc, 'code', None)}",
+)
+check(
+    "and the failure names the chunk that lost them",
+    exc is not None and "chunk 2 of 3" in exc.message,
+    getattr(exc, "message", ""),
+)
+check(
+    "and the remediation names the ignored parameter",
+    exc is not None and "timestamp_granularities" in exc.remediation,
+    getattr(exc, "remediation", ""),
+)
+
+# Above the threshold and not a PCM wav, the route must refuse rather than post 140 MiB and
+# let the endpoint answer with an opaque HTTP error.
+junk_wav = tmp / "junk-125.wav"
+junk_wav.write_bytes(b"RIFF" + b"\0" * 30000)
+dyso.urllib.request.urlopen = FakeHTTP([b"ok"])
+exc = raises(dystt.transcribe, junk_wav, audio_duration=1.0, backend="openai")
+check(
+    "an unsliceable wav above the threshold -> exit 3, not a 140 MiB body",
+    exc is not None and exc.code == ec.DEPENDENCY_FAILED,
+    f"{getattr(exc, 'code', None)}",
+)
+check(
+    "and the message says why it cannot be sliced",
+    exc is not None and "not a RIFF/WAVE file" in exc.message,
+    getattr(exc, "message", ""),
+)
+
+# A mistyped threshold is a usage error naming the setting, not a silent fall back to 25 MiB.
+os.environ["DYAK_OPENAI_MAX_UPLOAD_BYTES"] = "25MB"
+dyso.urllib.request.urlopen = FakeHTTP([b"ok"])
+exc = raises(dystt.transcribe, chunk_wav, audio_duration=1.0, backend="openai")
+check(
+    "a non-numeric threshold -> exit 1",
+    exc is not None and exc.code == ec.USAGE,
+    f"{getattr(exc, 'code', None)}",
+)
+check(
+    "and the message names the setting",
+    exc is not None and "DYAK_OPENAI_MAX_UPLOAD_BYTES" in exc.message,
+    getattr(exc, "message", ""),
+)
+
+# The built-in default is the documented hosted limit, and it is what an unset run reports.
+os.environ.pop("DYAK_OPENAI_MAX_UPLOAD_BYTES", None)
+_default_oa = dyso.OpenAICompat("http://127.0.0.1:1")
+check(
+    "the unset threshold is the documented 25 MiB",
+    _default_oa.max_upload_setting.value == str(25 * 1024 * 1024)
+    and _default_oa.max_upload_setting.source == "default",
+    f"{_default_oa.max_upload_setting.value!r} from {_default_oa.max_upload_setting.source}",
+)
+
+if _prev_limit is None:
+    os.environ.pop("DYAK_OPENAI_MAX_UPLOAD_BYTES", None)
+else:
+    os.environ["DYAK_OPENAI_MAX_UPLOAD_BYTES"] = _prev_limit
+
 
 # -- autodetection: both branches, neither dependent on the machine ---------------
 _install = dysb.resolve
