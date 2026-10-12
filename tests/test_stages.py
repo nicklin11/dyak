@@ -1450,7 +1450,7 @@ check(
 # words behind them reaches the end of the ladder with nothing fired and exits 0, so a note is
 # written from frames the transcript never mentions -- the verdict's own docstring says
 # "Coverage is a gate: too many frames with no transcript means broken A/V sync"
-# (`src/dyak/caption.py:196-197`). Code 4's row is the frame/A-V family
+# (`src/dyak/caption.py:200-201`). Code 4's row is the frame/A-V family
 # (`docs/adr/0001-lecture-pipeline.md:328`); ADR-0001 D5 (`:191`) is the audit, a different
 # decision, and `caption.py:51-56` and `pipeline.py:86-90` carry the same attribution and guard.
 def _uncovered_alignment(frame, pts_ms):
@@ -8259,8 +8259,8 @@ check(
 # from three rows to one it reported `1/1`, the note covered one of three frames, and the run
 # exited 0 with `uncovered 0.00`. `quality.json` is the other witness -- one verdict per frame
 # stage 5 judged, written from the in-memory list stage 4 returned (`pipeline.py:511` ->
-# `:541`) while stage 6 re-reads the manifest from disk (`caption.py:373`). The finding rides
-# `report.inconsistent`, which `Report.ok` reads and `cli.py:440` turns into exit 6: a guard,
+# `:541`) while stage 6 re-reads the manifest from disk (`caption.py:238-243`). The finding rides
+# `report.inconsistent`, which `Report.ok` reads and `cli.py:468` turns into exit 6: a guard,
 # not a warning, because a warning leaves a note covering 1 of 3 frames at exit 0.
 
 
