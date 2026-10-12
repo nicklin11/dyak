@@ -4080,6 +4080,84 @@ for limit, expected in ((0.30, False), (0.40, True)):
     )
 check("no frames is not ok", not dycap.align(ctmp / "none.tsv", ctrans, cquality, cimg).ok)
 
+# #188: stage 6 parsed the gate report with an unguarded json.loads, so a quality.json it
+# could not read killed the run as an internal error -- JSONDecodeError, or AttributeError for
+# a payload that is not an object -- which reaches the user as a traceback and Python's exit 1
+# (cli.py:214-220), indistinguishable from a usage error. Stage 12 already fails this file
+# with a named reason (report.read_quality_gate, #87); these two loops pin stage 6 to the same
+# words for the same bytes, so one file is not described two ways.
+for _label, _raw, _why in (
+    ("truncated", '{"frames": [', "cannot read"),
+    ("frames-is-not-a-list", '{"frames": "x"}', "has no 'frames' list"),
+    ("no-frames-key", "{}", "has no 'frames' list"),
+):
+    _path = ctmp / f"quality-{_label}.json"
+    _path.write_text(_raw, encoding="utf-8")
+    _root = ctmp / f"quality-root-{_label}"
+    _root.mkdir(exist_ok=True)
+    (_root / dyq.REPORT_NAME).write_text(_raw, encoding="utf-8")
+    _raised = None
+    try:
+        dycap.align(cmanifest, ctrans, _path, cimg)
+    except BaseException as _exc:  # on main this is JSONDecodeError/AttributeError
+        _raised = _exc
+    # A named failure is `runner.DependencyError`, not any exception: on unmodified main the
+    # first two shapes raise JSONDecodeError/AttributeError and this suite must record that as
+    # a failure rather than abort on it.
+    _named = isinstance(_raised, dyr.DependencyError)
+    _message = _raised.message if _named else repr(_raised)
+    check(
+        f"#188: a {_label} quality.json fails stage 6 with a named reason, not a traceback",
+        _named and _raised.code == ec.ARTEFACT_VERIFICATION_FAILED and _why in _message,
+        _message,
+    )
+    check(
+        f"#188: and {_label} is named in the same words stage 12 uses for the same file",
+        _named and _message == dyro.read_quality_gate(_root)[1],
+        f"{_message!r} vs {dyro.read_quality_gate(_root)[1]!r}",
+    )
+
+# A payload that is not a JSON object is the one corrupt shape stage 12 cannot yet name:
+# report.read_quality_gate calls payload.get with no isinstance check (report.py:437) and
+# raises AttributeError. That hole is in report.py, outside this PR's scope, and is filed as
+# #202; stage 6 must still not crash on it, and must say what is wrong.
+_object_path = ctmp / "quality-not-a-json-object.json"
+_object_path.write_text("[1, 2]", encoding="utf-8")
+_object_raised = None
+try:
+    dycap.align(cmanifest, ctrans, _object_path, cimg)
+except BaseException as _exc:  # on main this is AttributeError
+    _object_raised = _exc
+check(
+    "#188: a quality.json that is not a JSON object is named, not an AttributeError",
+    isinstance(_object_raised, dyr.DependencyError)
+    and _object_raised.code == ec.ARTEFACT_VERIFICATION_FAILED
+    and _object_raised.message == "quality.json is not a JSON object",
+    repr(_object_raised),
+)
+
+# The other half: an absent report, and readable reports that carry no gate information, stay
+# non-failures. `{}` used to land here -- the #82 shape, every frame captioned including the
+# ones the gate rejected -- which is why it is asserted as a failure above, not here.
+for _label, _raw in (
+    ("absent", None),
+    ("empty-frames-list", '{"frames": []}'),
+    ("frames-list-of-non-dicts", '{"frames": [1, 2]}'),
+):
+    _path = ctmp / f"quality-readable-{_label}.json"
+    if _raw is not None:
+        _path.write_text(_raw, encoding="utf-8")
+    _escaped = ""
+    try:
+        dycap.align(cmanifest, ctrans, _path, cimg)
+    except BaseException as _exc:  # the assertion is that nothing escapes
+        _escaped = repr(_exc)
+    check(
+        f"#188: {_label} is not a failure -- stage 6 reads it as no gate information",
+        not _escaped,
+        _escaped,
+    )
+
 # Malformed input is skipped, not fatal.
 broken = ctmp / "broken.json"
 broken.write_text(

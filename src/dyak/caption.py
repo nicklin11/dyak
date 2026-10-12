@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import json
 import sys
-from . import llm
+from . import exitcodes as ec, llm, quality, runner
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -313,6 +313,46 @@ def _first_word_ms(raw_segments: list[dict], limit_ms: int) -> float | None:
     return best
 
 
+def read_quality_entries(path: Path) -> tuple[dict[str, dict] | None, str]:
+    """(frame name -> stage 5's entry for it, why the file could not be read).
+
+    `None` with an empty reason means `quality.json` is absent -- legitimate for an
+    audio-only source. `None` with a reason means it is present and unusable: truncated, not
+    a JSON object, or without a `frames` list. The two are kept apart because the first is a
+    state the pipeline allows and the second is a failed write.
+
+    Stage 12 reads the same file through `report.read_quality_gate` and detects the same
+    failures with the same words; `tests/test_stages.py` pins the two against each other, so
+    one file is not described two ways. The reader lives here rather than in `quality.py`
+    because `caption` must not import `report` (`report` imports `caption`, #188) and stage 6
+    is the only reader in this PR's scope.
+
+    The parse is guarded because this is a trust boundary: stage 5 writes the file and stage 6
+    reads it moments later, and before this function a truncated file reached the user as a
+    `JSONDecodeError` traceback with Python's exit 1 -- indistinguishable from a usage error,
+    and before stage 12 could name the problem (#188).
+    """
+    if not path.is_file():
+        return None, ""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"cannot read {quality.REPORT_NAME}: {exc}"
+    if not isinstance(payload, dict):
+        return None, f"{quality.REPORT_NAME} is not a JSON object"
+    frames = payload.get("frames")
+    if not isinstance(frames, list):
+        return None, f"{quality.REPORT_NAME} has no 'frames' list"
+    entries: dict[str, dict] = {}
+    for entry in frames:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if isinstance(name, str) and name:
+            entries[name] = entry
+    return entries, ""
+
+
 def align(
     manifest: Path,
     transcript: Path,
@@ -320,7 +360,12 @@ def align(
     images: Path,
     settings: Settings | None = None,
 ) -> Report:
-    """Align every frame stage 5 passed to the words spoken while it was displayed."""
+    """Align every frame stage 5 passed to the words spoken while it was displayed.
+
+    Raises `runner.DependencyError` (exit 6) when `quality.json` is present and unreadable.
+    Falling back to "no gate information" would caption every frame the gate rejected, which
+    is the #82 defect; the file names its reason instead.
+    """
     settings = settings or Settings()
     report = Report(uncovered_share_limit=settings.uncovered_share_limit)
 
@@ -333,10 +378,22 @@ def align(
     )
     segments = read_segments(transcript)
 
-    quality: dict[str, dict] = {}
-    if quality_report.is_file():
-        for entry in json.loads(quality_report.read_text(encoding="utf-8")).get("frames", []):
-            quality[entry.get("name", "")] = entry
+    gate_entries, gate_error = read_quality_entries(quality_report)
+    if gate_error:
+        # The run failed, not the file, so `name="dyak"`: runner.report prints
+        # "(quality.json wrote nothing to stderr)" for a file name, which would be a false
+        # claim about a file. The message is the reader's reason verbatim, so stage 6 and
+        # stage 12 say one thing about one file (#188).
+        raise runner.DependencyError(
+            name="dyak",
+            code=ec.ARTEFACT_VERIFICATION_FAILED,
+            message=gate_error,
+            remediation=(
+                "re-run `dyak process` so stage 5 rewrites it. Do not delete it: an absent "
+                f"{quality.REPORT_NAME} is read as no gate information and every frame is "
+                "captioned, including the ones the gate rejected (#82)"
+            ),
+        )
 
     for position, (pts_ms, name) in enumerate(frames):
         # A frame with pts = T was on screen *from* T, until the next frame appeared. The
@@ -350,7 +407,7 @@ def align(
             # transcript knows one, otherwise the median gap, so it is not left with a
             # zero-length window and reported as uncovered.
             on_screen_end = _tail_end_ms(frames, transcript_payload)
-        gate = quality.get(name, {})
+        gate = (gate_entries or {}).get(name, {})
         enhanced = f"{Path(name).stem}_q.jpg"
         alignment = Alignment(
             frame=name,
