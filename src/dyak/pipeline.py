@@ -274,26 +274,14 @@ def _estimate(audio_seconds: float) -> tuple[float, float]:
 
 
 def _chunk_line(out) -> Callable[[int, int], None]:
-    """Progress for stage 3: one indented, flushed line per observed unit.
+    """Stage 3's progress callback, in the one shape every counting stage shares (#197).
 
-    Indented like the anomaly notes below it, and deliberately without a stage prefix: the
-    start line already carries `[3/12]`, and a second stage-prefixed literal would break
-    `tests/test_claims.py:459-463`. `chunks` is the unit on the only route that reports one -- a
-    slice of the uploaded wav (`stt/openai_compat.py:240-267`, #125). A backend with a
-    different unit needs the callback to grow one; that is #197, and nothing here invents a
-    unit for a backend that has none (#193).
+    A thin adapter, not a second renderer: `stages.progress_line` owns the text, the flush and
+    the swallowed failure, and stages 6, 7 and 9 write through it too. `chunks` is stage 3's
+    unit -- a slice of the uploaded wav (`stt/openai_compat.py:240-267`, #125) -- and the only
+    unit a backend reports; a backend with none never calls this (#193).
     """
-
-    def report(done: int, total: int) -> None:
-        try:
-            out.write(f"           chunks {done}/{total}\n")
-            out.flush()
-        except (OSError, ValueError):
-            # A progress line must not move a run's outcome: `deps.py:280`'s rule for warnings,
-            # applied here because `out` may be a closed file or a stream that went away.
-            return
-
-    return report
+    return lambda done, total: stages.progress_line(out, "chunks", done, total)
 
 
 def publishes_stage7_transcript(sdir: Path, bundle: Bundle) -> dict[str, Path]:

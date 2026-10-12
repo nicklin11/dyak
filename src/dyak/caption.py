@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import json
 import sys
-from . import exitcodes as ec, llm, quality, runner
+from . import exitcodes as ec, llm, quality, runner, stages
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -529,7 +529,12 @@ def caption_frames(
     breaker = llm.Breaker()
     stopped = False
 
-    for alignment in report.considered:
+    for index, alignment in enumerate(report.considered):
+        # First statement of the body, before the breaker and cache checks (#197): every
+        # considered frame advances the counter -- cached, missing, stopped or called -- so a
+        # unit that leaves by `continue` cannot freeze it. The stage's own result line carries
+        # completion; this one is `frames 0/N` before the first call.
+        stages.progress_line(out, "frames", index, len(report.considered))
         if stopped:
             # The endpoint is down; the remaining frames cost a full retry ladder each
             # (~6 s fast-refusing, 30 min hung) and buy nothing (#124).

@@ -81,7 +81,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from . import caption, llm
+from . import caption, llm, stages
 
 REPORT_NAME = "synth.json"
 PROVENANCE_NAME = "synth-provenance.json"
@@ -651,7 +651,9 @@ def synthesise(
     title: str | None = None,
     model: str | None = None,
     budget: int = SECTION_BUDGET,
+    stream=None,
 ) -> Note:
+    out = stream if stream is not None else sys.stdout
     slices = build_sections(alignments)
     # Every section request carries the whole lecture (#117). The slices are not indexed per
     # section: they exist to keep a frame boundary visible inside the payload, not to bound it.
@@ -670,7 +672,12 @@ def synthesise(
             + f" did not reach the model; coverage {lecture.coverage:.0%}"
         )
 
-    for number, section_title, brief in SECTIONS:
+    for index, (number, section_title, brief) in enumerate(SECTIONS):
+        # First statement of the body, before the no-material and stopped checks (#197): every
+        # entry of the eight advances the counter, written or skipped, so no `continue` can
+        # freeze it. The first line is `sections 0/8` and carries no interval -- no rate exists
+        # for the text endpoint, and `llm.chat` says nothing mid-call.
+        stages.progress_line(out, "sections", index, len(SECTIONS))
         if not lecture.text.strip():
             reported.append(
                 {
@@ -811,6 +818,7 @@ def run(
         title=title,
         model=config.model if config else None,
         budget=budget,
+        stream=out,
     )
 
     (destination / NOTE_NAME).write_text(note.markdown, encoding="utf-8")
