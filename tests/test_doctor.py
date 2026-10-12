@@ -419,7 +419,7 @@ os.environ.pop(dyd.LLM_MODEL_ENV, None)
 
 
 # --- 6b. the vision role: unset falls back, configured-and-dead is a failure ---
-# #167: `deps.py:561` claimed `check_llm` covered `DYAK_VLM_ENDPOINT`. It never did, so a
+# #167: `deps.py:501` claimed `check_llm` covered `DYAK_VLM_ENDPOINT`. It never did, so a
 # dead vision endpoint produced a green `doctor` and a stage-6 failure after the
 # transcription and frame extraction had already run -- #81 measured that stage at ~396k
 # input tokens and ~7.7 minutes on a 75-minute lecture. `check_vlm` is the probe, and the

@@ -472,7 +472,7 @@ check(
 
 # --- 5c. the numeric setting has a working form in the file (#192) -------------
 # `openai_max_upload_bytes` is a number in the environment and in the built-in default, and
-# `docs/running.md:52` documents a bare byte count. A TOML integer in the file must therefore
+# `docs/running.md:56` documents a bare byte count. A TOML integer in the file must therefore
 # be the value, not a dropped non-string -- and it must reach the consumer's own parser, which
 # stays the authority on whether it is a valid count.
 check(

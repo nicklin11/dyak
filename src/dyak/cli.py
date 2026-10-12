@@ -362,7 +362,8 @@ def _process(args: argparse.Namespace) -> int:
     #        failed, 5 still wins: the reader is told the note has errors AND, above, that
     #        the frames were soft. Reporting 4 alone would hide the note's own verdict.
     #   4 -- a content frame was soft. The note exists; its inputs were not.
-    #   6 -- the pipeline ran but required artefacts could not be verified (ADR-0001 D3).
+    #   6 -- the pipeline ran but required artefacts could not be verified: stage 12's end-of-run
+    #        check, or a run that stopped at the stage which needed the artefact (ADR-0001 D3).
     #   1 -- the note is a template, not a model synthesis.
     #   3 -- the vault export failed, but the bundle is intact and no stronger content verdict
     #        was produced.
