@@ -1,8 +1,9 @@
 name: ci
 
-# Runs on every push and every PR. There is no branch protection requiring it yet
-# (see the note at the bottom), so it is informational until someone with admin
-# turns that on -- a check nothing requires is not a gate.
+# Runs on every push and every PR. The ruleset `main: require CI` (id 24900279) requires
+# this job's `check (3.11)`, `check (3.12)` and `check (3.13)` on main, so a red or pending
+# build blocks a merge rather than advising against one. #60 -- the issue that asked for
+# branch protection -- is closed: the repository is public MIT, so the ruleset is enforceable.
 on:
   push:
     branches: [main]
@@ -120,7 +121,6 @@ jobs:
       - name: End-to-end run (#122)
         run: python tests/test_e2e.py
 
-# Branch protection is a repository setting and cannot be set from a workflow file.
-# Until "Require status checks to pass" names `check` on main, this workflow reports
-# but does not gate -- and a red build on a PR is advisory rather than blocking.
-# Filing that as an issue rather than leaving it as a comment nobody re-reads.
+# Gating is a repository setting and cannot be set from a workflow file. The ruleset
+# `main: require CI` names all three `check` jobs on main, so this workflow does gate:
+# a failing or pending run rejects the merge, and a red build on a PR is blocking.
