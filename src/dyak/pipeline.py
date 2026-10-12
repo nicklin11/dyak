@@ -12,6 +12,16 @@ it advances (#193), while whisper.cpp -- which reports nothing this client can r
 -- says so rather than borrowing a rate. The count in every line is
 `stages.IMPLEMENTED`, which is 12: every stage ADR-0001 § *The pipeline* lists is
 built.
+
+**Stages 2-5 run as two branches, joined by stage 6** (#115). `audio -> stt` and
+`frames -> quality` read nothing from each other -- one decodes the audio track and
+transcribes it, the other decodes the video track, gate-checking its own frames -- so
+they run on one thread each instead of one after the other, and the slower branch is
+what the run costs rather than the sum. `DYAK_SERIAL=1` puts them back on one thread
+in the old order: a benchmark baseline, and the way out on a host where the two
+contend for one resource. Every line a branch writes carries its tag -- `(A)` for
+`audio`/`stt`, `(B)` for `frames`/`quality` -- so an interleaved stream still says
+which half is talking.
 """
 
 from __future__ import annotations
@@ -19,18 +29,21 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Generic, TypeVar
 
 from . import (
     audio,
     audit,
     caption,
     deps,
+    exitcodes as ec,
     frames,
     lint,
     link,
@@ -38,13 +51,14 @@ from . import (
     quality,
     repair,
     report,
+    runner,
     stages,
     stt,
     synth,
 )
 from . import llm
 from .bundle import Bundle
-from .settings import BBOX_SOURCE_ENV, resolve
+from .settings import BBOX_SOURCE_ENV, SERIAL_ENV, resolve
 from .workspace import WorkDir
 
 # Re-exported, not defined here. `quality` and `caption` write progress lines that need the
@@ -119,6 +133,36 @@ class RunResult:
     @property
     def seconds(self) -> float:
         return sum(r.seconds for r in self.reports)
+
+
+@dataclass(frozen=True)
+class _SttHalf:
+    """What branch A produced: the audio, the transcript, and stage 3's published paths.
+
+    A return value rather than a closure over `_stages`'s locals, because the two branch
+    bodies run on their own threads and a name they both assign to has no owner: the join is
+    where their products meet (#115).
+    """
+
+    audio: audio.AudioArtefact
+    paths: dict[str, Path]
+    transcript: stt.Transcript
+
+
+@dataclass(frozen=True)
+class _FramesHalf:
+    """What branch B produced: the frames stage 4 detected and the gate stage 5 applied.
+
+    `published` holds what branch B registered in the bundle, keyed the way `RunResult.artefacts`
+    keys them. It is built on the branch rather than handed in because `Bundle.publish` moves
+    the file it is given, so the path the branch must record is the one publish returns.
+    """
+
+    manifest: Path
+    produced: list[Path]
+    quality: quality.Report
+    enhanced: list[Path]
+    published: dict[str, Path]
 
 
 #: Per-stage wall clock, written after stage 12. Every `StageReport` already carries its own
@@ -314,6 +358,120 @@ def publishes_stage7_transcript(sdir: Path, bundle: Bundle) -> dict[str, Path]:
     return artefacts
 
 
+# --- #115: the pre-caption fork -------------------------------------------------------
+#: `DYAK_SERIAL` values that ask for the sequential branch order, and the ones that keep the
+#: default -- concurrent branches. Anything else is refused by `_serial_mode` rather than read
+#: as "off": a kill-switch that silently ignores a typo is the one thing an escape hatch must
+#: not do (`docs/running.md`'s rule for a bad setting value, `openai_compat._threshold_bytes`).
+SERIAL_ON = frozenset({"1", "true", "yes", "on"})
+SERIAL_OFF = frozenset({"", "0", "false", "no", "off"})
+
+
+def _serial_mode() -> bool:
+    """Whether `DYAK_SERIAL` asks for the sequential order of the #115 branches.
+
+    Off by default: the branches are the point, and the variable is the escape hatch -- a
+    benchmark control arm, and the way to run one branch at a time on a host where the two
+    contend for the one resource that matters (both are mostly external processes, so the
+    contention is on disk and on the network, and nothing here measures it).
+    """
+    raw = (resolve(SERIAL_ENV, default="0").value or "").strip().lower()
+    if raw in SERIAL_ON:
+        return True
+    if raw in SERIAL_OFF:
+        return False
+    raise runner.DependencyError(
+        name="pipeline",
+        code=ec.USAGE,
+        message=f"{SERIAL_ENV} is not a yes/no value: {raw!r}",
+        remediation=f"set {SERIAL_ENV}=1 for the sequential branch order, or unset it",
+    )
+
+
+_T = TypeVar("_T")
+
+
+class _Branch(Generic[_T]):
+    """One of the two pre-caption branches, running its body on its own thread (#115).
+
+    The body's failure is **recorded**, never raised in the thread. The run raises the first
+    branch failure only after both branches have been joined, which is what lets the surviving
+    branch finish and publish: with the STT endpoint down, the bundle still holds the frames
+    and the quality gate, exactly as it would have if the failure had happened after them. A
+    branch that is *not* waited for is the failure mode this type exists to prevent.
+    """
+
+    def __init__(self, tag: str, body: Callable[[], _T]) -> None:
+        self.tag = tag
+        self.value: _T | None = None
+        self.error: BaseException | None = None
+        #: When the body raised, not when the caller noticed: with both branches in flight,
+        #: "the first fatal error" has to mean the first one that actually happened.
+        self.failed_at = 0.0
+        # Daemon: a branch waiting on an external process must never be what keeps the
+        # interpreter alive after the main thread has decided the run is over.
+        self._thread = threading.Thread(
+            target=self._run, args=(body,), name=f"dyak-branch-{tag}", daemon=True
+        )
+        self._thread.start()
+
+    def _run(self, body: Callable[[], _T]) -> None:
+        try:
+            self.value = body()
+        except BaseException as exc:  # re-raised by `finish`/the join, in the main thread
+            self.error = exc
+            self.failed_at = time.monotonic()
+
+    def wait(self) -> None:
+        """Block until the body returned, however it ended. Nothing is raised here."""
+        self._thread.join()
+
+    def finish(self) -> _T:
+        """The branch's value. Only call after `wait()`; a branch that failed re-raises here."""
+        if self.error is not None:
+            raise self.error
+        if self.value is None:
+            raise RuntimeError(f"branch {self.tag} recorded neither a value nor a failure")
+        return self.value
+
+
+class _TaggedStream:
+    """One branch's writer: a lock so lines cannot tear, and the branch's tag on each line.
+
+    Two branches write to one stream now, and two things follow. The lock makes a line atomic
+    -- without it, `[4/12] frames` can land in the middle of `[3/12] stt starting ...`. The tag
+    makes the interleaving readable: stage lines keep their `[n/12] name` form, and every line a
+    branch writes ends with `(A)` or `(B)`, including the `chunks 0/3` continuation lines that
+    carry no stage prefix by design (#197) -- a reader can attribute a line it did not see begin.
+
+    A serial run writes to the bare stream instead, so its output is the pre-#115 rendering
+    byte for byte; that is what makes `DYAK_SERIAL=1` a control arm rather than a third format.
+    """
+
+    def __init__(self, out, tag: str, lock: threading.Lock) -> None:
+        self._out = out
+        self._suffix = f"  ({tag})"
+        self._lock = lock
+        self._pending = ""
+
+    def write(self, text: str) -> None:
+        with self._lock:
+            self._pending += text
+            lines = self._pending.split("\n")
+            # Whatever followed the last newline is a partial line: held until the rest of it
+            # arrives (or `flush`), so a tag is never written into the middle of a line.
+            self._pending = lines.pop()
+            for line in lines:
+                self._out.write(f"{line}{self._suffix}\n")
+
+    def flush(self) -> None:
+        with self._lock:
+            if self._pending:
+                self._out.write(f"{self._pending}{self._suffix}\n")
+                self._pending = ""
+            self._out.flush()
+
+
 def run(
     source: Path,
     work: WorkDir,
@@ -426,149 +584,227 @@ def _stages(
     reports.append(StageReport(1, "probe", time.monotonic() - began, info.summary()))
     out.write(reports[-1].line() + "\n")
 
-    # --- stage 2: audio -------------------------------------------------------
-    began = time.monotonic()
-    wav = work.sub("audio.wav")
-    artefact = audio.extract(Path(source), wav)
-    summary = artefact.summary()
-    warning = audio.check_coverage(info, artefact)
-    if warning:
-        summary += f"  [warn] {warning}"
-    reports.append(StageReport(2, "audio", time.monotonic() - began, summary))
-    out.write(reports[-1].line() + "\n")
-    # Stages 1 and 2 record one document between them; see probe.provenance for why it
-    # is one and not two. Published here because the bundle exists by now.
-    if bundle is not None:
-        source_prov = work.sub(probe.PROVENANCE_NAME)
-        source_prov.write_text(
-            probe.provenance(info, artefact, ffmpeg_version=frames.ffmpeg_version()) + "\n",
-            encoding="utf-8",
-        )
-        bundle.publish(source_prov.name, source_prov)
-
-    # --- stage 3: stt ---------------------------------------------------------
-    began = time.monotonic()
-    # The backend is resolved *before* the line, so the line cannot name one that will not run
-    # (#186): `auto` prefers whisper.cpp but falls back to the OpenAI-compatible route
-    # (`stt/backends.py:129-134`), and the old literal named whisper.cpp and a local CPU
-    # regardless.
-    # `name`/`target` is the pair `stt-provenance.json` records, so the log and the provenance
-    # now agree by construction. The interval is whisper.cpp's own measurement
-    # (`stt/core.py:46-52`); nothing in the tree measures a hosted endpoint's rate, and an
-    # invented one is a worse claim than none -- #32 is where that measurement belongs. Note
-    # the residual gap: a *remote* whisper.cpp still borrows this host's interval, because
-    # nothing classifies the target (loopback vs remote) yet.
-    info = stt.backend().info()
-    rate = (
-        f"expect {_interval(*_estimate(artefact.duration))}"
-        if info.name == "whispercpp"
-        else "no rate measured for this endpoint"
-    )
-    progress = (
-        "this backend reports no progress"
-        if info.name == "whispercpp"
-        else "reporting chunk progress"
-    )
-    out.write(
-        f"  [3/{IMPLEMENTED}] {'stt'.ljust(7)} starting  {artefact.duration:.0f}s of audio through "
-        f"{info.name} at {info.target}, {rate}; {progress}\n"
-    )
-    out.flush()
-    transcript = stt.transcribe(
-        wav,
-        audio_duration=artefact.duration,
-        # The resolved name, not the setting: the line's claim and the work cannot diverge.
-        backend=info.name,
-        on_progress=_chunk_line(out),
-    )
-    paths = stt.write(transcript, work.path)
-    if bundle is not None:
-        # Every stage that writes to the work dir has to name what it publishes here, or the
-        # document dies with the work dir. That is how stage 7's transcript went missing for
-        # its whole life (#76) and how stage 3 had no provenance at all (#80).
-        for key, path in paths.items():
-            paths[key] = bundle.publish(path.name, path)
-    reports.append(StageReport(3, "stt", time.monotonic() - began, transcript.summary()))
-    out.write(reports[-1].line() + "\n")
-
-    for anomaly in transcript.anomalies[:10]:
-        out.write(f"           note: {anomaly}\n")
-    if len(transcript.anomalies) > 10:
-        out.write(f"           note: ... and {len(transcript.anomalies) - 10} more\n")
-
-    # --- stage 4: frames ------------------------------------------------------
-    # ADR-0001 D3: frames are read from the source, never from a blurred intermediate. The
-    # detect pass decodes the whole container and writes only timestamps, so the
-    # blur cannot reach the output; the extract pass then seeks the original.
-    began = time.monotonic()
-    frames_dir = work.dir("frames")
-    manifest, produced = frames.run(Path(source), frames_dir)
-    reports.append(
-        StageReport(4, "frames", time.monotonic() - began, frames.summary(manifest, produced))
-    )
-    out.write(reports[-1].line() + "\n")
-
-    artefacts = dict(paths)
-    artefacts["manifest"] = bundle.publish("manifest", manifest)
-    # Frames go to the bundle's images/ so the note can reference them by a stable
-    # relative path, and the manifest travels with them.
+    # --- stages 2-5: two branches, joined by stage 6 (#115) -------------------
+    # Stages 2-3 (`audio`, `stt`) and 4-5 (`frames`, `quality`) share no data: `stt` reads
+    # `audio.wav`, `quality` reads the frames stage 4 extracted, and neither reads the other's
+    # output. In sequence their seconds add up -- on the user's 4160 s lecture, stage 3 took
+    # 206.5 s and stages 4-5 took 654.7 s, so stage 6 could not start until 861.2 s had passed.
+    # As branches they overlap, and the join is stage 6, the first stage that needs both
+    # (`caption.run` is handed `paths["json"]` and the manifest).
     #
-    # The move happens *after* stage 5. It used to happen before, which handed stage 5 a
-    # list of paths that no longer existed: all 16 frames failed with "cannot read the
-    # frame size". The unit tests could not see it because the stubbed pipeline never
-    # moves anything -- only the end-to-end run did.
-    for extra in ("detect.json",):
-        published = bundle.publish_optional(extra, frames_dir / extra)
-        if published is not None:
-            artefacts[extra] = published
+    # Both bodies are the pre-#115 code, unchanged except for the stream they write to and the
+    # values they return. They stay inside `_stages` rather than moving out because each is
+    # registered in `reports` and in the bundle as its own stage completes -- that is the
+    # "published as it completes" rule -- and because `tests/test_claims.py` reads this file's
+    # `StageReport` calls out in stage order.
+    serial = _serial_mode()
+    lock = threading.Lock()
 
-    # --- stage 5: quality -----------------------------------------------------
-    # ADR-0001 D4. Runs on the frames stage 4 produced, not on the source, so the gate judges
-    # what stage 6 will actually caption. ADR-0001 D4's exit-4 path is signalled by
-    # `quality_ok` rather than raised here: raising would skip the publishing of the
-    # enhanced frames, and a failed gate is exactly when those frames are worth
-    # looking at.
-    began = time.monotonic()
-    qs = quality.Settings()
-    bbox_source = resolve(BBOX_SOURCE_ENV, default="geometric").value
-    quality.resolve_estimator(bbox_source)
-    qreport = quality.run(produced, work.path, settings=qs, bbox_source=bbox_source, stream=out)
+    def stt_branch(branch_out) -> _SttHalf:
+        """Stage 2 and stage 3: the audio track, then its transcript."""
+        # --- stage 2: audio ---------------------------------------------------
+        began = time.monotonic()
+        wav = work.sub("audio.wav")
+        artefact = audio.extract(Path(source), wav)
+        summary = artefact.summary()
+        warning = audio.check_coverage(info, artefact)
+        if warning:
+            summary += f"  [warn] {warning}"
+        reports.append(StageReport(2, "audio", time.monotonic() - began, summary))
+        branch_out.write(reports[-1].line() + "\n")
+        # Stages 1 and 2 record one document between them; see probe.provenance for why it
+        # is one and not two. Published here because the bundle exists by now.
+        if bundle is not None:
+            source_prov = work.sub(probe.PROVENANCE_NAME)
+            source_prov.write_text(
+                probe.provenance(info, artefact, ffmpeg_version=frames.ffmpeg_version()) + "\n",
+                encoding="utf-8",
+            )
+            bundle.publish(source_prov.name, source_prov)
 
-    # Publish the gated frames only now, so stage 5 read real files. `images/` is emptied
-    # here rather than by `clear_root` at the top of the run, because it must be empty at the
-    # moment the frames land, and by then the root's own artefacts are wanted. Same rule as
-    # the root's, one level down: the bundle is opened with overwrite=False, so without this
-    # the directory is the union of every run that has ever touched it. See
-    # `Bundle.clear_images` and `Bundle.clear_root`.
-    bundle.clear_images()
-    for index, path in enumerate(produced):
-        target = bundle.images / path.name
-        shutil.move(str(path), str(target))
-        bundle.record(f"frame{index}", target)
-        artefacts[f"frame{index}"] = target
-    reports.append(StageReport(5, "quality", time.monotonic() - began, qreport.summary()))
-    out.write(reports[-1].line() + "\n")
+        # --- stage 3: stt -----------------------------------------------------
+        began = time.monotonic()
+        # The backend is resolved *before* the line, so the line cannot name one that will not run
+        # (#186): `auto` prefers whisper.cpp but falls back to the OpenAI-compatible route
+        # (`stt/backends.py:129-134`), and the old literal named whisper.cpp and a local CPU
+        # regardless.
+        # `name`/`target` is the pair `stt-provenance.json` records, so the log and the provenance
+        # now agree by construction. The interval is whisper.cpp's own measurement
+        # (`stt/core.py:46-52`); nothing in the tree measures a hosted endpoint's rate, and an
+        # invented one is a worse claim than none -- #32 is where that measurement belongs. Note
+        # the residual gap: a *remote* whisper.cpp still borrows this host's interval, because
+        # nothing classifies the target (loopback vs remote) yet.
+        #
+        # Named `backend_info`, not `info`: `info` is the probe's media description and is what
+        # `RunResult.info` declares (`pipeline.py:89`). #186's fix assigned the backend into that
+        # name from inside the stage, so `RunResult.info` had silently been a `BackendInfo`; no
+        # consumer read it, and a name one branch overwrites while the other reads is the kind of
+        # coupling the fork has to remove rather than add.
+        backend_info = stt.backend().info()
+        rate = (
+            f"expect {_interval(*_estimate(artefact.duration))}"
+            if backend_info.name == "whispercpp"
+            else "no rate measured for this endpoint"
+        )
+        progress = (
+            "this backend reports no progress"
+            if backend_info.name == "whispercpp"
+            else "reporting chunk progress"
+        )
+        branch_out.write(
+            f"  [3/{IMPLEMENTED}] {'stt'.ljust(7)} starting  {artefact.duration:.0f}s of audio through "
+            f"{backend_info.name} at {backend_info.target}, {rate}; {progress}\n"
+        )
+        branch_out.flush()
+        transcript = stt.transcribe(
+            wav,
+            audio_duration=artefact.duration,
+            # The resolved name, not the setting: the line's claim and the work cannot diverge.
+            backend=backend_info.name,
+            on_progress=_chunk_line(branch_out),
+        )
+        paths = stt.write(transcript, work.path)
+        if bundle is not None:
+            # Every stage that writes to the work dir has to name what it publishes here, or the
+            # document dies with the work dir. That is how stage 7's transcript went missing for
+            # its whole life (#76) and how stage 3 had no provenance at all (#80).
+            for key, path in paths.items():
+                paths[key] = bundle.publish(path.name, path)
+        reports.append(StageReport(3, "stt", time.monotonic() - began, transcript.summary()))
+        branch_out.write(reports[-1].line() + "\n")
 
-    qdir = work.dir("quality")
-    quality.write(qreport, qdir / quality.REPORT_NAME, qs)
-    artefacts[quality.REPORT_NAME] = bundle.publish(quality.REPORT_NAME, qdir / quality.REPORT_NAME)
-    (qdir / quality.PROVENANCE_NAME).write_text(
-        quality.provenance(qs, bbox_source) + "\n", encoding="utf-8"
-    )
-    artefacts[quality.PROVENANCE_NAME] = bundle.publish(
-        quality.PROVENANCE_NAME, qdir / quality.PROVENANCE_NAME
-    )
+        for anomaly in transcript.anomalies[:10]:
+            branch_out.write(f"           note: {anomaly}\n")
+        if len(transcript.anomalies) > 10:
+            branch_out.write(f"           note: ... and {len(transcript.anomalies) - 10} more\n")
+        return _SttHalf(audio=artefact, paths=paths, transcript=transcript)
 
-    enhanced: list[Path] = []
-    for entry in qreport.passed:
-        candidate = work.path / "enhanced" / quality.enhanced_name(entry.name)
-        if not candidate.is_file():
-            continue
-        target = bundle.images / candidate.name
-        shutil.move(str(candidate), str(target))
-        bundle.record(f"quality:{entry.name}", target)
-        artefacts[f"quality:{entry.name}"] = target
-        enhanced.append(target)
+    def frames_branch(branch_out) -> _FramesHalf:
+        """Stage 4 and stage 5: detect the frames, then gate what stage 6 will caption."""
+        published: dict[str, Path] = {}
+        # --- stage 4: frames --------------------------------------------------
+        # ADR-0001 D3: frames are read from the source, never from a blurred intermediate. The
+        # detect pass decodes the whole container and writes only timestamps, so the
+        # blur cannot reach the output; the extract pass then seeks the original.
+        began = time.monotonic()
+        frames_dir = work.dir("frames")
+        manifest, produced = frames.run(Path(source), frames_dir)
+        reports.append(
+            StageReport(4, "frames", time.monotonic() - began, frames.summary(manifest, produced))
+        )
+        branch_out.write(reports[-1].line() + "\n")
+
+        published["manifest"] = bundle.publish("manifest", manifest)
+        # Frames go to the bundle's images/ so the note can reference them by a stable
+        # relative path, and the manifest travels with them.
+        #
+        # The move happens *after* stage 5. It used to happen before, which handed stage 5 a
+        # list of paths that no longer existed: all 16 frames failed with "cannot read the
+        # frame size". The unit tests could not see it because the stubbed pipeline never
+        # moves anything -- only the end-to-end run did.
+        for extra in ("detect.json",):
+            extra_published = bundle.publish_optional(extra, frames_dir / extra)
+            if extra_published is not None:
+                published[extra] = extra_published
+
+        # --- stage 5: quality -------------------------------------------------
+        # ADR-0001 D4. Runs on the frames stage 4 produced, not on the source, so the gate judges
+        # what stage 6 will actually caption. ADR-0001 D4's exit-4 path is signalled by
+        # `quality_ok` rather than raised here: raising would skip the publishing of the
+        # enhanced frames, and a failed gate is exactly when those frames are worth
+        # looking at.
+        began = time.monotonic()
+        qs = quality.Settings()
+        bbox_source = resolve(BBOX_SOURCE_ENV, default="geometric").value
+        quality.resolve_estimator(bbox_source)
+        qreport = quality.run(
+            produced, work.path, settings=qs, bbox_source=bbox_source, stream=branch_out
+        )
+
+        # Publish the gated frames only now, so stage 5 read real files. `images/` is emptied
+        # here rather than by `clear_root` at the top of the run, because it must be empty at the
+        # moment the frames land, and by then the root's own artefacts are wanted. Same rule as
+        # the root's, one level down: the bundle is opened with overwrite=False, so without this
+        # the directory is the union of every run that has ever touched it. See
+        # `Bundle.clear_images` and `Bundle.clear_root`.
+        bundle.clear_images()
+        for index, path in enumerate(produced):
+            target = bundle.images / path.name
+            shutil.move(str(path), str(target))
+            bundle.record(f"frame{index}", target)
+            published[f"frame{index}"] = target
+        reports.append(StageReport(5, "quality", time.monotonic() - began, qreport.summary()))
+        branch_out.write(reports[-1].line() + "\n")
+
+        qdir = work.dir("quality")
+        quality.write(qreport, qdir / quality.REPORT_NAME, qs)
+        published[quality.REPORT_NAME] = bundle.publish(
+            quality.REPORT_NAME, qdir / quality.REPORT_NAME
+        )
+        (qdir / quality.PROVENANCE_NAME).write_text(
+            quality.provenance(qs, bbox_source) + "\n", encoding="utf-8"
+        )
+        published[quality.PROVENANCE_NAME] = bundle.publish(
+            quality.PROVENANCE_NAME, qdir / quality.PROVENANCE_NAME
+        )
+
+        enhanced: list[Path] = []
+        for entry in qreport.passed:
+            candidate = work.path / "enhanced" / quality.enhanced_name(entry.name)
+            if not candidate.is_file():
+                continue
+            target = bundle.images / candidate.name
+            shutil.move(str(candidate), str(target))
+            bundle.record(f"quality:{entry.name}", target)
+            published[f"quality:{entry.name}"] = target
+            enhanced.append(target)
+        return _FramesHalf(
+            manifest=manifest,
+            produced=produced,
+            quality=qreport,
+            enhanced=enhanced,
+            published=published,
+        )
+
+    if serial:
+        # One thread, stage order, and the pre-#115 rendering: nothing writes through a
+        # `_TaggedStream`. A failure ends the run where it happened, as it always did -- the
+        # failure policy below is about two branches, not about a run that never had two.
+        stt_half = stt_branch(out)
+        frames_half = frames_branch(out)
+    else:
+        stt_running = _Branch("A", lambda: stt_branch(_TaggedStream(out, "A", lock)))
+        frames_running = _Branch("B", lambda: frames_branch(_TaggedStream(out, "B", lock)))
+        # Both are joined before anything is raised: the policy is "fail on the first fatal
+        # error, but let the surviving branch finish and publish" (#115), and publishing happens
+        # inside the branch. Raising at the first failure would strand stage 4's frames in the
+        # work directory, which is removed when the run ends.
+        stt_running.wait()
+        frames_running.wait()
+        # Each branch appends its own `StageReport` as its stage completes, so the list order is
+        # whichever branch finished first. `timings.json` and `run-state.json` are read in this
+        # order, so it is sorted back into stage order here rather than left to the race.
+        reports.sort(key=lambda report: report.index)
+        failures = sorted(
+            (branch for branch in (stt_running, frames_running) if branch.error is not None),
+            key=lambda branch: branch.failed_at,
+        )
+        if failures:
+            raise failures[0].error
+        stt_half = stt_running.finish()
+        frames_half = frames_running.finish()
+
+    artefact = stt_half.audio
+    paths = stt_half.paths
+    transcript = stt_half.transcript
+    produced = frames_half.produced
+    qreport = frames_half.quality
+    enhanced = frames_half.enhanced
+    # Stage 3's keys first, then branch B's, which is the order stages 4 and 5 registered them
+    # in before #115: `report.run` walks this dict, and `RunResult.artefacts` is the registry
+    # the vault export copies by.
+    artefacts = dict(paths)
+    artefacts.update(frames_half.published)
 
     # --- stage 6: caption -----------------------------------------------------
     # Deterministic. Runs on the frames stage 5 passed and the transcript stage 3 wrote;

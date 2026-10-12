@@ -336,6 +336,29 @@ one that is loud:
 An uncaught internal error — a bug in dyak — has no row on purpose: it
 propagates as a traceback. The work dir is retained and its path printed first.
 
+### Amendment 2026-10-12 — stages 2-5 run as two branches, joined by stage 6 (#115)
+
+The list above is an order of *stages*, and it was implemented as an order of *execution*:
+stage 3 had to return before stage 4 could start. Stages 2-3 (`audio`, `stt`) and stages 4-5
+(`frames`, `quality`) read nothing from each other — one decodes the audio track, the other the
+video track, and stage 5 gates the frames stage 4 extracted — so they now run as two branches,
+one thread each, and stage 6 is the join: `caption.run` is handed the transcript stage 3 wrote
+and the manifest stage 4 wrote, so it cannot start before both.
+
+The stage *numbers* are untouched, and so is their meaning: `[4/12] frames` still names stage 4
+of the twelve-stage pipeline. What changed is that the lines of stages 2-5 no longer arrive in
+ascending order, so each of them carries the branch that wrote it — `  [4/12] frames 311.3s …
+(B)` — including the indented continuation lines, which carry no stage prefix by design (#197).
+Without the tag, `[4/12]` printing before `[3/12]` would be indistinguishable from a bug in the
+numbering. `DYAK_SERIAL=1` puts the two branches back on a single thread in the list's order,
+which is both the control arm for measuring the fork and the escape hatch on a host where the
+branches contend for one resource.
+
+Failure policy: both branches run to completion, and the run then raises the first error by the
+time it was raised. A failing branch does not cancel its sibling, which is what keeps the rule
+"an artefact that is not published dies with the work dir" true per branch: with the STT
+endpoint down, the bundle still holds the frames and their gate, and stage 6 is never entered.
+
 ### Amendment 2026-10-12 — the required set, and a cross-artefact check (#87)
 
 Stage 12's per-file contract was presence-and-non-empty, and `REQUIRED` named eight root

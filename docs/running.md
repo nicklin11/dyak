@@ -66,6 +66,7 @@ path.
 | `DYAK_OUTPUT_DIR` | `bundle.py` | where the bundle goes; default `$XDG_STATE_HOME/dyak/<lecture>`, or `~/.local/state/dyak/<lecture>` when `XDG_STATE_HOME` is unset |
 | `DYAK_WORKDIR` | `workspace.py` | parent of the managed work dir (scratch: `audio.wav` etc.); default `$TMPDIR` |
 | `DYAK_BBOX_SOURCE` | `pipeline.py` | stage 5 estimator name; the registry holds `geometric` (default) and `null` (`quality.ESTIMATORS`) |
+| `DYAK_SERIAL` | `pipeline.py` | run the two pre-caption branches — stages 2-3 (`audio`→`stt`) and stages 4-5 (`frames`→`quality`) — one after the other instead of concurrently (#115). Unset, or `0`/`false`/`no`/`off`, is concurrent, which is the default and what a real run does; `1`/`true`/`yes`/`on` is sequential, for a control arm and for a host where the two branches contend for one resource. Any other value is exit 1 naming the variable: a kill-switch must not read a typo as "off" |
 
 Every row above except `DYAK_SETTINGS` is also a flat key in the settings file — the variable
 name lowercased (`llm_endpoint`, `whispercpp_url`, ...) — and is read through `settings.resolve`
@@ -112,16 +113,19 @@ begins and, on the hosted route, prints an indented `chunks k/N` after each uplo
 (#193); stages 6, 7 and 9 print an indented `frames k/N` or `sections k/N` before each unit's
 blocking call (#197). The count is the units **examined** so far — a cached, capped or skipped
 unit still advances it, so it can pass a stage's own "reviewed" figure — and it carries no clock,
-because no rate has been measured for the vision or text endpoint. This is a real
-run — 180 s of lecture 1, seven frames — with the stages that print detail trimmed:
+because no rate has been measured for the vision or text endpoint. Stages 2-5 are two branches —
+`audio`→`stt` and `frames`→`quality` — joined by stage 6 (#115), so their lines can arrive out
+of stage order and each of them names the branch that wrote it, `(A)` or `(B)`. `DYAK_SERIAL=1`
+puts the two branches back on one thread in stage order, and then there is no tag to print. This
+is a real run — 180 s of lecture 1, seven frames — with the stages that print detail trimmed:
 
 ```
   [1/12] probe       0.0s  video h264 1920x1080, audio aac 48000Hz 2ch, 180.0s
-  [2/12] audio       0.2s  audio.wav 180.0s 16000Hz mono, 5.5 MiB
-  [3/12] stt     starting  180s of audio through whispercpp at http://100.64.0.1:10301, expect 36s-54s; this backend reports no progress
-  [3/12] stt         9.1s  52 segments, 611 timed words, speech to 180.0s of 180.0s audio [whispercpp]
-  [4/12] frames     12.5s  7 frames, 2.7 MiB, median gap 9s
-  [5/12] quality     3.7s  7/7 frames pass (MEGE 57230-146128, threshold 38303, 7 cropped)
+  [2/12] audio       0.2s  audio.wav 180.0s 16000Hz mono, 5.5 MiB  (A)
+  [3/12] stt     starting  180s of audio through whispercpp at http://100.64.0.1:10301, expect 36s-54s; this backend reports no progress  (A)
+  [3/12] stt         9.1s  52 segments, 611 timed words, speech to 180.0s of 180.0s audio [whispercpp]  (A)
+  [4/12] frames     12.5s  7 frames, 2.7 MiB, median gap 9s  (B)
+  [5/12] quality     3.7s  7/7 frames pass (MEGE 57230-146128, threshold 38303, 7 cropped)  (B)
            frames 0/7
   [6/12] caption   119.5s  7 frames aligned, 493 words, 0 without transcript coverage
            sections 0/8
@@ -134,7 +138,7 @@ run — 180 s of lecture 1, seven frames — with the stages that print detail t
   [12/12] report OK: 8 verified, 0 optional absent, frames 7/7
 ```
 
-Three things about that shape are worth knowing:
+Four things about that shape are worth knowing:
 
 - **`[3/12] stt starting` is not a duplicate.** It appears before the transcription begins, and
   has no seconds because nothing has elapsed yet. Every other stage prints exactly one line, but
@@ -144,6 +148,13 @@ Three things about that shape are worth knowing:
 - **The gap between lines is the stage's real cost.** Stage 9 above took 752 s of a 1225 s run.
   On a full 75-minute lecture the same run spends most of its wall clock in transcription,
   frame extraction, synthesis and audit, in that order.
+- **The `(A)`/`(B)` tag is the branch, not the stage.** `(A)` is `audio`/`stt`, `(B)` is
+  `frames`/`quality`; stage 6 is the join and prints untagged, as do stage 1 and stages 7-12.
+  The tag is appended to the line the pipeline already wrote, continuation lines included, so a
+  log whose stages finish out of order stays readable: in the sample above the order is 1, 2,
+  3-start, 4, 5, 3-end, 6 — `frames` and `quality` finished while `stt` was still transcribing,
+  which is the point of the change rather than a bug in the numbering. Serial runs print the
+  stages in numerical order and no tag at all.
 - **Stages that produce findings print them underneath**, indented, as they finish — caption
   counts, audit warnings, repaired lines, linked terms. Those are not stage lines and are not
   counted as such.

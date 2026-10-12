@@ -28,6 +28,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -8923,6 +8924,394 @@ check(
     dysy.gates_of(_tdir / "definitely-absent.json") is None,
     str(dysy.gates_of(_tdir / "definitely-absent.json")),
 )
+
+
+# --- #115: stages 2-5 run as two branches, joined by stage 6 ------------------------------
+# The fork's claim is about wall time, and a stubbed pipeline has none: what is pinned here is
+# the structure that makes the saving possible, and every check that *can* fail on unmodified
+# `main` is written to. The two branch bodies have to meet at a `threading.Barrier(2)` -- which
+# a run that executes one branch after the other cannot pass, because the branch that arrives
+# first times out -- and `caption.run` is entered only once both have been through it. A
+# failure in branch A (the STT endpoint down) still leaves branch B's frames, their gate and
+# the images it gated in the bundle, and still ends the run nonzero. Every line a branch writes
+# names that branch.
+#
+# `DYAK_SERIAL=1` is the control arm, and the same stubs drive both: one branch at a time (the
+# rendezvous arm below times out on purpose, which is what "one at a time" means observably),
+# the pre-#115 stage order, and a stream with no branch tags in it.
+#
+# The wall-time measurement itself needs the user's lecture, real ffmpeg and a real STT
+# endpoint. It is in the PR body, because a stub cannot have a wall clock.
+class _StopAtJoin(Exception):
+    pass
+
+
+_br_real = (dyp.probe, dyp.audio, dyp.stt, dyp.frames, dyp.quality, dyp.caption)
+_br_seen: dict = {}
+
+
+def _br_restore() -> None:
+    dyp.probe, dyp.audio, dyp.stt, dyp.frames, dyp.quality, dyp.caption = _br_real
+
+
+def _br_digests(root: Path) -> dict[str, str]:
+    """`name -> sha256` for a bundle directory, minus the two sidecars that carry the clock."""
+    return {
+        path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.iterdir())
+        if path.is_file() and path.name not in (dyp.RUN_STATE_NAME, dyp.TIMINGS_NAME)
+    }
+
+
+def _br_stub_modules(*, bundle: dyb.Bundle, meet, fail_stt: bool = False) -> None:
+    """Stages 1-6 stubbed, with a rendezvous both branches have to reach before stage 6 runs.
+
+    `meet` is a `threading.Barrier(2)`: two parties, so passing it is evidence that the two
+    branch bodies were in flight at the same time. `fail_stt` is the endpoint-down case --
+    branch A dies while branch B is still working, after branch B has started.
+    """
+    seen = _br_seen
+    seen.clear()
+    seen.update(order=[], events=[], missing=[], join={})
+    note_lock = threading.Lock()
+
+    def note(event: str) -> None:
+        # Under a lock: two threads append, and the interleaving is the evidence being read.
+        with note_lock:
+            seen["events"].append(event)
+
+    def rendezvous() -> None:
+        if meet is not None:
+            meet.wait()
+
+    _probe_info = _Stub(summary=lambda: "video h264")
+    dyp.probe = _Stub(
+        probe=lambda p: _probe_info,
+        require_supported=lambda i: None,
+        provenance=lambda *a, **k: "{}",
+        PROVENANCE_NAME="source-provenance.json",
+    )
+
+    def _audio_extract(src, wav):
+        seen["order"].append("audio")
+        note("audio")
+        return _Stub(duration=60.0, summary=lambda: "audio.wav 60.0s 16000Hz mono")
+
+    dyp.audio = _Stub(extract=_audio_extract, check_coverage=lambda i, a: None)
+
+    def _stt_write(transcript, dest):
+        # Writes what it returns: `Bundle.publish` raises on a missing source (#89).
+        dest = Path(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "transcript.json").write_text(
+            json.dumps({"segments": [{"index": 0, "text": "hello"}]}), encoding="utf-8"
+        )
+        (dest / "transcript.raw.json").write_text("{}", encoding="utf-8")
+        (dest / "transcript.txt").write_text("hello", encoding="utf-8")
+        return {
+            "json": dest / "transcript.json",
+            "raw": dest / "transcript.raw.json",
+            "txt": dest / "transcript.txt",
+        }
+
+    def _transcribe(wav, audio_duration, backend=None, on_progress=None):
+        seen["order"].append("stt")
+        note("stt:enter")
+        if fail_stt:
+            note("stt:fail")
+            raise dyr.DependencyError(name="whispercpp", code=2, message="connection refused")
+        rendezvous()
+        if on_progress is not None:
+            # Through the pipeline's own adapter, so the continuation line under test is the
+            # one the pipeline renders -- tag and all.
+            on_progress(0, 1)
+        note("stt:done")
+        return dyst.Transcript(wav=wav, audio_duration=audio_duration, segments=(), backend="stub")
+
+    dyp.stt = _Stub(
+        # `pipeline.run` resolves the backend before the start line (#186), so a stub that
+        # replaces the whole module needs `backend` and the two `transcribe` keywords.
+        backend=lambda *a, **k: SimpleNamespace(
+            info=lambda: dysb.BackendInfo(name="whispercpp", target="stub://whispercpp")
+        ),
+        transcribe=_transcribe,
+        write=_stt_write,
+        RATE_RANGE=dysttc.RATE_RANGE,
+        WARMUP_SECONDS=dysttc.WARMUP_SECONDS,
+    )
+
+    def _frames_run(src, frames_dir):
+        seen["order"].append("frames")
+        note("frames:enter")
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        manifest = frames_dir / dyfr.MANIFEST
+        manifest.write_text(dyfr.MANIFEST_HEADER + "\n", encoding="utf-8")
+        frame = frames_dir / "f_0.png"
+        frame.write_bytes(b"\x89PNG\r\n\x1a\nframe")
+        note("frames:done")
+        return manifest, [frame]
+
+    dyp.frames = _Stub(
+        run=_frames_run,
+        summary=lambda m, p: f"{len(p)} frames",
+        ffmpeg_version=lambda: "stub",
+    )
+
+    def _quality_run(produced, dest, *, settings=None, bbox_source=None, stream=None):
+        seen["order"].append("quality")
+        note("quality:enter")
+        # Stage 5 reads the frames stage 4 wrote, and the move into `images/` happens after this
+        # call, in this branch: a branch that moved or cleared them early shows up here.
+        seen["missing"] = [str(p) for p in produced if not Path(p).is_file()]
+        rendezvous()
+        for path in produced:
+            enhanced = Path(dest) / "enhanced"
+            enhanced.mkdir(parents=True, exist_ok=True)
+            (enhanced / f"enhanced_{path.name}").write_bytes(b"\x89PNG\r\n\x1a\nenhanced")
+        note("quality:done")
+        return _Stub(
+            passed=[_Stub(name=p.name) for p in produced], summary=lambda: "1/1 pass", ok=True
+        )
+
+    dyp.quality = _Stub(
+        Settings=lambda: _Stub(),
+        resolve_estimator=lambda name: None,
+        run=_quality_run,
+        write=lambda report, target, settings: target.write_text("{}", encoding="utf-8"),
+        provenance=lambda qs, bbox_source: "{}",
+        enhanced_name=lambda name: f"enhanced_{name}",
+        REPORT_NAME=dyq.REPORT_NAME,
+        PROVENANCE_NAME=dyq.PROVENANCE_NAME,
+    )
+
+    def _caption_run(*a, **kw):
+        # The join. What the two branches were supposed to have published by now is recorded,
+        # and then the run is stopped: stages 7-12 are not this test's subject.
+        seen["join"] = {
+            "root": sorted(p.name for p in bundle.root.iterdir()),
+            "images": sorted(p.name for p in (bundle.root / dyb.IMAGES).iterdir()),
+            "registry": sorted(bundle.artefacts),
+        }
+        raise _StopAtJoin()
+
+    dyp.caption = _Stub(
+        run=_caption_run,
+        REPORT_NAME=dycap.REPORT_NAME,
+        PROVENANCE_NAME=dycap.PROVENANCE_NAME,
+    )
+
+
+def _br_run(root: Path, name: str, *, serial: bool, meet, fail_stt: bool = False) -> dict:
+    """One arm of the fork: what the stubs saw, the stream, and the bundle it wrote into.
+
+    The variable is spelled out rather than taken from `settings.SERIAL_ENV`, on purpose: this
+    file has to produce its FAIL lines against unmodified `main` (where no such constant exists
+    yet) instead of raising an `AttributeError` that takes the rest of the suite with it.
+    """
+    stream = _FlushRecorder()
+    source = root / "lecture.mp4"
+    bundle = dyb.Bundle.open(source, output_dir=str(root / name), overwrite=False)
+    if serial:
+        # Set after `_env.isolate()`, so the suite is still independent of the developer's shell.
+        os.environ["DYAK_SERIAL"] = "1"
+    else:
+        os.environ.pop("DYAK_SERIAL", None)
+    _br_stub_modules(bundle=bundle, meet=meet, fail_stt=fail_stt)
+    outcome: dict = {"reached_join": False}
+    try:
+        REAL_PIPELINE_RUN(source, dyw.WorkDir(parent=root / "work"), bundle=bundle, stream=stream)
+    except _StopAtJoin:
+        outcome = {"reached_join": True}
+    except BaseException as exc:
+        outcome = {"reached_join": False, "error": repr(exc)}
+    finally:
+        _br_restore()
+        os.environ.pop("DYAK_SERIAL", None)
+    return {"bundle": bundle, "text": stream.getvalue(), **outcome, **_br_seen}
+
+
+with tempfile.TemporaryDirectory() as _br_td:
+    _br_root = Path(_br_td)
+    (_br_root / "lecture.mp4").write_bytes(b"x")
+    (_br_root / "work").mkdir()
+
+    # Arm 1: the default, concurrent. The rendezvous is what makes "concurrent" observable.
+    _br_par = _br_run(_br_root, "parallel", serial=False, meet=threading.Barrier(2, timeout=20.0))
+    check(
+        "#115: both branches are in flight at once -- the two-party rendezvous is passed, which "
+        "a run that does one branch after the other cannot do",
+        _br_par.get("reached_join") is True,
+        str(_br_par.get("error")),
+    )
+    check(
+        "#115: both branches finished their stages, and stage 5 read the frames stage 4 wrote",
+        sorted(_br_par.get("order", [])) == ["audio", "frames", "quality", "stt"]
+        and _br_par.get("missing") == [],
+        f"order={_br_par.get('order')} missing={_br_par.get('missing')}",
+    )
+    check(
+        "#115: each branch published as its own stage finished, so stage 6 starts with both "
+        "halves in the bundle",
+        {"quality.json", "manifest.tsv", "transcript.json", "transcript.txt"}
+        <= set(_br_par.get("join", {}).get("root", [])),
+        str(_br_par.get("join", {}).get("root")),
+    )
+    check(
+        "#115: and the frames stage 5 gated, plus the enhanced copies it accepted, are in "
+        "images/ by then",
+        _br_par.get("join", {}).get("images") == ["enhanced_f_0.png", "f_0.png"],
+        str(_br_par.get("join", {}).get("images")),
+    )
+
+    # Arm 2: the control, `DYAK_SERIAL=1`. Same stubs, one branch at a time.
+    _br_ser = _br_run(_br_root, "serial", serial=True, meet=None)
+    check(
+        "#115: DYAK_SERIAL=1 runs the branches in the pre-#115 stage order, one after the other",
+        _br_ser.get("reached_join") is True
+        and _br_ser.get("order") == ["audio", "stt", "frames", "quality"],
+        f"order={_br_ser.get('order')} error={_br_ser.get('error')}",
+    )
+    check(
+        "#115: and prints the pre-#115 stream, with no branch tags in it",
+        "(A)" not in _br_ser.get("text", "") and "(B)" not in _br_ser.get("text", ""),
+        repr(_br_ser.get("text", "")[:300]),
+    )
+    check(
+        "#115: the serial arm prints the stage lines in stage order, stage 3's documented start "
+        "line included (#97)",
+        re.findall(r"^  \[(\d+)/12\] ", _br_ser.get("text", ""), re.M)
+        == ["1", "2", "3", "3", "4", "5"],
+        repr(re.findall(r"^  \[(\d+)/12\] ", _br_ser.get("text", ""), re.M)),
+    )
+
+    # Arm 3: the control again, with the rendezvous back on. A serial run has one branch in
+    # flight, so a two-party barrier can only time out -- which is the observable difference
+    # between "the flag is honoured" and "the flag is read and ignored".
+    _br_ser_meet = _br_run(
+        _br_root, "serial-meet", serial=True, meet=threading.Barrier(2, timeout=1.0)
+    )
+    check(
+        "#115: DYAK_SERIAL=1 keeps one branch in flight -- the two-party rendezvous times out",
+        "BrokenBarrierError" in str(_br_ser_meet.get("error")),
+        str(_br_ser_meet.get("error")),
+    )
+
+    # Arm 4: the endpoint-down case. Branch A dies; branch B has started, and has to finish and
+    # publish, and the run still has to end nonzero.
+    _br_fail = _br_run(_br_root, "failed", serial=False, meet=None, fail_stt=True)
+    check(
+        "#115: a failure in one branch still ends the run, with that branch's own error",
+        _br_fail.get("reached_join") is False
+        and "connection refused" in str(_br_fail.get("error")),
+        f"{_br_fail.get('reached_join')} {_br_fail.get('error')}",
+    )
+    check(
+        "#115: the surviving branch finished after its sibling failed",
+        "frames:done" in _br_fail.get("events", [])
+        and "quality:done" in _br_fail.get("events", []),
+        str(_br_fail.get("events")),
+    )
+    _br_fail_root = _br_fail["bundle"].root
+    check(
+        "#115: and its artefacts are in the bundle rather than stranded in the work directory",
+        {"quality.json", "quality-provenance.json", "manifest.tsv"}
+        <= {p.name for p in _br_fail_root.iterdir()}
+        and (_br_fail_root / dyb.IMAGES / "f_0.png").is_file(),
+        str(sorted(p.name for p in _br_fail_root.iterdir())),
+    )
+
+    check(
+        "#115: the two arms publish the same files with the same bytes -- the fork changes when "
+        "the work happens, not what it produces",
+        _br_digests(_br_par["bundle"].root) == _br_digests(_br_ser["bundle"].root)
+        and _br_digests(_br_par["bundle"].root / dyb.IMAGES)
+        == _br_digests(_br_ser["bundle"].root / dyb.IMAGES),
+        f"parallel={_br_digests(_br_par['bundle'].root)} serial={_br_digests(_br_ser['bundle'].root)}",
+    )
+    check(
+        "#115: and register exactly the same artefact keys, order aside",
+        set(_br_par.get("join", {}).get("registry", []))
+        == set(_br_ser.get("join", {}).get("registry", [])),
+        f"parallel={_br_par.get('join', {}).get('registry')} serial={_br_ser.get('join', {}).get('registry')}",
+    )
+
+    # The two records are written from `reports`, which the branches append to out of order.
+    _br_par_state = json.loads(
+        (_br_par["bundle"].root / dyp.RUN_STATE_NAME).read_text(encoding="utf-8")
+    )
+    _br_par_timings = json.loads(
+        (_br_par["bundle"].root / dyp.TIMINGS_NAME).read_text(encoding="utf-8")
+    )
+    check(
+        "#115: the per-stage record stays in stage order even though the branches finish out of "
+        "order",
+        _br_par_state.get("stages_completed") == [1, 2, 3, 4, 5]
+        and [s["stage"] for s in _br_par_timings.get("stages", [])] == [1, 2, 3, 4, 5],
+        f"state={_br_par_state.get('stages_completed')} "
+        f"timings={[s['stage'] for s in _br_par_timings.get('stages', [])]}",
+    )
+
+    # The rendering itself, quoted rather than described.
+    _br_par_lines = _br_par.get("text", "").splitlines()
+    check(
+        "#115: a stage line says which branch wrote it -- audio/stt are (A), frames/quality are "
+        "(B)",
+        any(re.match(r"^  \[2/12\] audio\s+\d+\.\ds  .*\(A\)$", line) for line in _br_par_lines)
+        and any(re.match(r"^  \[3/12\] stt\s+.*\(A\)$", line) for line in _br_par_lines)
+        and any(re.match(r"^  \[4/12\] frames\s+.*\(B\)$", line) for line in _br_par_lines)
+        and any(re.match(r"^  \[5/12\] quality\s+.*\(B\)$", line) for line in _br_par_lines),
+        "\n".join(line for line in _br_par_lines if re.match(r"^  \[\d+/12\]", line)),
+    )
+    check(
+        "#115: the continuation line, which carries no stage prefix by design (#197), says which "
+        "branch it belongs to as well",
+        any(line.strip() == "chunks 0/1  (A)" for line in _br_par_lines),
+        repr([line for line in _br_par_lines if "chunks" in line]),
+    )
+    check(
+        "#115: neither arm prints a stage line the other does not -- the two branches add no "
+        "second announcement of any stage (stage 3's start line is the documented extra, #97)",
+        sorted(int(n) for n in re.findall(r"^  \[(\d+)/12\] ", _br_par.get("text", ""), re.M))
+        == [1, 2, 3, 3, 4, 5]
+        and sorted(int(n) for n in re.findall(r"^  \[(\d+)/12\] ", _br_ser.get("text", ""), re.M))
+        == [1, 2, 3, 3, 4, 5],
+        f"parallel={re.findall(r'^  [(]?([0-9]+)/12', _br_par.get('text', ''), re.M)} "
+        f"serial={re.findall(r'^  [(]?([0-9]+)/12', _br_ser.get('text', ''), re.M)}",
+    )
+
+    # The writer itself: a partial line must not get a tag in the middle of it. `getattr`, not
+    # an attribute access: on unmodified main this class does not exist, and the check below
+    # has to report that as a failure instead of raising and taking the rest of the suite with
+    # it -- the same reason `test_claims.py` uses `find` for a literal it expects to be absent.
+    _br_writer = getattr(dyp, "_TaggedStream", None)
+    if _br_writer is None:
+        check(
+            "#115: the branch writer that tags each line exists",
+            False,
+            "pipeline._TaggedStream is missing",
+        )
+    else:
+        _br_tagged = _br_writer(_FlushRecorder(), "A", threading.Lock())
+        _br_tagged.write("partial ")
+        check(
+            "#115: a partial write is held until its newline, so no tag lands mid-line",
+            _br_tagged._out.getvalue() == "",
+            repr(_br_tagged._out.getvalue()),
+        )
+        _br_tagged.write("line\n[2/12] audio     0.0s  x\n")
+        check(
+            "#115: and each completed line carries the branch tag before its newline",
+            _br_tagged._out.getvalue() == "partial line  (A)\n[2/12] audio     0.0s  x  (A)\n",
+            repr(_br_tagged._out.getvalue()),
+        )
+        _br_tagged.write("tail")
+        _br_tagged.flush()
+        check(
+            "#115: flush emits the last partial line with its tag, and forwards the flush",
+            _br_tagged._out.getvalue().endswith("tail  (A)\n") and _br_tagged._out.flushes == 1,
+            f"{_br_tagged._out.getvalue()!r} flushes={_br_tagged._out.flushes}",
+        )
+
 
 _env.restore(SAVED_ENV)
 

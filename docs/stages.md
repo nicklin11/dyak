@@ -29,7 +29,7 @@ constants, not provenance.
 | 6 | per-frame `caption_trace` in `captions.json` | which model captioned this frame, tokens, timing, called or cached |
 | 6 | `caption_status` per frame | `NO_NEW_INFORMATION` says the model declined; it is a success, not an error, and a high share means the screens went unread |
 | 7, 9 | `synth-`/`audit-llm-transcript.json` | every call: full messages, model, tokens, seconds, attempts, `finish_reason` |
-| 1-12 | `timings.json` | wall clock per stage and the total. Written after stage 12, not registered as an artefact |
+| 1-12 | `timings.json` | wall clock per stage and the total. Written after stage 12, not registered as an artefact. Since #115 stages 2-5 run as two branches, so the per-stage seconds overlap and their sum is larger than the total: the total is the run and each entry is its stage |
 | 1-12 | `run-state.json` | the run id, `started_at`/`finished_at`, the stage reached, and `completed`/`interrupted`/`failed`. Written in a `finally`, so an interrupted run's bundle says so (#92) |
 
 `finish_reason` is why the model stopped. `length` means the endpoint's output cap cut it off:
@@ -72,6 +72,18 @@ attempts, fingerprint, and whether the frame was called or taken from cache.
 Stages 7–10 and 1–2 are not "broken" or "missing". They are written, imported by
 `pipeline.run`, and covered by `tests/test_stages.py`. What they lack is a **verified run
 over the lecture**, which is a different and cheaper claim to earn.
+
+Stages 2-5 are one **branch pair**, not four steps in a queue (#115): `audio`→`stt` and
+`frames`→`quality` share no input, so they run concurrently, one thread each, and stage 6 is
+the join — it needs both the transcript and the manifest, so it cannot start before both
+branches have published. The stage numbers keep their meaning (`[4/12] frames` is still stage 4
+of twelve), but a run's lines for stages 2-5 arrive out of numerical order and carry the branch
+that wrote them, `(A)` or `(B)`; see [ADR-0001 § The pipeline, amendment 2026-10-12][adr115].
+`DYAK_SERIAL=1` runs the pair sequentially instead, which is how the fork's wall-time saving is
+measured against an identical run. Stage 5's rule is unchanged either way: it gates the frames
+stage 4 wrote, and a branch that failed does not take its sibling's published artefacts with it.
+
+[adr115]: ../adr/0001-lecture-pipeline.md#amendment-2026-10-12--stages-2-5-run-as-two-branches-joined-by-stage-6-115
 
 ## Stage 6 — what was added, and what it is still not
 
