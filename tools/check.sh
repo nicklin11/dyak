@@ -8,8 +8,9 @@
 # broken tree". PR #158 merged a red Lint step on exactly that reading.
 #
 # The pin is written down once, in `pyproject.toml`'s `dev` extra; this script reads it
-# from there so the two cannot drift. It runs the pinned ruff, then the five suites CI
-# runs.
+# from there so the two cannot drift. It runs the pinned ruff, then every suite in
+# `tests/` -- derived from the directory rather than hand-listed, because a hand-written
+# list is how #173 happened: `test_llm.py` passed while no workflow ran it.
 #
 # Usage: tools/check.sh   (from anywhere -- paths resolve from the repository root)
 
@@ -52,11 +53,12 @@ echo "== lint =="
 "$@" format --check src tests
 
 echo "== suites =="
-python3 tests/test_deps.py
-python3 tests/test_claims.py
-python3 tests/test_stages.py
-python3 tests/test_doctor.py
-python3 tests/test_e2e.py
+# Globbing, not a hand-written list: #173 was a suite that passed while nothing ran it,
+# and the explicit list is what let it go missing. A shared helper is named `_*.py`
+# (`_env.py`), so `test_*.py` is exactly the set of suites.
+for suite in tests/test_*.py; do
+    python3 "$suite"
+done
 
 echo
-echo "check passed: ruff $PIN and all five suites"
+echo "check passed: ruff $PIN and every suite in tests/"

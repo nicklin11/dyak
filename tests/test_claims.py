@@ -14,6 +14,7 @@ and each states where its truth lives:
     exit codes        exitcodes.DESCRIPTIONS
     repo tree         a literal allowlist, because the point is to catch surprises
     shipboard         the import graph, not the word
+    suite wiring      tests/test_*.py, against ci.yml's run lines
 
 The rule these share: a hand-maintained table in prose is a claim, and the only
 thing that makes it true is a check that fails when it stops being true.
@@ -715,6 +716,25 @@ check(
     "the dollar-figure check actually finds figures to judge",
     len(figures) >= 4,
     f"only {len(figures)} found, so the check above guards nothing: {figures}",
+)
+
+# --- 11. every suite in tests/ is invoked by CI ---------------------------------------
+# #173: `tests/test_llm.py` is a 330-line suite that passes and that no workflow ran. A
+# suite nothing invokes cannot fail, so the invariant it holds (#61) was free to drift with
+# `llm.py`. The workflow names suites by hand, which is how the omission happened, so this
+# derives the truth from the directory instead and fails when the two disagree -- in either
+# direction, so a removed suite cannot leave a stale `run:` line behind.
+#
+# Comment lines are dropped before the scan: a suite named in prose is not invoked, and
+# counting it would let the next omission pass.
+CI = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+ci_code = "\n".join(line for line in CI.splitlines() if not line.lstrip().startswith("#"))
+expected_suites = sorted(f"tests/{p.name}" for p in (REPO / "tests").glob("test_*.py"))
+invoked_suites = sorted(set(re.findall(r"tests/test_[A-Za-z0-9_]+\.py", ci_code)))
+check(
+    "ci.yml runs exactly the suites in tests/",
+    invoked_suites == expected_suites,
+    f"on disk {expected_suites}, ci.yml runs {invoked_suites}",
 )
 
 _env.restore(SAVED_ENV)

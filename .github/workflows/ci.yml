@@ -91,6 +91,14 @@ jobs:
       - name: Doctor suite
         run: python tests/test_doctor.py
 
+      # The model-id invariant (#61): the id that was *requested* stays canonical in
+      # `synth.json`, while the id the endpoint *reported* is recorded beside it and never
+      # overwrites it. This suite passed for months while no workflow ran it (#173) -- a
+      # suite nothing invokes cannot fail, so the invariant was free to drift with `llm.py`.
+      # It stubs `urlopen` and `llm.chat`, so it needs no gateway, no key and no host state.
+      - name: Model-id provenance suite (#61)
+        run: python tests/test_llm.py
+
       # The only step that leaves this process. Every other suite replaces functions in
       # place -- `runner.run`, `urlopen`, `llm.chat` -- which is exactly why the bugs
       # this one exists for were found by a human doing a real run and by nothing here:
