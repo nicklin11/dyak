@@ -178,8 +178,10 @@ renders in full. #49 is the underlying measurement.
 | field | what it answers |
 |---|---|
 | `verified` / `absent` / `missing` | artefacts checked, expected-but-absent optional ones, required-but-not-found ones |
-| `files_checked` | how much of the bundle stage 12 actually confirmed (run 13: 65) |
-| `files_in_bundle_excluding_this_stage` | everything it could have checked (run 13: 144) |
+| `inconsistent` | where two artefacts contradict each other, or one of the pair cannot be read: `captions.json` against `quality.json` (#87) |
+| `source_had_video` / `quality_gate_required` | what the bundle's `source-provenance.json` says about the input, and whether that made `quality.json` required. `null` = record absent, so the gate stays optional |
+| `files_checked` | how much of the bundle stage 12 actually confirmed |
+| `files_in_bundle_excluding_this_stage` | everything it could have checked |
 | `unchecked` | the absolute list of files it did not check |
 | `frames_expected` / `frames_found` | frames against `manifest.tsv` |
 | `transcript_coverage` / `transcript_coverage_threshold` | how much of the transcript reached the model in stage 7, read back from `synth.json` rather than recomputed. Below the threshold the run does not exit 0 (#117) |
@@ -191,9 +193,14 @@ Since `5c66731`, `verified ∪ unchecked = files_in_bundle_excluding_this_stage`
 artefact itself, and a reader can compute the coverage claim rather than trust the prose.
 Before that release, the module's prose claimed 143 files were checked when 65 were — the
 artefact above is the correction. `files_checked ==
-files_in_bundle_excluding_this_stage` is the end state; the gap is
-[#87](https://github.com/nicklin11/dyak/issues/87), and the presence-only character of the
-per-file check is the deeper constraint recorded in the same issue.
+files_in_bundle_excluding_this_stage` is still the end state; what remains outside the check
+is the `*-provenance.json` family, the intermediate notes and the rejected frames.
+
+`verified` is presence-and-non-empty per file. The content check is `inconsistent`: #87
+promoted `captions.json` and `synth.json` into `REQUIRED`, made `quality.json` required when
+the source had video, and added the cross-reference between `captions.json` and
+`quality.json`. That last one is the check that would have caught #82 from the bundle alone —
+the two files were each internally consistent and contradicted each other about a frame.
 
 ## Where the note is written
 

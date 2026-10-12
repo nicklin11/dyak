@@ -72,13 +72,21 @@ names its parent.
 
 | field | meaning |
 |---|---|
-| `ok` | the overall verdict |
+| `ok` | the overall verdict: nothing required is missing, nothing contradicts, and the frame count agrees |
 | `verified` / `absent` / `missing` | artefacts checked on disk, expected-but-absent optional ones, and required-but-not-found ones |
+| `inconsistent` | where two artefacts contradict each other, or one of the pair cannot be read. Currently `captions.json` against `quality.json`: every alignment's `quality_gate` must equal the gate report's verdict for that frame (#87) |
+| `source_had_video` / `quality_gate_required` | whether the bundle's own `source-provenance.json` says the input had video, and whether that made `quality.json` required. `null` means the record is absent or unreadable, and `quality.json` stays optional |
 | `frames_expected` / `frames_found` | frame count against `manifest.tsv` |
 | `note_promoted` | whether the vault copy happened |
-| `files_checked` | files whose presence stage 12 confirmed (65 of 144 on run 13 — the gap is [#87](https://github.com/nicklin11/dyak/issues/87)) |
-| `files_in_bundle_excluding_this_stage` | everything present on disk the stage could have checked (144) |
+| `files_checked` | files whose presence stage 12 confirmed (68 of 146 after #87: `captions.json` and `synth.json` joined `REQUIRED` and `quality.json` became required for a video source) |
+| `files_in_bundle_excluding_this_stage` | everything present on disk the stage could have checked |
 | `unchecked` | the absolute list of files stage 12 did not check |
 
 Since `5c66731`, a reader can compute the coverage claim from the artefact itself: `verified ∪
 unchecked = files_in_bundle_excluding_this_stage`.
+
+`verified` is still presence-and-non-empty per file. The content check is `inconsistent`:
+`captions.json` and `quality.json` describe the same frames from opposite ends of the pipeline,
+and a disagreement between them fails the run with its own named reason rather than being read
+as agreement (#87). This is the check that would have caught #82 from the bundle alone — the
+two files were each internally consistent and contradicted each other.
