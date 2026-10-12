@@ -30,6 +30,10 @@ QUALITY_GATE_FAILED = 4
 AUDIT_FINDINGS = 5
 
 # 6 — the pipeline ran, but required artefacts could not be verified on disk (ADR-0001 D3).
+# Also produced by a run that stops at the stage which needed the artefact, not only by stage
+# 12's end-of-run check: stage 6 exits 6 when the gate report it must read is unreadable
+# (caption.py:388-391, #188), so the code means "the artefacts are not trustworthy", whether
+# the run reached stage 12 or stopped at the stage that needed the artefact.
 ARTEFACT_VERIFICATION_FAILED = 6
 
 # 7 — a model ran, but its note is degraded/incomplete and needs user attention.
@@ -65,7 +69,10 @@ DESCRIPTIONS: dict[int, str] = {
     DEPENDENCY_FAILED: "dependency failed (stderr reproduced verbatim)",
     QUALITY_GATE_FAILED: "quality gate failed; note written, report says why",
     AUDIT_FINDINGS: "audit found errors above threshold; note written and flagged",
-    ARTEFACT_VERIFICATION_FAILED: "required artefacts could not be verified",
+    ARTEFACT_VERIFICATION_FAILED: (
+        "required artefacts could not be verified on disk, whether the run reached stage 12 "
+        "or stopped at the stage that needed the artefact"
+    ),
     INCOMPLETE_NOTE: "model-written note is incomplete or degraded",
     LOW_COVERAGE: "less of the lecture reached the model than the coverage threshold allows",
     TRUNCATED_SECTIONS: "a section was cut off at the model's output limit; its ending is missing",
