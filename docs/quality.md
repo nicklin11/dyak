@@ -11,7 +11,7 @@ code. See [`artefacts.md`](artefacts.md) for where each record lands.
 | 1 | usage error |
 | 2 | missing dependency |
 | 3 | dependency failed |
-| 4 | quality gate failed; note written, report says why |
+| 4 | quality gate failed; note written, report says why — a content frame too soft (`quality.json`), or a source whose video and transcript disagree: more than 30% of the frames stage 6 considered have no transcript coverage (`captions.json`) |
 | 5 | audit found errors above threshold; note written and flagged |
 | 6 | required artefacts could not be verified on disk, whether the run reached stage 12 or stopped at the stage that needed the artefact |
 | 7 | model-written note is incomplete or degraded; review its warnings |

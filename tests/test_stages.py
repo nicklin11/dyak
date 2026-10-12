@@ -1446,6 +1446,131 @@ check(
 )
 
 
+# #223: stage 6's coverage verdict is a gate, not a log line. A source whose frames have no
+# words behind them reaches the end of the ladder with nothing fired and exits 0, so a note is
+# written from frames the transcript never mentions -- the verdict's own docstring says
+# "Coverage is a gate: too many frames with no transcript means broken A/V sync"
+# (`src/dyak/caption.py:196-197`). Code 4's row is the frame/A-V family
+# (`docs/adr/0001-lecture-pipeline.md:328`); ADR-0001 D5 (`:191`) is the audit, a different
+# decision; `caption.py:51-53` and `pipeline.py:86-87` cite it wrongly (#223; residual filed as #227).
+def _uncovered_alignment(frame, pts_ms):
+    """A frame stage 6 was allowed to align, with no transcript segment behind it."""
+    return dycap.Alignment(
+        frame=frame,
+        pts_ms=pts_ms,
+        image=frame,
+        enhanced=None,
+        on_screen_ms=(pts_ms, pts_ms + 2000),
+        caption_status="OK",
+        reason=dycap.UNCOVERED,
+    )
+
+
+def desynced_pipeline(source, work, **kw):
+    result = fake_pipeline(source, work, **kw)
+    # A real `caption.Report`, not a stand-in: `ok` is computed from `considered` and
+    # `uncovered`, so a SimpleNamespace would let a broken gate pass this check.
+    result.caption = dycap.Report(
+        alignments=[
+            _uncovered_alignment("f_0001.png", 1000),
+            _uncovered_alignment("f_0002.png", 3000),
+        ]
+    )
+    return result
+
+
+dyp.run = desynced_pipeline
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    rc_desync = dyc.main(["process", str(src)])
+dyp.run = fake_pipeline
+check(
+    "a source whose frames have no words behind them does not exit 0 (#223)",
+    rc_desync == ec.QUALITY_GATE_FAILED,
+    f"rc={rc_desync} want={ec.QUALITY_GATE_FAILED}",
+)
+check(
+    "and the refusal names the uncovered share, not a missing artefact (#223)",
+    "no transcript coverage" in err.getvalue() and "100%" in err.getvalue(),
+    err.getvalue()[-300:],
+)
+check(
+    "the desync gate is code 4, the frame/A-V family, not the coverage code 8 (#223)",
+    rc_desync != ec.LOW_COVERAGE and rc_desync != ec.ARTEFACT_VERIFICATION_FAILED,
+    f"rc={rc_desync} low={rc_low}",
+)
+
+
+# The guard's own pin, and it is not optional: `caption.Report.ok` is also false when
+# `considered == []` -- an audio-only source, or a run whose every frame stage 5 gated out --
+# and those have no A/V sync to be broken. Without `result.caption.considered` this check
+# returns 4 and the audio-only controls above it go red with it (19 checks, measured in the
+# #223 decision), which is why the gate carries the guard.
+def no_frames_pipeline(source, work, **kw):
+    result = fake_pipeline(source, work, **kw)
+    result.caption = dycap.Report()
+    return result
+
+
+dyp.run = no_frames_pipeline
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    rc_no_frames = dyc.main(["process", str(src)])
+dyp.run = fake_pipeline
+check(
+    "a run with no frames to align still exits 0: the guard, not the verdict (#223)",
+    rc_no_frames == ec.OK,
+    f"rc={rc_no_frames} want={ec.OK}\n{err.getvalue()[-300:]}",
+)
+check(
+    "and that is the same verdict object that refused the desynced run (#223)",
+    dycap.Report().ok is False and rc_no_frames != rc_desync,
+    f"ok={dycap.Report().ok} rc={rc_no_frames} desync={rc_desync}",
+)
+
+
+# The two controls the new gate must not mask, measured through the same real ladder rather
+# than assumed from the code: the quality gate still returns 4, and a run that is *both*
+# desynced and below the coverage threshold still returns 8. The second one is what the late
+# placement buys -- the #223 decision measured that placing the gate with the other stage-6
+# verdicts (before the coverage check) turns this same run's 8 into a 4, rewriting an exit code
+# that already had a meaning.
+def soft_frames_pipeline(source, work, **kw):
+    result = fake_pipeline(source, work, **kw)
+    result.quality.ok = False
+    return result
+
+
+dyp.run = soft_frames_pipeline
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    rc_soft = dyc.main(["process", str(src)])
+dyp.run = fake_pipeline
+check(
+    "the quality gate's own code 4 still fires, and it is not the desync message (#223)",
+    rc_soft == ec.QUALITY_GATE_FAILED and "no transcript coverage" not in err.getvalue(),
+    f"rc={rc_soft} want={ec.QUALITY_GATE_FAILED}\n{err.getvalue()[-200:]}",
+)
+
+
+def desynced_low_coverage_pipeline(source, work, **kw):
+    result = desynced_pipeline(source, work, **kw)
+    result.report.coverage = 0.5
+    return result
+
+
+dyp.run = desynced_low_coverage_pipeline
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    rc_both = dyc.main(["process", str(src)])
+dyp.run = fake_pipeline
+check(
+    "a run that is both desynced and low-coverage still reports 8: the gate is last (#223)",
+    rc_both == ec.LOW_COVERAGE and "coverage" in err.getvalue(),
+    f"rc={rc_both} want={ec.LOW_COVERAGE}\n{err.getvalue()[-200:]}",
+)
+
+
 # --- 7z. stage 7's LLM transcript reaches the bundle -----------------------
 # The note is written by 8 model calls. `synth.py` has recorded all 8 since #38, and
 # `pipeline.py` promoted 3 files from that directory without naming the transcript, so it
