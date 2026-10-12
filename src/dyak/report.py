@@ -252,11 +252,13 @@ def count_frames(bundle_root: Path) -> tuple[int, int]:
     Expected counts data rows, not lines: a header-only manifest is the ADR-0001 D3 failure this
     whole stage exists to catch, and counting lines would call that a success.
 
-    **Expected subtracts the frames stage 5 rejected**, because stage 5 only moves the frames
-    that passed into `images/` (`pipeline.run` calls `clear_images` then moves `qreport.passed`).
-    Without the subtraction a correctly gated bundle reads `frames 57/58` and the run exits 1
-    for having done the right thing -- ADR-0005 D2's "N states, M uncaptioned is visible"
-    turned into "M uncaptioned is a failure".
+    **Expected subtracts the frames stage 5 rejected.** Stage 5 moves *every* frame stage 4
+    produced into `images/` -- `pipeline.run` calls `clear_images` then moves `produced`; the
+    gate's verdict only decides which of them get an enhanced `_q.jpg`. A rejected frame is
+    therefore on disk and would count as found, so the subtraction is not what keeps `ok` true
+    (both counts agree either way): it keeps the rejection out of `frames_expected` and in
+    `unchecked`, so ADR-0005 D2's "N states, M uncaptioned is visible" is a number rather than
+    a silently verified frame.
 
     This could not have been reached before #82: the gate never fired, so `images/` always held
     every manifest row and the subtraction was a no-op. A check that cannot fail is not a
