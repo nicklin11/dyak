@@ -1129,6 +1129,136 @@ check(
     probe_digest_calls and not probe_whole_reads,
     f"file_digest x{len(probe_digest_calls)}, read_bytes x{len(probe_whole_reads)}",
 )
+# --- 13. every line citation resolves ---------------------------------------------------
+# #221: the tree cites code as `path:NNN`, and a citation whose line has moved points a reader
+# at the wrong place. The class a checkout can see is narrower than that: a citation that
+# points at nothing. Measured at 42b513a, where #221's decision took its census, the 60 tracked
+# text files of 65 hold 34 citations: 32 resolve, 12 are range occurrences (7 distinct ranges),
+# 0 name a basename two files share, 0 point past a file's last line, 0 are inverted, and 2
+# resolve to nothing at all -- `docs/adr/0001-lecture-pipeline.md` cites shipboard's
+# `whisper_wake_proxy.py` at line 152 and `whisper_idle_stop.sh` at line 21. Those 2 are
+# skipped by design, because a check cannot fail on a path this repository does not own; the
+# skip list and the live counts are printed by the check below on every run, so a third one is
+# visible rather than silently tolerated.
+#
+# A citation resolves three ways, in this order: as a tracked path (`src/dyak/bundle.py`), as a
+# unique tracked basename (`bundle.py`), or as the unique tail of a tracked path
+# (`stt/core.py`, the module-relative shape the stage code uses). What is left over splits in
+# two, and the split is why this check can be green today. A path whose first component is a
+# tracked top-level entry claims a file *in this repository*, so if no tracked file answers to
+# it the citation points at nothing and this fails: a deleted file, a rename, a typo. Anything
+# else -- a bare name such as `whisper_idle_stop.sh`, or a path under a root this repository
+# does not have -- is another repository's file, and is skipped.
+#
+# The ceiling, stated rather than implied: this catches 0 of the 5 drifts that motivated #221.
+# Two are in tracked files, and neither is an existence failure -- the section-8b comment above
+# named the layout assertion by line and the assertion moved twice under it, and #214's 257.2 s
+# sentence carries no citation at all -- while three live in a review comment, a PR body and an
+# issue comment, which a checkout cannot read. What it does guard is a citation that stops
+# resolving: a path this repository no longer has, a line past EOF, an inverted range, a
+# basename two files share.
+#
+# Deliberately not checked: the cited line's content. 21 of the 34 citations name a concept
+# ("the frames-count line", "the loop") rather than a literal, so no tree-side rule can verify
+# them; and for the 11 that carry one, "the literal appears on the line" is not the claim.
+CITATION_SUFFIXES = (".py", ".md", ".sh", ".toml", ".json", ".yml", ".yaml", ".txt", ".tsv")
+#: `P:N` or `P:N-M`, where `P` ends in a scanned suffix and no word character, `/`, `.` or `-`
+#: precedes it. That is what keeps `#221`, `12:30`, `https://host:443`, `run_id:1` and
+#: `key:value` out of the scan.
+CITATION_RE = re.compile(
+    rf"(?<![\w/.-])([A-Za-z0-9_./-]+(?:{'|'.join(re.escape(s) for s in CITATION_SUFFIXES)}))"
+    r":(\d+)(?:-(\d+))?"
+)
+CITED = [
+    line
+    for line in subprocess.run(
+        ["git", "ls-files"], cwd=REPO, capture_output=True, text=True, check=False
+    ).stdout.splitlines()
+    if line
+]
+CITED_TEXT = [name for name in CITED if name.endswith(CITATION_SUFFIXES)]
+#: Read once: the text the scan walks is the text whose length it checks, so the second read a
+#: separate line count would need is skipped. Measured here that read is ~6 ms of a ~50 ms scan
+#: (ls-files ~1, read+split ~5, regex ~43) -- worth keeping, but not the reason this is cheap;
+#: the regex pass is. A tracked file that is not on disk is left out of the map, so a citation
+#: to it fails as a missing file rather than raising out of the suite.
+CITED_LINES = {
+    name: (REPO / name).read_text(encoding="utf-8", errors="replace").splitlines()
+    for name in CITED_TEXT
+    if (REPO / name).is_file()
+}
+#: basename -> the tracked text paths carrying it. A bare-name citation resolves only when
+#: there is exactly one candidate (0 ambiguous today).
+BY_BASENAME: dict[str, list[str]] = {}
+for _name in CITED_LINES:
+    BY_BASENAME.setdefault(_name.rsplit("/", 1)[-1], []).append(_name)
+TOP_LEVEL = {name.split("/", 1)[0] for name in CITED}
+
+
+def _citation_target(cited: str) -> tuple[str | None, str]:
+    """The tracked path a citation names, plus why it names none.
+
+    `(path, "")` when it resolves, `("", reason)` when it cannot and this check should fail,
+    `(None, "")` when it names something outside this repository and is skipped.
+    """
+    if cited in CITED_LINES:
+        return cited, ""
+    if cited in CITED_TEXT:
+        return "", f"{cited} is tracked but not on disk"
+    candidates = BY_BASENAME.get(cited, [])
+    if not candidates:
+        candidates = [name for name in CITED_LINES if name.endswith("/" + cited)]
+    if len(candidates) == 1:
+        return candidates[0], ""
+    if len(candidates) > 1:
+        return "", f"{len(candidates)} tracked files share that name"
+    if cited.split("/", 1)[0] in TOP_LEVEL:
+        return "", "no tracked file has that path"
+    return None, ""
+
+
+citations: list[str] = []
+resolved: list[str] = []
+skipped: list[str] = []
+unresolved: list[str] = []
+for _name, _lines in CITED_LINES.items():
+    for _number, _line in enumerate(_lines, start=1):
+        for _match in CITATION_RE.finditer(_line):
+            first, last = int(_match.group(2)), _match.group(3)
+            where = f"{_name}:{_number}"
+            citations.append(_match.group(0))
+            target, why = _citation_target(_match.group(1))
+            if target is None:
+                skipped.append(f"{where} -> {_match.group(0)}")
+                continue
+            if why:
+                unresolved.append(f"{where} cites {_match.group(0)} -- {why}")
+                continue
+            count = len(CITED_LINES[target])
+            end = int(last) if last else first
+            if end < first:
+                unresolved.append(
+                    f"{where} cites {_match.group(0)} -- the range ends before it starts"
+                )
+            elif first < 1 or end > count:
+                unresolved.append(f"{where} cites {_match.group(0)} -- {target} has {count} lines")
+            else:
+                resolved.append(f"{target}:{first}-{end}")
+
+check(
+    # The scan is the whole check, so a scan that read nothing or matched nothing would make
+    # the assertion below true for the wrong reason.
+    "#221: the citation scan reads the tracked text files and finds citations",
+    bool(CITED_LINES) and bool(citations),
+    f"{len(CITED_LINES)} files, {len(citations)} citations "
+    f"({sum(1 for c in citations if '-' in c.split(':', 1)[1])} ranges), {len(resolved)} resolved, "
+    f"{len(skipped)} not tracked here (skipped): {skipped}",
+)
+check(
+    "#221: every `path:NNN` citation resolves to a real line in a real file",
+    not unresolved,
+    "; ".join(unresolved[:5]) if unresolved else f"{len(resolved)} resolved",
+)
 
 _env.restore(SAVED_ENV)
 
