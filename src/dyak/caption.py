@@ -49,7 +49,11 @@ PROVENANCE_NAME = "caption-provenance.json"
 UNCOVERED = "no_transcript_coverage"
 
 #: Above this share of uncovered frames the audio and the video are not describing the same
-#: lecture, which is a muxing problem, not a captioning problem. ADR-0001 D5 exit 4.
+#: lecture, which is a muxing problem, not a captioning problem: code 4, the frame/A-V family
+#: (`docs/adr/0001-lecture-pipeline.md:328`). It is *not* ADR-0001 D5 (`:191`), which is the
+#: audit. `Report.ok` is false whenever `considered == []`, so the ladder's gate is guarded on
+#: `considered` (`src/dyak/cli.py:442`): an audio-only source, or a run whose every frame stage 5
+#: gated out (`:506-510`), has no A/V sync to judge, and so is not a desynced source.
 UNCOVERED_SHARE_LIMIT = 0.30
 
 #: What the model returns when it judges the frame to carry nothing the excerpt does not
