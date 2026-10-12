@@ -580,12 +580,40 @@ check(
     llm_check.failed,
     f"ok={llm_check.ok} fatal={llm_check.fatal}",
 )
+# #172: `failed` alone was not enough, and that is exactly why this survived. `run_all`
+# promotes the check to fatal but never touches `code`, so an unconfigured endpoint
+# produced a refusal that `worst_code` scored as OK -- `_preflight` printed "refusing to
+# start" and returned 0, and `process` went on to run stages 1-6 with no text endpoint.
+# The exit code is the entire point of the gate, so assert it, and assert it through
+# `_preflight` (the function that returns it) rather than on the Check alone.
+check(
+    "the promoted LLM refusal carries exit 2, not the OK default (#172)",
+    llm_check.code == ec.MISSING_DEPENDENCY,
+    f"failed={llm_check.failed} code={llm_check.code!r}",
+)
+saved_run_all_172 = dyc.run_all
+dyc.run_all = lambda *, required=None: [llm_check]
+err_buf_172 = io.StringIO()
+with redirect_stderr(err_buf_172):
+    rc_llm_default = dyc._preflight(no_llm=False)
+dyc.run_all = saved_run_all_172
+check(
+    "an unconfigured LLM makes preflight return exit 2, so `process` refuses (#172)",
+    rc_llm_default == ec.MISSING_DEPENDENCY,
+    f"rc={rc_llm_default}",
+)
+check(
+    "the exit-2 refusal is printed, not silent (#172)",
+    "refusing to start" in err_buf_172.getvalue(),
+    err_buf_172.getvalue(),
+)
 
 # (c) --no-llm is the explicit consent: an unconfigured LLM is a note, not a refusal.
+# The *real* check, not a stand-in: its `code` is now MISSING_DEPENDENCY (#172), so this
+# also proves the new code cannot leak into the exit code on the deliberate path -- only
+# `failed` (which needs `fatal`) may move it.
 saved_run_all = dyc.run_all
-dyc.run_all = lambda *, required=None: [
-    dyd.Check(name="llm", ok=False, detail="not configured", fatal=False)
-]
+dyc.run_all = lambda *, required=None: [dyd.check_llm()]
 err_buf = io.StringIO()
 with redirect_stderr(err_buf):
     rc_no_llm = dyc._preflight(no_llm=True)

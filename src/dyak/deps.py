@@ -512,8 +512,19 @@ def check_llm() -> Check:
             name="llm",
             ok=False,
             detail=f"not configured (set {LLM_ENV} to enable synthesis, audit and repair)",
+            remediation=(
+                f"set {LLM_ENV} and {LLM_MODEL_ENV} to a reachable endpoint, "
+                "or pass --no-llm to write the template skeleton deliberately"
+            ),
             version="skipped",
             fatal=False,
+            # Not fatal here -- `--no-llm` must still let the run proceed -- but the code is
+            # read the moment `run_all(required=...)` promotes this check to fatal for a
+            # default `process`. Without it the refusal printed and `worst_code` returned the
+            # OK default, so `process` ran on with no endpoint at all (#172, unmet #126
+            # criterion 1). MISSING_DEPENDENCY matches the sibling branches below: nothing is
+            # configured, so there is nothing to have failed.
+            code=ec.MISSING_DEPENDENCY,
         )
     model = os.environ.get(LLM_MODEL_ENV, "").strip()
     if not model:
