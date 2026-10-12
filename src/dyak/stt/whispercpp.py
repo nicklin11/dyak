@@ -39,6 +39,7 @@ from pathlib import Path
 
 from .. import exitcodes as ec
 from .. import runner
+from ..deps import PROBE_TIMEOUT
 from ..settings import WHISPERCPP_LANGUAGE_ENV as ENV_LANGUAGE
 from ..settings import WHISPERCPP_URL_ENV, resolve
 from .backends import BackendInfo
@@ -116,7 +117,13 @@ class HttpWhisperCpp:
             )
         try:
             request = urllib.request.Request(f"{self.base_url}/health", method="GET")
-            with urllib.request.urlopen(request, timeout=5.0) as response:
+            # The stage-0 probe budget, not a bare literal (#189). The endpoint #95 names as
+            # supported -- the shipboard proxy -- is wake-on-first-request, so the first
+            # `GET /health` against a reclaimed container is spent waiting for the wake: a
+            # 5.0 s literal here reported a working endpoint as unreachable and `_preflight`
+            # turned that into a refusal. `PROBE_TIMEOUT` is the budget the sibling `llm`
+            # (`deps.py:360`) and `vlm` probes already spend, so the three cannot disagree.
+            with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT) as response:
                 response.read(1)
         except urllib.error.HTTPError:
             # Some builds serve /inference without /health. Not fatal.

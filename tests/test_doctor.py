@@ -8,8 +8,12 @@ ad-hoc reporting. So the thing under test is mostly the distinction between:
   * on PATH but failing    -> 3, its stderr reproduced VERBATIM
   * not configured at all  -> not a failure (the gateway is optional config)
 
-PATH and subprocess are stubbed; nothing here touches the real network or the
-real binaries.
+PATH and `subprocess.run` are stubbed, and every HTTP probe is answered by a stub: the STT
+endpoint by one stub for the whole suite, the text and vision roles by per-block stubs
+installed through `urlopen_stub`, which restores the previous one in `finally`. One thing
+here is real: the `sys.executable -c` subprocess in the redirected-log test at the bottom,
+which `subprocess.Popen` is not stubbed for. No test opens a socket any more (#184), so no
+verdict here depends on a live endpoint or on the ambient proxy environment.
 """
 
 import io
@@ -20,7 +24,7 @@ import sys
 import tempfile
 import time
 import urllib.error
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -70,6 +74,7 @@ def fake_run(argv, **kwargs):
 
 
 import dyak.stt as gld_stt  # noqa: E402
+import dyak.stt.openai_compat as dyoc  # noqa: E402
 import dyak.stt.whispercpp as dywsc  # noqa: E402
 
 dyd.shutil.which = fake_which
@@ -90,9 +95,19 @@ os.environ[dywsc.WHISPERCPP_URL_ENV] = "http://127.0.0.1:10302"
 real_stt_urlopen = dywsc.urllib.request.urlopen
 
 stt_reachable = True
+#: Every call the STT stub saw, as `(url, timeout)`. #189 pins the probe *budget* from this:
+#: no container, no listener and no wall clock are involved, so the check cannot be decided
+#: by whether the proxy happened to be warm.
+stt_probe_calls: list[tuple[str, float | None]] = []
+#: When set, the stub raises this instead of answering. Used to pin that a probe which times
+#: out is still a failure carrying its own exit code (#189), not a fabricated success.
+stt_probe_error: BaseException | None = None
 
 
 def fake_stt_urlopen(request, timeout=None):
+    stt_probe_calls.append((getattr(request, "full_url", str(request)), timeout))
+    if stt_probe_error is not None:
+        raise stt_probe_error
     if not stt_reachable:
         raise urllib.error.URLError(OSError(111, "Connection refused"))
     return _HealthResponse()
@@ -130,6 +145,25 @@ def restore():
         os.environ.pop(dyd.SETTINGS_PATH_ENV, None)
     else:
         os.environ[dyd.SETTINGS_PATH_ENV] = real_settings_env
+
+
+@contextmanager
+def urlopen_stub(stub):
+    """Install `stub` as `urlopen` for one block, restoring the previous one (#184).
+
+    `dyd.urllib.request.urlopen` *is* `urllib.request.urlopen` -- the shared stdlib module
+    object -- so the assignment is process-global. The name this helper replaces,
+    `real_urlopen`, was a lie: it held the STT stub installed above, not the genuine
+    `urlopen`, so restoring it left the vision stub answering probes it had no business
+    answering, and the genuine `urlopen` came back only at `restore()`. Restoration is in
+    `finally`, so a future edit that raises inside the block cannot leave a stub installed.
+    """
+    previous_urlopen = dyd.urllib.request.urlopen
+    dyd.urllib.request.urlopen = stub
+    try:
+        yield
+    finally:
+        dyd.urllib.request.urlopen = previous_urlopen
 
 
 # --- 1. everything present -> 0, with path and version listed -----------------
@@ -209,6 +243,73 @@ check(
     and "not reachable" not in unset_err.lower(),
     unset_out + " || " + unset_err,
 )
+
+# --- 2c. the STT probe spends the stage-0 budget, not a bare 5 s (#189) -------
+# `check()` probes the endpoint before a run commits to it, and the endpoint #95 names as
+# supported -- the shipboard proxy on 100.64.0.1:10301 -- is wake-on-first-request: the
+# first `GET /health` after `whisper-idle-stop.timer` reclaimed the container is spent
+# waiting for the wake. A bare `timeout=5.0` therefore reported a working endpoint as
+# unreachable, and `_preflight` refused the run. The budget is now `PROBE_TIMEOUT`, the
+# constant `check_llm` and `check_vlm` already spend, so the three probes cannot disagree.
+#
+# The stub records the kwarg it was called with, so this pins the budget with no container,
+# no listener and no wall clock -- and goes red the moment a literal comes back.
+stt_probe_calls.clear()
+stt_reachable = True
+c = dyd.check_stt()
+whisper_timeouts = [t for url, t in stt_probe_calls if url.endswith("/health")]
+check(
+    "the whisper.cpp health probe spends PROBE_TIMEOUT (#189)",
+    c.ok and whisper_timeouts == [dyd.PROBE_TIMEOUT],
+    f"ok={c.ok} timeouts={whisper_timeouts!r} PROBE_TIMEOUT={dyd.PROBE_TIMEOUT!r}",
+)
+
+stt_probe_calls.clear()
+_saved_openai_url = os.environ.get(dyoc.OPENAI_URL_ENV)
+os.environ[gld_stt.ENV_BACKEND] = "openai"
+os.environ[dyoc.OPENAI_URL_ENV] = "http://127.0.0.1:10302"
+c = dyd.check_stt()
+openai_timeouts = [t for url, t in stt_probe_calls if url.endswith("/v1/models")]
+check(
+    "the OpenAI-compatible probe spends the same PROBE_TIMEOUT (#189)",
+    c.ok and openai_timeouts == [dyd.PROBE_TIMEOUT],
+    f"ok={c.ok} timeouts={openai_timeouts!r}",
+)
+os.environ[gld_stt.ENV_BACKEND] = "whispercpp"
+if _saved_openai_url is None:
+    os.environ.pop(dyoc.OPENAI_URL_ENV, None)
+else:
+    os.environ[dyoc.OPENAI_URL_ENV] = _saved_openai_url
+
+# A probe that times out is still a failure carrying the backend's own code, so raising the
+# budget cannot drift into "the endpoint is merely asleep, let the run start" (#189).
+stt_probe_error = urllib.error.URLError(socket.timeout("timed out"))
+c = dyd.check_stt()
+check(
+    "a probe timeout is still exit 3, not a fabricated success (#189)",
+    c.code == ec.DEPENDENCY_FAILED and "timed out" in c.detail,
+    f"code={c.code} detail={c.detail}",
+)
+stt_probe_error = None
+
+# The refused case is unchanged: 3 on the explicit backend, 2 on the `auto` path a default
+# install takes. Both are refusals; only the code differs, and this fix must not move either.
+stt_reachable = False
+c = dyd.check_stt()
+check(
+    "a refused probe is still exit 3 on an explicit backend (#189)",
+    c.code == ec.DEPENDENCY_FAILED,
+    f"code={c.code} detail={c.detail}",
+)
+os.environ.pop(gld_stt.ENV_BACKEND, None)
+c = dyd.check_stt()
+check(
+    "a refused probe is still exit 2 on the auto path (#189)",
+    c.code == ec.MISSING_DEPENDENCY,
+    f"code={c.code} detail={c.detail}",
+)
+os.environ[gld_stt.ENV_BACKEND] = "whispercpp"
+stt_reachable = True
 
 # A binary genuinely missing still earns exit 2, distinct from a broken endpoint.
 which_set = {"ffmpeg"}  # ffprobe gone, shipboard is not consulted any more
@@ -302,19 +403,17 @@ def boom_urlopen(url, timeout=None):
     raise dyd.urllib.error.URLError("connection refused")
 
 
-real_urlopen = dyd.urllib.request.urlopen
-dyd.urllib.request.urlopen = boom_urlopen
 # This checked `check_gateway()` against `DYAK_GATEWAY_URL`, a variable nothing wrote.
 # The endpoint the pipeline actually uses is `DYAK_LLM_ENDPOINT`, and `check_llm` is
 # the check that observes it -- so the unreachability assertions moved onto the check that
 # is real (#68). Same behaviour under test, no phantom dependency.
-os.environ[dyd.LLM_ENV] = "http://127.0.0.1:1/inference"
-os.environ[dyd.LLM_MODEL_ENV] = "some/model"
-c = dyd.check_llm()
-check("unreachable endpoint -> 3", c.code == ec.DEPENDENCY_FAILED, f"{c.code}")
-check("unreachable endpoint explains itself", "unreachable" in c.detail, c.detail)
-check("unreachable endpoint has a remediation", bool(c.remediation), str(c.remediation))
-dyd.urllib.request.urlopen = real_urlopen
+with urlopen_stub(boom_urlopen):
+    os.environ[dyd.LLM_ENV] = "http://127.0.0.1:1/inference"
+    os.environ[dyd.LLM_MODEL_ENV] = "some/model"
+    c = dyd.check_llm()
+    check("unreachable endpoint -> 3", c.code == ec.DEPENDENCY_FAILED, f"{c.code}")
+    check("unreachable endpoint explains itself", "unreachable" in c.detail, c.detail)
+    check("unreachable endpoint has a remediation", bool(c.remediation), str(c.remediation))
 os.environ.pop(dyd.LLM_ENV, None)
 os.environ.pop(dyd.LLM_MODEL_ENV, None)
 
@@ -326,25 +425,18 @@ os.environ.pop(dyd.LLM_MODEL_ENV, None)
 # input tokens and ~7.7 minutes on a 75-minute lecture. `check_vlm` is the probe, and the
 # two states it has to tell apart are "unset" (a state, stage 6 falls back) and "configured
 # and unreachable" (a dependency failure, refused before the run starts).
-class _ProbeOk:
-    status = 200
-
-    def read(self, _n=-1):
-        return b"ok"
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
 
 def vision_dead_urlopen(request, timeout=None):
-    """Refuse the vision URL only, so the other probes stay healthy and the failure is isolated."""
-    url = getattr(request, "full_url", str(request))
-    if "/vision" in url:
-        raise dyd.urllib.error.URLError("connection refused")
-    return _ProbeOk()
+    """Make the vision role dead -- and refuse every other probe instead of answering it.
+
+    This used to return a fabricated 200 for any URL without `/vision` (a `_ProbeOk`), so the
+    STT and LLM probes that run inside this block were decided by the *vision* stub: a check
+    added there would be told a lie (#184). The stub now answers nothing it does not own, so
+    no fabricated verdict exists inside its block -- and `urlopen_stub` scopes the install, so
+    none exists outside it either.
+    """
+    raise dyd.urllib.error.URLError("connection refused")
 
 
 saved_vlm = {k: os.environ.get(k) for k in (dyd.VLM_ENV, dyd.VLM_MODEL_ENV, dyd.VLM_KEY_ENV)}
@@ -373,64 +465,110 @@ check(
 )
 
 # (c) configured but unreachable: exit 3, fatal, with a remediation -- the whole point.
-os.environ[dyd.VLM_ENV] = "http://127.0.0.1:1/vision"
-os.environ[dyd.VLM_MODEL_ENV] = "some/vision-model"
-dyd.urllib.request.urlopen = vision_dead_urlopen
-c = dyd.check_vlm()
-check("unreachable vision endpoint -> 3 (#167)", c.code == ec.DEPENDENCY_FAILED, f"{c.code}")
-check("unreachable vision endpoint explains itself (#167)", "unreachable" in c.detail, c.detail)
-check(
-    "unreachable vision endpoint has a remediation (#167)", bool(c.remediation), str(c.remediation)
-)
-check("a configured vision endpoint is fatal (#167)", c.failed, f"ok={c.ok} fatal={c.fatal}")
-check(
-    "the unreachable target named is the vision one (#167)",
-    "127.0.0.1:1/vision" in c.detail,
-    c.detail,
-)
+with urlopen_stub(vision_dead_urlopen):
+    os.environ[dyd.VLM_ENV] = "http://127.0.0.1:1/vision"
+    os.environ[dyd.VLM_MODEL_ENV] = "some/vision-model"
+    c = dyd.check_vlm()
+    check(
+        "unreachable vision endpoint -> 3 (#167)",
+        c.code == ec.DEPENDENCY_FAILED,
+        f"{c.code}",
+    )
+    check(
+        "unreachable vision endpoint explains itself (#167)",
+        "unreachable" in c.detail,
+        c.detail,
+    )
+    check(
+        "unreachable vision endpoint has a remediation (#167)",
+        bool(c.remediation),
+        str(c.remediation),
+    )
+    check(
+        "a configured vision endpoint is fatal (#167)",
+        c.failed,
+        f"ok={c.ok} fatal={c.fatal}",
+    )
+    check(
+        "the unreachable target named is the vision one (#167)",
+        "127.0.0.1:1/vision" in c.detail,
+        c.detail,
+    )
 
-# (d) half-configured is a missing dependency, like the text role's equivalent.
-os.environ.pop(dyd.VLM_MODEL_ENV, None)
-c = dyd.check_vlm()
-check(
-    "vision endpoint without a model -> 2 (#167)",
-    c.code == ec.MISSING_DEPENDENCY and bool(c.remediation),
-    f"{c.code} {c.detail}",
-)
-os.environ[dyd.VLM_MODEL_ENV] = "some/vision-model"
+    # The stub must not fabricate an answer for a probe it does not own. It used to return a
+    # 200 for any URL without `/vision`, so the STT and LLM probes that run inside this block
+    # were decided by the *vision* stub (#184); this goes red if that fabrication comes back.
+    try:
+        dyd.urllib.request.urlopen(dyd.urllib.request.Request("http://127.0.0.1:10302/health"))
+        fabricated = True
+    except urllib.error.URLError:
+        fabricated = False
+    check(
+        "the vision stub refuses a non-vision probe instead of fabricating a 200 (#184)",
+        not fabricated,
+        f"fabricated={fabricated}",
+    )
 
-# (e) wired into run_all, so `doctor` prints it and its exit code can move.
-names = [c.name for c in dyd.run_all()]
-check("run_all carries the vision check, so doctor reports it (#167)", "vlm" in names, str(names))
+    # (d) half-configured is a missing dependency, like the text role's equivalent.
+    os.environ.pop(dyd.VLM_MODEL_ENV, None)
+    c = dyd.check_vlm()
+    check(
+        "vision endpoint without a model -> 2 (#167)",
+        c.code == ec.MISSING_DEPENDENCY and bool(c.remediation),
+        f"{c.code} {c.detail}",
+    )
+    os.environ[dyd.VLM_MODEL_ENV] = "some/vision-model"
 
-# (f) `doctor` itself moves on the unreachable case: reported as a failure, not passed.
-os.environ[dyd.LLM_MODEL_ENV] = "some/model"
-out, err = io.StringIO(), io.StringIO()
-with redirect_stdout(out), redirect_stderr(err):
-    rc_doctor = dyc.main(["doctor"])
-check(
-    "doctor with a dead configured vision endpoint -> exit 3 (#167)",
-    rc_doctor == ec.DEPENDENCY_FAILED,
-    f"rc={rc_doctor}",
-)
-check("doctor names the vision role as the failure (#167)", "vlm" in err.getvalue(), err.getvalue())
-check(
-    "doctor renders the vision check as failed (#167)",
-    "[FAIL] vlm" in out.getvalue(),
-    out.getvalue(),
-)
+    # (e) wired into run_all, so `doctor` prints it and its exit code can move.
+    names = [c.name for c in dyd.run_all()]
+    check(
+        "run_all carries the vision check, so doctor reports it (#167)",
+        "vlm" in names,
+        str(names),
+    )
 
-# (g) `process` refuses before the run when the vision role is configured and dead.
-err_buf = io.StringIO()
-with redirect_stderr(err_buf):
-    rc_vlm = dyc._preflight()
+    # (f) `doctor` itself moves on the unreachable case: reported as a failure, not passed.
+    os.environ[dyd.LLM_MODEL_ENV] = "some/model"
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        rc_doctor = dyc.main(["doctor"])
+    check(
+        "doctor with a dead configured vision endpoint -> exit 3 (#167)",
+        rc_doctor == ec.DEPENDENCY_FAILED,
+        f"rc={rc_doctor}",
+    )
+    check(
+        "doctor names the vision role as the failure (#167)",
+        "vlm" in err.getvalue(),
+        err.getvalue(),
+    )
+    check(
+        "doctor renders the vision check as failed (#167)",
+        "[FAIL] vlm" in out.getvalue(),
+        out.getvalue(),
+    )
+
+    # (g) `process` refuses before the run when the vision role is configured and dead.
+    err_buf = io.StringIO()
+    with redirect_stderr(err_buf):
+        rc_vlm = dyc._preflight()
+    check(
+        "a dead configured vision endpoint refuses the run before it starts (#167)",
+        rc_vlm == ec.DEPENDENCY_FAILED,
+        f"rc={rc_vlm}",
+    )
+    check(
+        "the refusal names the vision role (#167)",
+        "vlm" in err_buf.getvalue(),
+        err_buf.getvalue(),
+    )
+
+# The stub is gone with its block: the next probe must not be answered by it (#184).
 check(
-    "a dead configured vision endpoint refuses the run before it starts (#167)",
-    rc_vlm == ec.DEPENDENCY_FAILED,
-    f"rc={rc_vlm}",
+    "the vision stub is out of scope once its block ends (#184)",
+    dyd.urllib.request.urlopen is fake_stt_urlopen,
+    f"urlopen={dyd.urllib.request.urlopen!r}",
 )
-check("the refusal names the vision role (#167)", "vlm" in err_buf.getvalue(), err_buf.getvalue())
-dyd.urllib.request.urlopen = real_urlopen
 
 # (h) an unconfigured vision endpoint is NOT a refusal: stage 6 degrades, the run proceeds.
 for key in (dyd.VLM_ENV, dyd.VLM_MODEL_ENV, dyd.VLM_KEY_ENV, dyd.LLM_ENV, dyd.LLM_MODEL_ENV):
@@ -596,85 +734,117 @@ check(
 #
 # `DYAK_STT` stays unset so the `auto` path is exercised. Before #95 `auto` fell back to a
 # *built-in* `127.0.0.1:10302`, so a host with whisper.cpp there made these checks measure
-# the host instead of the code (#175); there is no built-in default any more, but the case
-# this block pins is still "configured and unreachable", which is a different state from
-# "not configured". Both URL variables are honoured on the `auto` path
-# (`settings.resolve`), so they are pointed at a port that is provably dead: bound but
-# never `listen()`ed, which the kernel refuses at once, and held for the rest of this block
-# so no other process can take it. A fixed port (e.g. :1) is not provable, and a
-# bound-then-closed port leaves a gap in which it could be occupied.
-_dead = socket.socket()
-_dead.bind(("127.0.0.1", 0))
-_dead_url = f"http://127.0.0.1:{_dead.getsockname()[1]}"
+# the host instead of the code (#175). There is no built-in default any more, and the case
+# this block pins is still "configured and unreachable" -- a different state from "not
+# configured" -- so both URLs stay set. The refusal is produced by the STT stub, not by a
+# socket: the block used to point both URLs at a port it bound but never `listen()`ed, which
+# left the verdict depending on the host after all -- with `http_proxy` exported and a proxy
+# answering 502 the connection succeeded, and the refusal carried `code=0`. No socket is
+# opened here now, so a listener on the port, ECONNREFUSED timing and the ambient proxy
+# environment cannot decide this block (#184).
 os.environ.pop("DYAK_STT", None)
-os.environ["DYAK_WHISPERCPP_URL"] = _dead_url
-os.environ["DYAK_OPENAI_URL"] = _dead_url
+os.environ["DYAK_WHISPERCPP_URL"] = "http://127.0.0.1:10302"
+os.environ["DYAK_OPENAI_URL"] = "http://127.0.0.1:10302"
 os.environ.pop(dyd.LLM_ENV, None)
 os.environ[dyd.VAULT_ENV] = str(Path(tempfile.mkdtemp()) / "no-vault")
 
-# (a) with DYAK_STT unset and nothing reachable, run_all must return a Check, not raise.
-try:
-    stt_checks = dyd.run_all(required=dyd.PROCESS_REQUIRES)
-    stt_raised = None
-except Exception as exc:
-    stt_checks, stt_raised = [], exc
-stt_check = next((c for c in stt_checks if c.name == "stt"), None)
-check(
-    "no STT endpoint reachable -> run_all returns a Check, does not raise (#126)",
-    stt_raised is None and stt_check is not None and stt_check.failed,
-    f"raised={stt_raised!r}",
-)
-check(
-    "the STT refusal carries exit 2 and a remediation line (#126)",
-    stt_check is not None
-    and stt_check.code == ec.MISSING_DEPENDENCY
-    and bool(stt_check.remediation),
-    f"code={getattr(stt_check, 'code', None)!r}",
-)
-check(
-    # The `auto` path reaches this failure too, and it is the path a default install takes,
-    # so the proxy/300 s trap must be named here and not only on the explicit-backend path.
-    "the auto STT refusal names the proxy and the 300 s reclaim (#95)",
-    stt_check is not None
-    and "100.64.0.1:10301" in (stt_check.remediation or "")
-    and "300 s" in (stt_check.remediation or ""),
-    getattr(stt_check, "remediation", ""),
-)
+stt_reachable = False
+with urlopen_stub(fake_stt_urlopen):
+    # (a) with DYAK_STT unset and nothing reachable, run_all must return a Check, not raise.
+    try:
+        stt_checks = dyd.run_all(required=dyd.PROCESS_REQUIRES)
+        stt_raised = None
+    except Exception as exc:
+        stt_checks, stt_raised = [], exc
+    stt_check = next((c for c in stt_checks if c.name == "stt"), None)
+    check(
+        "no STT endpoint reachable -> run_all returns a Check, does not raise (#126)",
+        stt_raised is None and stt_check is not None and stt_check.failed,
+        f"raised={stt_raised!r}",
+    )
+    check(
+        "the STT refusal carries exit 2 and a remediation line (#126)",
+        stt_check is not None
+        and stt_check.code == ec.MISSING_DEPENDENCY
+        and bool(stt_check.remediation),
+        f"code={getattr(stt_check, 'code', None)!r}",
+    )
+    check(
+        # The `auto` path reaches this failure too, and it is the path a default install
+        # takes, so the proxy/300 s trap must be named here and not only on the
+        # explicit-backend path.
+        "the auto STT refusal names the proxy and the 300 s reclaim (#95)",
+        stt_check is not None
+        and "100.64.0.1:10301" in (stt_check.remediation or "")
+        and "300 s" in (stt_check.remediation or ""),
+        getattr(stt_check, "remediation", ""),
+    )
 
-# (b) an unconfigured LLM refuses by default, before any STT or frame cost.
-llm_check = next(c for c in dyd.run_all(required=dyd.PROCESS_REQUIRES | {"llm"}) if c.name == "llm")
-check(
-    "an unconfigured LLM is fatal for process by default (#126)",
-    llm_check.failed,
-    f"ok={llm_check.ok} fatal={llm_check.fatal}",
-)
-# #172: `failed` alone was not enough, and that is exactly why this survived. `run_all`
-# promotes the check to fatal but never touches `code`, so an unconfigured endpoint
-# produced a refusal that `worst_code` scored as OK -- `_preflight` printed "refusing to
-# start" and returned 0, and `process` went on to run stages 1-6 with no text endpoint.
-# The exit code is the entire point of the gate, so assert it, and assert it through
-# `_preflight` (the function that returns it) rather than on the Check alone.
-check(
-    "the promoted LLM refusal carries exit 2, not the OK default (#172)",
-    llm_check.code == ec.MISSING_DEPENDENCY,
-    f"failed={llm_check.failed} code={llm_check.code!r}",
-)
-saved_run_all_172 = dyc.run_all
-dyc.run_all = lambda *, required=None: [llm_check]
-err_buf_172 = io.StringIO()
-with redirect_stderr(err_buf_172):
-    rc_llm_default = dyc._preflight(no_llm=False)
-dyc.run_all = saved_run_all_172
-check(
-    "an unconfigured LLM makes preflight return exit 2, so `process` refuses (#172)",
-    rc_llm_default == ec.MISSING_DEPENDENCY,
-    f"rc={rc_llm_default}",
-)
-check(
-    "the exit-2 refusal is printed, not silent (#172)",
-    "refusing to start" in err_buf_172.getvalue(),
-    err_buf_172.getvalue(),
-)
+    # The verdict must come from the stub, not from whatever the host has listening or
+    # proxying: this is the check that goes red on the tree where the block opened a socket.
+    stt_probe_calls.clear()
+    dyd.check_stt()
+    check(
+        "the STT refusal is decided by the stub, not by a socket on the host (#184)",
+        bool(stt_probe_calls),
+        f"calls={stt_probe_calls!r}",
+    )
+
+    # And it must reach the exit code through `_preflight`, the function that returns it.
+    saved_run_all_stt = dyc.run_all
+    dyc.run_all = lambda *, required=None: [stt_check]
+    err_buf_stt = io.StringIO()
+    with redirect_stderr(err_buf_stt):
+        rc_stt = dyc._preflight()
+    dyc.run_all = saved_run_all_stt
+    check(
+        "a refused STT makes preflight return exit 2, so `process` refuses (#126)",
+        rc_stt == ec.MISSING_DEPENDENCY,
+        f"rc={rc_stt}",
+    )
+    check(
+        "the STT refusal is printed, not silent (#126)",
+        "refusing to start" in err_buf_stt.getvalue() and "stt" in err_buf_stt.getvalue(),
+        err_buf_stt.getvalue(),
+    )
+
+    # (b) an unconfigured LLM refuses by default, before any STT or frame cost.
+    llm_check = next(
+        c for c in dyd.run_all(required=dyd.PROCESS_REQUIRES | {"llm"}) if c.name == "llm"
+    )
+    check(
+        "an unconfigured LLM is fatal for process by default (#126)",
+        llm_check.failed,
+        f"ok={llm_check.ok} fatal={llm_check.fatal}",
+    )
+    # #172: `failed` alone was not enough, and that is exactly why this survived. `run_all`
+    # promotes the check to fatal but never touches `code`, so an unconfigured endpoint
+    # produced a refusal that `worst_code` scored as OK -- `_preflight` printed "refusing to
+    # start" and returned 0, and `process` went on to run stages 1-6 with no text endpoint.
+    # The exit code is the entire point of the gate, so assert it, and assert it through
+    # `_preflight` (the function that returns it) rather than on the Check alone.
+    check(
+        "the promoted LLM refusal carries exit 2, not the OK default (#172)",
+        llm_check.code == ec.MISSING_DEPENDENCY,
+        f"failed={llm_check.failed} code={llm_check.code!r}",
+    )
+    saved_run_all_172 = dyc.run_all
+    dyc.run_all = lambda *, required=None: [llm_check]
+    err_buf_172 = io.StringIO()
+    with redirect_stderr(err_buf_172):
+        rc_llm_default = dyc._preflight(no_llm=False)
+    dyc.run_all = saved_run_all_172
+    check(
+        "an unconfigured LLM makes preflight return exit 2, so `process` refuses (#172)",
+        rc_llm_default == ec.MISSING_DEPENDENCY,
+        f"rc={rc_llm_default}",
+    )
+    check(
+        "the exit-2 refusal is printed, not silent (#172)",
+        "refusing to start" in err_buf_172.getvalue(),
+        err_buf_172.getvalue(),
+    )
+stt_reachable = True
 
 # (c) --no-llm is the explicit consent: an unconfigured LLM is a note, not a refusal.
 # The *real* check, not a stand-in: its `code` is now MISSING_DEPENDENCY (#172), so this
@@ -697,7 +867,6 @@ check(
     err_buf.getvalue(),
 )
 
-_dead.close()
 _env.restore(SAVED_ENV)
 
 print()
