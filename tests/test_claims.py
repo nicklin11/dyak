@@ -184,11 +184,59 @@ ALLOWED_ROOT = {
     # caches are ignored by git but present in a working tree; they are expected
     # on disk and must never be committed, which the .gitignore check below covers
 }
-found_root = {p.name for p in REPO.iterdir()}
+
+
+# #194: this enumerated the working tree, so any untracked directory a tool dropped in the
+# root failed the gate locally while CI -- a fresh clone -- stayed green. The invariant is
+# the tracked tree: the `[` artefact this block was written for was tracked. The on-disk
+# extras are judged by git's own ignore rules, the `git check-ignore` the block below uses.
+def _tracked_root() -> set[str]:
+    """The top-level component of every tracked path, from `git ls-files`."""
+    listed = subprocess.run(
+        ["git", "ls-files"], cwd=REPO, capture_output=True, text=True, check=False
+    ).stdout
+    return {line.split("/", 1)[0] for line in listed.splitlines() if line}
+
+
+def _ignored(name: str) -> bool:
+    """Whether git ignores `name`, asked of git rather than read out of .gitignore."""
+    asked = subprocess.run(
+        ["git", "check-ignore", "-q", name], cwd=REPO, capture_output=True, check=False
+    )
+    return asked.returncode == 0
+
+
+tracked_root = _tracked_root()
 check(
-    "the repository root contains only expected entries",
-    found_root <= ALLOWED_ROOT,
-    f"unexpected: {sorted(found_root - ALLOWED_ROOT)}",
+    "git ls-files names the tracked tree",
+    bool(tracked_root),
+    "git ls-files returned nothing, so the checks below would be vacuous",
+)
+check(
+    "the repository root's tracked entries are all expected",
+    tracked_root <= ALLOWED_ROOT,
+    f"tracked but unexpected: {sorted(tracked_root - ALLOWED_ROOT)}",
+)
+
+# On-disk entries git does not track. `ALLOWED_ROOT` covers the expected ones (the caches,
+# and `.git`, which is a file in a linked worktree); a hidden directory is tool state -- the
+# `.agent-teams/` that broke this is untracked and, unlike the caches, absent from
+# .gitignore -- and everything else untracked and unignored is content this check exists to
+# catch: a visible file or directory, or a hidden file such as `.env`. Adding
+# `.agent-teams/` to .gitignore instead (#194's candidate 1) would hide the next tool's
+# droppings, so the tolerance is the shape, not the name.
+untracked_root = sorted({p.name for p in REPO.iterdir()} - tracked_root)
+unexpected_root = [
+    name
+    for name in untracked_root
+    if name not in ALLOWED_ROOT
+    and not _ignored(name)
+    and not (name.startswith(".") and (REPO / name).is_dir())
+]
+check(
+    "untracked entries at the repository root are ignored or hidden tool state",
+    not unexpected_root,
+    f"untracked, unignored and not a hidden directory: {unexpected_root}",
 )
 
 tracked = {
@@ -221,13 +269,7 @@ MUST_BE_IGNORED = {
 }
 unignored = []
 for candidate, _why in MUST_BE_IGNORED.items():
-    rc = subprocess.run(
-        ["git", "check-ignore", "-q", candidate],
-        cwd=REPO,
-        capture_output=True,
-        check=False,
-    ).returncode
-    if rc != 0:
+    if not _ignored(candidate):
         unignored.append(candidate)
 check(
     "a run's own outputs are gitignored",
