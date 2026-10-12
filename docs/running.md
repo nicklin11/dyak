@@ -24,10 +24,14 @@ stt = "whispercpp"
 whispercpp_url = "http://100.64.0.1:10301"
 llm_endpoint = "http://127.0.0.1:10300/v1"
 llm_model = "qwen3.6-35b"
+openai_max_upload_bytes = 26214400
 ```
 
 Every run-affecting `DYAK_*` variable in the table below can be set this way — `llm_endpoint`
-is settable in the file exactly as `DYAK_LLM_ENDPOINT` is in the environment. `DYAK_SETTINGS`
+is settable in the file exactly as `DYAK_LLM_ENDPOINT` is in the environment. A key whose
+setting is a number in the environment and in the built-in default — currently only
+`openai_max_upload_bytes` — is written bare in the file, as in the block above; a quoted count
+also works, so an existing file does not break. `DYAK_SETTINGS`
 is the one exception: it names the file being read, so the file cannot carry it. TOML tables
 (`[llm]`) are not supported; a table is dropped with a warning rather than read as a nested
 setting. A key the code does not define — including a typo like `llm_endpont` — is reported on
@@ -49,7 +53,7 @@ path.
 | `DYAK_OPENAI_URL` | `stt/openai_compat.py` | hosted STT endpoint (OpenAI-compatible `/v1/audio/transcriptions`). **No built-in default** (#95): unset means "not configured", not the whisper.cpp port |
 | `DYAK_OPENAI_KEY` | `stt/openai_compat.py` | key for the hosted STT endpoint |
 | `DYAK_OPENAI_MODEL` | `stt/openai_compat.py` | model id; default `whisper-1` |
-| `DYAK_OPENAI_MAX_UPLOAD_BYTES` | `stt/openai_compat.py` | per-upload ceiling of the hosted STT route, in bytes; a longer wav is sliced into chunks below it and their word timings spliced, with the sample bytes copied verbatim. Default `26214400` (25 MiB, the documented hosted limit). Bytes, not a unit-suffixed string: `25M` would have to guess between 25,000,000 and 26,214,400, and a wrong guess is the request that exceeds the limit |
+| `DYAK_OPENAI_MAX_UPLOAD_BYTES` | `stt/openai_compat.py` | per-upload ceiling of the hosted STT route, in bytes; a longer wav is sliced into chunks below it and their word timings spliced, with the sample bytes copied verbatim. Default `26214400` (25 MiB, the documented hosted limit). Bytes, not a unit-suffixed string: `25M` would have to guess between 25,000,000 and 26,214,400, and a wrong guess is the request that exceeds the limit. In the settings file this is written bare — `openai_max_upload_bytes = 26214400`; a quoted count also works, and a unit-suffixed string is exit 1 naming the setting |
 | `DYAK_LLM_ENDPOINT` | `llm.py`, `deps.py` | OpenAI-compatible base URL for synthesis (stage 7) and audit (stage 9) |
 | `DYAK_LLM_MODEL` | `llm.py`, `deps.py` | model id sent in the request |
 | `DYAK_LLM_KEY` | `llm.py` | optional; unset means no `Authorization` header |

@@ -89,6 +89,11 @@ HONOURED_SETTINGS: frozenset[str] = frozenset(
     settings_key(name) for name in _ENV_NAMES if name != SETTINGS_PATH_ENV
 )
 
+#: Honoured keys whose value is a number in the environment and in the built-in default, so a
+#: bare TOML integer in the file is the value rather than a type error (#192). Derived from the
+#: constant above for the same reason `HONOURED_SETTINGS` is: the name exists once.
+NUMERIC_SETTINGS: frozenset[str] = frozenset({settings_key(OPENAI_MAX_UPLOAD_BYTES_ENV)})
+
 # --- the resolver --------------------------------------------------------------------
 #: `Resolved.source` values, named rather than inline so a caller compares against a symbol.
 SOURCE_FLAG = "flag"
@@ -191,13 +196,40 @@ def _parse_settings(path: Path) -> dict[str, object] | None:
     if not path.is_file():
         return {}
     try:
-        return tomllib.loads(path.read_text(encoding="utf-8"))
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as exc:
         _report_once(path, f"cannot read settings {path}: {exc}")
         return None
     except tomllib.TOMLDecodeError as exc:
         _report_once(path, f"ignoring malformed settings {path}: {exc}")
         return None
+    return _coerce_numeric(data)
+
+
+def _coerce_numeric(data: dict[str, object]) -> dict[str, object]:
+    """A TOML number for a numeric setting becomes its decimal text (#192).
+
+    `openai_max_upload_bytes` is a number in the environment and in the built-in default, and
+    `docs/running.md` documents a bare byte count, so `20000` in the file must be the value
+    rather than a dropped non-string. The coercion sits here, not in `read_settings`: `doctor`
+    reads the parse result directly (`deps.check_settings`), so a reader-side fix would leave
+    the key listed as honoured *and* ignored on the same line.
+
+    A `bool` is excluded because `isinstance(True, int)` is true and `true` is not a count;
+    the consumer's own parser stays the authority on whether the text is a valid count, so
+    `20000.5` is handed to it and fails loudly naming the setting rather than silently
+    falling back to the default.
+    """
+    return {
+        key: (
+            str(value)
+            if key in NUMERIC_SETTINGS
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            else value
+        )
+        for key, value in data.items()
+    }
 
 
 #: Settings files whose parse failure has already been reported in this process (#156).
@@ -295,7 +327,9 @@ def read_settings() -> dict[str, str]:
     is reported once to stderr with its path and yields nothing: a typo in a config file must
     not take the pipeline down at stage 0, and must not be read as a garbage value either.
     Non-string values are dropped rather than stringified -- a TOML table is a non-string
-    value, which is the permanent answer for tables (#52 owner decision 1).
+    value, which is the permanent answer for tables (#52 owner decision 1). A TOML number under
+    a numeric key is not a non-string by the time it reaches this filter: `_parse_settings`
+    coerces it to its decimal text (#192).
 
     Keys no setting reads, values dropped for not being a string and likely typos are named
     on stderr by `report_settings` (#156). They are not reported here: this function is the
