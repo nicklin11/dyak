@@ -22,6 +22,7 @@ is reported as a dependency failure.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -45,6 +46,12 @@ class MediaInfo:
     audio_codec: str | None = None
     sample_rate: int | None = None
     channels: int | None = None
+    # #94: the input's own fingerprint. Appended after the existing defaults so every
+    # construction that predates them stays valid. `None` means this record cannot speak to
+    # the value -- a hand-built `MediaInfo`, or a stat/hash that failed -- and `provenance`
+    # omits the key rather than writing `null`, which would claim the run measured nothing.
+    size_bytes: int | None = None
+    sha256: str | None = None
 
     @property
     def video_only(self) -> bool:
@@ -83,6 +90,20 @@ def provenance(info: MediaInfo, audio_artefact=None, *, ffmpeg_version: str = ""
     `ffmpeg_version` is here rather than left to `detect.json`, because stages 1 and 2 call
     ffprobe/ffmpeg before stage 4 does, and #70 was a filter-chain bug -- the chain and the
     binary that ran it belong together.
+
+    #94 added the input's fingerprint: the absolute `path`, the `size_bytes` and the
+    `sha256` of the file that was read. The issue's framing was that a bundle could prove
+    "this note came from this transcript" (#79 hashes the transcript) but only *asserted*
+    "this note came from this lecture" by filename. The two files for this lecture are the
+    case: `1_lecture_OCS.mp4` and `1_lecture_OCS.webm` slugify to the same bundle and differ
+    only in `duration`, so a re-encode at the same duration is invisible in the record
+    without a size and a digest.
+
+    Nothing verifies the record. The input is not in the bundle -- it can be moved, deleted,
+    or live on a USB disk that is gone by the time anyone reads this -- so its digest can
+    only be recorded, while stage 12 keeps verifying the bundle's own files by stat. The
+    keys are therefore absent when unset rather than `null`: an absent key says this
+    document cannot speak to the value, `null` would claim the run looked and found nothing.
     """
     payload: dict = {
         "stages": [1, 2],
@@ -90,6 +111,9 @@ def provenance(info: MediaInfo, audio_artefact=None, *, ffmpeg_version: str = ""
         "requires_model": False,
         "source": {
             "name": info.path.name,
+            # Absolute, and never unresolved: `probe` resolves before it stats, so this is
+            # the file the run opened rather than the string the user typed (#94).
+            "path": str(info.path),
             "duration": round(info.duration, 1),
             "has_video": info.has_video,
             "video_codec": info.video_codec,
@@ -101,6 +125,10 @@ def provenance(info: MediaInfo, audio_artefact=None, *, ffmpeg_version: str = ""
             "channels": info.channels,
         },
     }
+    if info.size_bytes is not None:
+        payload["source"]["size_bytes"] = info.size_bytes
+    if info.sha256 is not None:
+        payload["source"]["sha256"] = info.sha256
     if ffmpeg_version:
         payload["ffmpeg"] = ffmpeg_version
     if audio_artefact is not None:
@@ -116,7 +144,10 @@ def provenance(info: MediaInfo, audio_artefact=None, *, ffmpeg_version: str = ""
 
 def probe(path: Path) -> MediaInfo:
     """Describe a media file. Raises runner.DependencyError if ffprobe fails."""
-    src = Path(path).expanduser()
+    # Resolved here rather than at the ffprobe argv below (#94): every message the checks
+    # print and `info.path` itself must name the file the run actually opened, not the
+    # string the user typed -- a relative path, a `~`, or a symlink into the library.
+    src = Path(path).expanduser().resolve()
     if not src.exists():
         raise _no_such_file(src)
     if not src.is_file():
@@ -226,6 +257,13 @@ def _reduce(src: Path, data: dict) -> MediaInfo:
         audio_codec=(audio or {}).get("codec_name"),
         sample_rate=_integer((audio or {}).get("sample_rate")),
         channels=_integer((audio or {}).get("channels")),
+        # Filled here rather than in `probe`, which is where the existence and readability
+        # checks are (#94): an unreadable source stays the named DependencyError it already
+        # is, and the hash is never attempted on a file that failed those checks. Both are
+        # `None` if the stat or the read fails afterwards, which `provenance` records by
+        # omitting the key -- a run whose media ffprobe just described is not a failed run.
+        size_bytes=_size_of(src),
+        sha256=_digest_of(src),
     )
 
 
@@ -283,6 +321,28 @@ def _integer(value: object) -> int | None:
     try:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
+        return None
+
+
+def _size_of(path: Path) -> int | None:
+    """The input's size, or `None` if it cannot be stat'd."""
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
+
+
+def _digest_of(path: Path) -> str | None:
+    """The input's sha256, or `None` if it cannot be read.
+
+    Streamed rather than `read_bytes()`: the existing `_digest` helpers (`stt/core.py`,
+    `bundle.py`) hash a transcript, where reading whole is nothing, while a lecture
+    recording is hundreds of MB and can be tens of GB.
+    """
+    try:
+        with path.open("rb") as handle:
+            return hashlib.file_digest(handle, "sha256").hexdigest()
+    except OSError:
         return None
 
 

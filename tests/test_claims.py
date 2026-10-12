@@ -1003,6 +1003,48 @@ check(
     f"on disk {expected_suites}, ci.yml runs {invoked_suites}",
 )
 
+# --- 12. the input's fingerprint is recorded, never verified (#94) ---------------------
+# `source-provenance.json` now carries the input's `path`, `size_bytes` and `sha256`. Two
+# claims in `probe.py`'s own docstrings are what keep that from being a liability, and both
+# are checkable from the source rather than by running anything:
+#
+#   * **nothing verifies it.** The input is not in the bundle -- it can be moved, deleted, or
+#     live on a USB disk that is gone by the time anyone reads the record -- so its digest can
+#     only be written down, while stage 12 keeps verifying the bundle's own files by stat.
+#     #79's transcript digest is checkable because the transcript *is* in the bundle; this one
+#     is not. Requiring the document would fail bundles that are correct today, including
+#     every bundle written before #94.
+#   * **the digest is streamed, not read whole.** A lecture recording is hundreds of MB and can
+#     be tens of GB; `read_bytes()` is the shape the two older `_digest` helpers have
+#     (`stt/core.py`, `bundle.py`) and it is right for a transcript, wrong for the input.
+PROBE_SRC = (REPO / "src" / "dyak" / "probe.py").read_text(encoding="utf-8")
+# The claim is checked against the AST, not the text: `probe.py`'s own docstring names
+# `read_bytes()` to say why that shape was rejected for the input, and a text scan would read
+# the sentence explaining the choice as the choice. Same reason section 5 parses the import
+# graph rather than grepping for the word "shipboard".
+_probe_tree = ast.parse(PROBE_SRC)
+probe_digest_calls = [
+    node.attr
+    for node in ast.walk(_probe_tree)
+    if isinstance(node, ast.Attribute) and node.attr == "file_digest"
+]
+probe_whole_reads = [
+    node.attr
+    for node in ast.walk(_probe_tree)
+    if isinstance(node, ast.Attribute) and node.attr == "read_bytes"
+]
+check(
+    "the input's record stays optional, so stage 12 never requires the source (#94)",
+    probe.PROVENANCE_NAME not in dyro.REQUIRED
+    and probe.PROVENANCE_NAME not in dyro.REQUIRED_WHEN_VIDEO,
+    f"REQUIRED={sorted(dyro.REQUIRED)} WHEN_VIDEO={sorted(dyro.REQUIRED_WHEN_VIDEO)}",
+)
+check(
+    "the source digest is streamed, never read whole (#94)",
+    probe_digest_calls and not probe_whole_reads,
+    f"file_digest x{len(probe_digest_calls)}, read_bytes x{len(probe_whole_reads)}",
+)
+
 _env.restore(SAVED_ENV)
 
 print()
