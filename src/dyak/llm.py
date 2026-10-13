@@ -106,6 +106,20 @@ RETRY_AFTER_CAP = 60.0
 #: Consecutive connection-level failures after which one stage stops issuing calls (#124).
 BREAKER_MAX = 3
 
+#: The sampling seed every `chat()` call sends (#77). A constant and not a setting: a
+#: `DYAK_LLM_SEED` would be a documented key whose promise this pipeline cannot keep, and it
+#: would add a failure mode -- someone sets it and expects two runs to agree. The owner asked
+#: for the note to come out the same, not for a difference to be re-rollable, and a random
+#: per-run seed would let a difference be re-rolled without making it smaller.
+#:
+#: The value is arbitrary; what carries the meaning is that one constant reaches every call, so
+#: two runs of the same lecture send the same request. Whether this gateway honours `seed` is a
+#: property of the gateway and is not verifiable from this tree, so the claim a bundle can make
+#: is that this seed *was sent* -- recorded by `Config.redacted()` for exactly that claim and
+#: nothing stronger. Bit-identical notes stay out of reach: the model version is a variable
+#: this code does not control either (`served_model` is what records it).
+SEED = 20261012
+
 
 class NotConfiguredError(RuntimeError):
     """No endpoint, or an endpoint with no model id. Raised before any network call."""
@@ -129,6 +143,10 @@ class Config:
     api_key: str | None = None
     timeout: float = 600.0
     temperature: float = 0.2
+    #: Sent with every call. Last field on purpose: every existing construction is positional
+    #: (`Config(endpoint, model, key)`), and a new field in the middle would silently shift
+    #: them. Not read by `from_env()` -- see `SEED`.
+    seed: int = SEED
 
     @classmethod
     def from_env(cls) -> Config:
@@ -152,6 +170,10 @@ class Config:
             "model": self.model,
             "api_key": bool(self.api_key),
             "temperature": self.temperature,
+            # Recorded because the seed is an input to the note: without it a bundle says which
+            # model answered and not which sample was asked for (#77). It is the one sampling
+            # input every stage shares, since all four call sites go through `chat()`.
+            "seed": self.seed,
         }
 
     @classmethod
@@ -206,6 +228,17 @@ class Reply:
     finish_reason: str | None = None
 
     def as_dict(self) -> dict:
+        """The call's metadata, and the model's output in full.
+
+        `text` is last so every key that was here keeps its position in the artefact's JSON,
+        and it is not truncated (#252). ADR-0004 D4 asks that a note be traceable to the exact
+        model output; this dict is the only place that output is recorded, and the transcript
+        that omitted it recorded the question and not the answer -- which is why #240's
+        near-match measurement could only be finished by replaying the recorded requests
+        against the live endpoint, and why a finding cut at 300 characters (`audit.py:504`)
+        could not be recovered from the bundle at all. The cost is the reply's 1-3 KB against
+        a request of ~124 KB per audit call, so the cheap half is the one worth keeping whole.
+        """
         return {
             "model": self.model,
             "served_model": self.served_model,
@@ -214,6 +247,7 @@ class Reply:
             "seconds": round(self.seconds, 3),
             "attempts": self.attempts,
             "finish_reason": self.finish_reason,
+            "text": self.text,
         }
 
     @property
@@ -282,6 +316,10 @@ def chat(
         "model": config.model,
         "messages": messages,
         "temperature": config.temperature,
+        # #77: the same constant for every call in every stage, so the note is a function of
+        # (source, transcript digest, model, prompt, seed) rather than of whatever the endpoint
+        # happened to sample. Sent here, at the one choke point, rather than by each stage.
+        "seed": config.seed,
         "stream": False,
     }
     if max_tokens is not None:
@@ -414,7 +452,9 @@ class Transcript:
 
     Held in memory and written once. ADR-0004 D4 requires that a note can be traced to the exact
     model output it came from, and the cheapest way to guarantee that is to record it at the
-    point of the call rather than reconstructing it later.
+    point of the call rather than reconstructing it later. That output is `Reply.as_dict`'s
+    `text`, in full: before #252 an entry carried the request and the call's metadata and no
+    answer, so the artefact could not say what any model had said.
 
     `calls` is the order the calls *finished* in, which under `DYAK_LLM_CONCURRENCY > 1` is not
     the order of the note. The artefact is `as_dict`, which writes them in section order; a

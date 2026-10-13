@@ -74,6 +74,7 @@ that is what keeps the two contracts from drifting apart again.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -104,6 +105,13 @@ STAGE7_ARTEFACTS = (NOTE_NAME, REPORT_NAME, PROVENANCE_NAME)
 #: the skill it claims to implement: the check passed because both places carried the same
 #: drift. The briefs are the skill's per-section requirements, compressed to what a
 #: per-section request can state -- the full wording lives in the skill, not here.
+#:
+#: That compression is what dropped the skill's table rules: §4, §5 and §7 each ask for a
+#: table, none of the three briefs named one, and only §3 -- whose brief did -- has tables in
+#: the generated note (#74). They are back below, and `tests/test_stages.py` fails if one is
+#: dropped again. The brief is the place they have to live: the skill file itself is never sent
+#: to the model (`synthesise` sends `SYSTEM` plus this brief), so editing only `SKILL.md`
+#: changes nothing at run time.
 SECTIONS: tuple[tuple[int, str, str], ...] = (
     (
         1,
@@ -123,12 +131,16 @@ SECTIONS: tuple[tuple[int, str, str], ...] = (
     (
         4,
         "Понятийный аппарат и постановка задачи",
-        "термины с определениями; математическая формализация: состояние, управление, наблюдение, цель — с явными размерностями; ограничения; критерии качества с явным «максимизируется/минимизируется»",
+        "термины с определениями — таблицей, если терминов ≥ 3; математическая формализация: "
+        "состояние, управление, наблюдение, цель — с явными размерностями; ограничения; "
+        "критерии качества с явным «максимизируется/минимизируется»",
     ),
     (
         5,
         "Теоретический конспект и систематизация методов",
-        "классификация методов; по каждому семейству: идея → формулировка → плюсы → минусы → границы применимости → trade-off; где кончается зона гарантий",
+        "классификация методов — сравнительной таблицей, если семейств ≥ 3 и есть общие оси "
+        "сравнения; по каждому семейству: идея → формулировка → плюсы → минусы → границы "
+        "применимости → trade-off; где кончается зона гарантий",
     ),
     (
         6,
@@ -138,7 +150,8 @@ SECTIONS: tuple[tuple[int, str, str], ...] = (
     (
         7,
         "Численная реализация и инструменты",
-        "сравнение подходов к вычислениям, библиотеки с их ролью в задаче, код или псевдокод, ловушки реализации",
+        "сравнение подходов к вычислениям — таблицей: точность, стоимость, память, когда что "
+        "уместно; библиотеки с их ролью в задаче, код или псевдокод, ловушки реализации",
     ),
     (
         8,
@@ -164,11 +177,23 @@ SECTION_BUDGET = 200_000
 #: essentially the whole lecture.
 COVERAGE_THRESHOLD = 0.95
 
+#: #74 A2: the subsection rule, as one string, because the style is the owner's preference and
+#: changing it must stay one edit. Numbered `N.M` is the recommendation -- it matches the
+#: skill's own `### N.` numbering and the handmade baseline, and section 8's self-test can then
+#: point at a specific subsection. The generated note numbered sections 2, 4, 5 and 6 and left
+#: 1, 3, 7 and 8 unnumbered: inconsistent inside one document, because nothing in `SYSTEM`
+#: asked for the same treatment everywhere.
+SUBSECTION_RULE = """\
+СТРУКТУРА: в каждом разделе, где материал членится, подразделы нумеруй как N.M в одной
+строке с заголовком («### 5.2 Сравнительная таблица семейств») — одинаково во всех
+разделах, а не по выбору на раздел."""
+
 #: The skill's binding rules, condensed to what a per-section writer can act on. Every rule
 #: here names its skill counterpart: the boundary of trust (§ "Проход 1", "Граница доверия"),
 #: the math rules (§ "Проход 2. Правила математики"), the content rules (§ "Проход 2. Правила
 #: содержания") and the organisational-content separation.
-SYSTEM = """\
+SYSTEM = (
+    """\
 Ты — конспектор инженерной лекции (навык academic-lecture-synthesizer, проход 2: синтез).
 Пиши на русском, в разметке Markdown.
 
@@ -197,7 +222,11 @@ SYSTEM = """\
 8. Не пересказывай структуру этого документа. Не пиши воду.
 
 ФОРМАТ: ответ — только тело раздела, без заголовка верхнего уровня и без обращений
-к читателю. Разговорную речь («ну», «как бы», «вы поняли») вычисти."""
+к читателю. Разговорную речь («ну», «как бы», «вы поняли») вычисти.
+
+"""
+    + SUBSECTION_RULE
+)
 
 
 @dataclass(frozen=True)
@@ -615,7 +644,30 @@ _TOC = re.compile(r"^\s{0,3}#{1,6}\s*(содержание|оглавление)
 _HEADING = re.compile(r"^(\s{0,3})(#{1,6})(\s+.*)$")
 
 
-def normalise(body: str) -> str:
+def _repeats_title(text: str, title: str) -> bool:
+    """True when a body heading only says what the section heading above it already says.
+
+    `assemble` writes `## N. Title`; a body that opens with `### N. Title` adds nothing, and
+    all eight sections of the 2026-10-12 note did exactly that (#74) -- in three forms:
+    `### 1. Паспорт лекции`, `### Раздел 2. Организационный блок` and
+    `### Карта источников и литературы`. `text` is the heading line or just its text -- the
+    hashes are stripped either way. Equality, not containment: a heading that adds a word
+    ("Паспорт лекции и тема") is a real subheading and is kept.
+    """
+
+    def flat(value: str) -> str:
+        # The hashes, the word `Раздел`, the number and the punctuation are not part of the
+        # comparison. The artefact writes all three forms above for the same section, so a
+        # comparison that required the digits would miss the third.
+        value = re.sub(r"^\s*#{1,6}\s*", "", value)
+        value = re.sub(r"^\s*(?:раздел|секция|section)\s*\d*\s*[.)]?\s*", "", value, flags=re.I)
+        value = re.sub(r"^\s*\d+(?:[.)]\d+)*[.)]?\s*", "", value)
+        return re.sub(r"[^\w]+", " ", value).strip().casefold()
+
+    return bool(flat(text)) and flat(text) == flat(title)
+
+
+def normalise(body: str, title: str | None = None) -> str:
     """Push every heading in a section body below `##`, preserving relative nesting.
 
     The shallowest heading in the body becomes `###`; the rest keep their distance from it.
@@ -625,7 +677,9 @@ def normalise(body: str) -> str:
 
     Demoting rather than deleting: the heading usually carries real information -- which
     slide the fragment was -- and the failure to preserve it is worse than the extra level.
-    Stripping it would leave a note with unexplained structural breaks in it.
+    Stripping it would leave a note with unexplained structural breaks in it. The one
+    exception is a heading that repeats the section's own `title`, which carries no
+    information at all and is dropped (#74) -- see `_repeats_title`.
 
     Measured on lecture 1, 2026-10-04: leaving `##` alone produced 29 unnumbered `##`
     headings as siblings of the eight `## N.` sections, so `## N.` stopped being the top
@@ -639,13 +693,21 @@ def normalise(body: str) -> str:
     # 3 - min, clamped at 0 so a body that starts at `####` is not *promoted*, and the
     # result is clamped at 6 so a deep body cannot produce `########`, which is not a
     # heading in Markdown, it is a paragraph.
+    #
+    # Computed over every heading, including a repeated title that is about to be dropped:
+    # the headings that stay must keep the levels they would have had without the drop.
     shift = max(0, 3 - min(levels))
-
-    def demote(match: re.Match[str]) -> str:
+    kept: list[str] = []
+    for line in body.splitlines():
+        match = _HEADING.match(line)
+        if match is None:
+            kept.append(line)
+            continue
         indent, hashes, rest = match.group(1), match.group(2), match.group(3)
-        return f"{indent}{'#' * min(6, len(hashes) + shift)}{rest}"
-
-    return "\n".join(_HEADING.sub(demote, line) for line in body.splitlines())
+        if title is not None and _repeats_title(rest, title):
+            continue
+        kept.append(f"{indent}{'#' * min(6, len(hashes) + shift)}{rest}")
+    return "\n".join(kept)
 
 
 def _section_target(lecture: Lecture, number: int, title: str, brief: str) -> Section:
@@ -706,7 +768,7 @@ def _finish_section(
         body = ""
         extra.append(f"section {number}: model emitted a table of contents, discarded")
     else:
-        body = normalise(body)
+        body = normalise(body, title)
     return (
         body,
         {
@@ -1025,11 +1087,30 @@ def gates_of(report_path: Path) -> SectionGates | None:
     )
 
 
+def prompt_digest() -> str:
+    """sha256 of what a stage-7 request actually carries: `SYSTEM` plus the eight briefs.
+
+    Not `SYSTEM` alone (#77). The brief travels in the request's user message and it is the
+    half #74 edits, so a digest that skipped it would not change when the prompt did -- which
+    is the gap the decision records: two runs with different prompts are recorded identically
+    today, and the 3961 -> 7785 word swing between the artefacts cannot be attributed from a
+    bundle. Stage 9's equivalent (`audit.provenance` with `CRITIC_SYSTEM`) is not here: that
+    is `src/dyak/audit.py`, which an open PR holds.
+    """
+    return hashlib.sha256(
+        "\n".join([SYSTEM, *(brief for _, _, brief in SECTIONS)]).encode("utf-8")
+    ).hexdigest()
+
+
 def provenance(note: Note, config: llm.Config | None) -> str:
     return json.dumps(
         {
             "stage": 7,
             "tool": "dyak-synth-v1",
+            # The other half of the sampling record: `endpoint.seed` says which sample was
+            # asked for, this says which prompt asked. Without both, a difference between two
+            # notes of the same lecture cannot be attributed to anything (#77).
+            "prompt_sha256": prompt_digest(),
             "requires_model": False,
             "synthesizer": note.synthesizer,
             "model": note.model,

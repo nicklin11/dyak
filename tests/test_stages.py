@@ -9729,6 +9729,226 @@ with tempfile.TemporaryDirectory() as _br_td:
         )
 
 
+# --- #74, #77, #252: the note's structure, the run's seed, the transcript's missing text ---
+
+# #74: the skill's table rules live in the briefs, because the brief is what the request
+# carries. `synthesise` sends `SYSTEM` plus one brief, so a rule that exists only in `SKILL.md`
+# never reaches the model -- which is how the skill's §4/§5/§7 table requirements were lost in
+# the condensation while §3's survived, and §3 is the only section with tables in the note.
+_briefs = {number: brief for number, _title, brief in dysy.SECTIONS}
+check(
+    "#74: every brief whose skill section asks for a table names one",
+    all("таблиц" in _briefs[number] for number in (3, 4, 5, 7)),
+    repr({n: _briefs[n] for n in (3, 4, 5, 7) if "таблиц" not in _briefs[n]}),
+)
+check(
+    "#74: and each rule names its own subject -- the first one was condensed out once already",
+    all(
+        marker in _briefs[number]
+        for number, marker in ((4, "термины"), (5, "классификация"), (7, "сравнение подходов"))
+    ),
+    repr({n: _briefs[n][:60] for n in (4, 5, 7)}),
+)
+check(
+    "#74: SYSTEM carries the subsection rule, as one string the owner can replace",
+    dysy.SUBSECTION_RULE in dysy.SYSTEM and "N.M" in dysy.SUBSECTION_RULE,
+    repr(dysy.SUBSECTION_RULE),
+)
+# Measured on the generated note (`note.linked.md`, the 2026-10-12 06:21 run, 7785 words): all
+# eight sections opened with a heading repeating their own `## N.` title, and they use three
+# forms -- `### 1. Паспорт лекции`, `### Раздел 2. Организационный блок` and
+# `### Карта источников и литературы`. A comparison that covers one form ships the other two.
+_ARTEFACT_REPEATS = (
+    (1, "Паспорт лекции", "### 1. Паспорт лекции"),
+    (2, "Организационный блок", "### Раздел 2. Организационный блок"),
+    (3, "Карта источников и литературы", "### Карта источников и литературы"),
+    (
+        4,
+        "Понятийный аппарат и постановка задачи",
+        "### 4. Понятийный аппарат и постановка задачи",
+    ),
+    (
+        5,
+        "Теоретический конспект и систематизация методов",
+        "### 5. Теоретический конспект и систематизация методов",
+    ),
+    (6, "Математический ликбез / фундамент", "### 6. Математический ликбез / фундамент"),
+    (7, "Численная реализация и инструменты", "### Численная реализация и инструменты"),
+    (
+        8,
+        "Вопросы для самопроверки и подготовки к экзамену",
+        "### 8. Вопросы для самопроверки и подготовки к экзамену",
+    ),
+)
+check(
+    "#74: all eight duplicate headings the note actually had are dropped, in all three forms",
+    [title for _number, title, _heading in _ARTEFACT_REPEATS]
+    == [title for _number, title, _brief in dysy.SECTIONS]
+    and all(
+        dysy.normalise(f"{heading}\n\nТекст раздела.", title).strip() == "Текст раздела."
+        for _number, title, heading in _ARTEFACT_REPEATS
+    ),
+    repr(
+        [
+            heading
+            for _number, title, heading in _ARTEFACT_REPEATS
+            if dysy.normalise(f"{heading}\n\nТекст раздела.", title).strip() != "Текст раздела."
+        ]
+    ),
+)
+_norm_body, _norm_record, _norm_warnings = dysy._finish_section(
+    1, "Паспорт лекции", "### 1. Паспорт лекции\n\nТекст раздела.", "stop"
+)
+check(
+    "#74: through the real entry point, the repeated heading is gone and the text stays",
+    "### 1. Паспорт лекции" not in _norm_body
+    and "Текст раздела." in _norm_body
+    and _norm_record["present"]
+    and not _norm_warnings,
+    repr(_norm_body),
+)
+check(
+    "#74: a subheading that adds a word is a real heading and is still demoted, not dropped",
+    dysy.normalise("## Подраздел\n\nтекст", "Паспорт лекции") == "### Подраздел\n\nтекст"
+    and dysy.normalise("### Паспорт лекции и тема\n", "Паспорт лекции").strip()
+    == "### Паспорт лекции и тема",
+    repr(
+        [
+            dysy.normalise("## Подраздел\n\nтекст", "Паспорт лекции"),
+            dysy.normalise("### Паспорт лекции и тема\n", "Паспорт лекции"),
+        ]
+    ),
+)
+
+# #77: the seed reaches the wire, and it reaches provenance. The claim this check can make is
+# that the seed was *sent* -- the fake observes the body -- not that the note is repeatable:
+# whether the gateway honours `seed` is a property of the gateway, not of this tree.
+_seed_http = FakeHTTP(
+    [
+        json.dumps(
+            {
+                "choices": [{"message": {"content": "готово"}, "finish_reason": "stop"}],
+                "model": "seed-model",
+            }
+        ).encode()
+    ]
+)
+_real_llm_urlopen = dyle.urllib.request.urlopen
+try:
+    dyle.urllib.request.urlopen = _seed_http
+    dyle.chat([{"role": "user", "content": "привет"}], dyle.Config("http://seed.test", "m"))
+finally:
+    dyle.urllib.request.urlopen = _real_llm_urlopen
+_sent_payload = json.loads(_seed_http.sent[0].data.decode("utf-8"))
+check(
+    "#77: chat() sends the seed in the request body, at the one choke point every stage uses",
+    _sent_payload.get("seed") == dyle.SEED and _sent_payload.get("temperature") == 0.2,
+    repr({k: _sent_payload.get(k) for k in ("seed", "temperature")}),
+)
+check(
+    "#77: redacted() records it, so synth, audit, repair and caption provenance all carry it",
+    dyle.Config("http://x", "m").redacted().get("seed") == dyle.SEED,
+    repr(dyle.Config("http://x", "m").redacted()),
+)
+_saved_seed_env = {
+    name: os.environ.get(name)
+    for name in (dyle.ENDPOINT_ENV, dyle.MODEL_ENV, "DYAK_LLM_SEED", "DYAK_SETTINGS")
+}
+try:
+    os.environ[dyle.ENDPOINT_ENV] = "http://from-env.test"
+    os.environ[dyle.MODEL_ENV] = "env-model"
+    # A key that must not exist. `from_env()` is deliberately not a reader of the seed: a
+    # documented knob would be a promise this pipeline cannot keep, and a failure mode.
+    os.environ["DYAK_LLM_SEED"] = "999"
+    os.environ["DYAK_SETTINGS"] = str(tmp / "absent-settings.toml")
+    _env_config = dyle.Config.from_env()
+finally:
+    for _name, _value in _saved_seed_env.items():
+        if _value is None:
+            os.environ.pop(_name, None)
+        else:
+            os.environ[_name] = _value
+check(
+    "#77: from_env() does not read a seed -- DYAK_LLM_SEED=999 changes nothing",
+    _env_config.seed == dyle.SEED,
+    f"seed={_env_config.seed} with DYAK_LLM_SEED=999 set",
+)
+check(
+    "#77: and no honoured setting names one -- there is no new docs row to write",
+    not any("seed" in key.lower() for key in dyd.HONOURED_SETTINGS),
+    repr(sorted(key for key in dyd.HONOURED_SETTINGS if "seed" in key.lower())),
+)
+# The prompt is the other half: a seed that is recorded beside an unrecorded prompt attributes
+# nothing. The digest covers the briefs as well as `SYSTEM`, because the briefs are the half
+# #74 edits and a digest of `SYSTEM` alone would not move when they do.
+_synth_provenance = json.loads(dysy.provenance(dysy.Note(markdown="x"), None))
+check(
+    "#77: synth provenance carries the prompt digest beside the tool string",
+    _synth_provenance.get("prompt_sha256") == dysy.prompt_digest(),
+    repr(_synth_provenance.get("prompt_sha256")),
+)
+check(
+    "#77: the digest covers the briefs, so a prompt edit cannot leave it unchanged",
+    dysy.prompt_digest() != hashlib.sha256(dysy.SYSTEM.encode("utf-8")).hexdigest()
+    and dysy.prompt_digest()
+    == hashlib.sha256(
+        "\n".join([dysy.SYSTEM, *[b for _n, _t, b in dysy.SECTIONS]]).encode("utf-8")
+    ).hexdigest(),
+    dysy.prompt_digest()[:16],
+)
+_llm_source = pathlib.Path(dyle.__file__).read_text(encoding="utf-8")
+check(
+    "#77: the seed is documented as sent with its limit named, never as a promise",
+    "was sent" in _llm_source and "not verifiable" in _llm_source,
+    "llm.py seed prose",
+)
+
+# #252: the transcript records the answer as well as the question. ADR-0004 D4 asks for the
+# *exact* model output, so the text is recorded in full -- a truncation would re-create, at a
+# different length, the loss that made #240's near-match measurement need a live replay.
+_long_reply_text = "я" * 5000
+_reply_for_dict = dyle.Reply(
+    text="готовый ответ",
+    model="m",
+    prompt_tokens=1,
+    completion_tokens=2,
+    seconds=0.5,
+    attempts=1,
+    finish_reason="stop",
+)
+check(
+    "#252: Reply.as_dict() carries the model's output, not only the call's metadata",
+    _reply_for_dict.as_dict().get("text") == "готовый ответ",
+    repr(sorted(_reply_for_dict.as_dict())),
+)
+_short_transcript = dyle.Transcript()
+_short_transcript.record(
+    "7",
+    "section 1",
+    [{"role": "user", "content": "вопрос"}],
+    dyle.Reply(
+        text=_long_reply_text,
+        model="m",
+        prompt_tokens=1,
+        completion_tokens=2,
+        seconds=0.5,
+        attempts=1,
+    ),
+    section=1,
+)
+check(
+    "#252: the transcript entry carries it in full, untruncated",
+    _short_transcript.as_dict()["calls"][0].get("text") == _long_reply_text,
+    str(len(_short_transcript.as_dict()["calls"][0].get("text") or "")),
+)
+check(
+    "#252: and the entry still carries what it carried before -- the request and the metadata",
+    _short_transcript.as_dict()["calls"][0].get("messages")
+    == [{"role": "user", "content": "вопрос"}]
+    and _short_transcript.as_dict()["calls"][0].get("stage") == "7",
+    repr(sorted(_short_transcript.as_dict()["calls"][0])),
+)
+
 _env.restore(SAVED_ENV)
 
 print()
