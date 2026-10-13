@@ -669,7 +669,14 @@ finally:
 # and EventSource, so the behaviour is observed. Where node is absent the suite prints SKIP and
 # this half is unpinned there, the convention tests/test_e2e.py:688 uses for ffmpeg; the CI image
 # provides node, so CI does run it (see the PR body for the run that shows the PASS lines).
-PAGE_JS = re.search(r"<script>(.*?)</script>", web.PAGE, re.S).group(1)
+_SCRIPT = re.search(r"<script>(.*?)</script>", web.PAGE, re.S)
+PAGE_JS = _SCRIPT.group(1) if _SCRIPT else ""
+check(
+    "the page carries its script in one <script> tag, so the JavaScript below can be run",
+    bool(PAGE_JS),
+    "web.PAGE has no <script>...</script>: the browser checks below cannot run, and every check "
+    "after this one still does",
+)
 
 HARNESS = r"""
 // Runs the page's own script with a stub document, fetch and EventSource. argv[2] is the scenario,
