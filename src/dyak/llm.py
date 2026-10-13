@@ -67,6 +67,7 @@ import hashlib
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from collections.abc import Callable
@@ -136,6 +137,37 @@ class EndpointError(RuntimeError):
         self.connection = connection
 
 
+#: What stands in for an endpoint's userinfo in the redacted form (#273). A constant and not an
+#: empty string, so two runs that differ only in whether the endpoint URL carried credentials stay
+#: distinguishable in a bundle -- which is the whole point of recording an endpoint -- while no
+#: part of the credential survives. The password this replaces is not a configuration detail worth
+#: comparing: the live request does not use it either. `chat()` authenticates with
+#: `Authorization: Bearer <api_key>` below, and `urllib` writes a `user:password@` netloc into the
+#: `Host` header as-is, so an endpoint with userinfo is a credential that leaks and does nothing.
+REDACTED_USERINFO = "***"
+
+
+def redact_endpoint(endpoint: str) -> str:
+    """An endpoint URL with any `user:password@` replaced by `***` (#273).
+
+    `Config.redacted()` promises a config safe to write into a bundle, and the key was never the
+    only credential a config can carry: `endpoint` went into the record verbatim, so an endpoint
+    like `http://user:password@host:8317/v1` wrote its password into every artefact holding that
+    dict -- `endpoint` in `synth`, `audit` and `repair` provenance, inside `model` in `caption`'s.
+    Redacting here rather than at those four call sites covers all of them and any consumer added
+    later, and leaves `Config.endpoint` itself alone: the string that goes over the network is not
+    the string that goes into a bundle.
+
+    Scheme, host, port, path, query and fragment all survive. They are what names an endpoint and
+    what makes two runs comparable; the userinfo is the only part that is a secret.
+    """
+    parts = urllib.parse.urlsplit(endpoint)
+    if "@" not in parts.netloc:
+        return endpoint
+    hostport = parts.netloc.rpartition("@")[2]
+    return urllib.parse.urlunsplit(parts._replace(netloc=f"{REDACTED_USERINFO}@{hostport}"))
+
+
 @dataclass(frozen=True)
 class Config:
     endpoint: str
@@ -166,7 +198,10 @@ class Config:
     def redacted(self) -> dict:
         """Config safe to write into a bundle. The key never is."""
         return {
-            "endpoint": self.endpoint,
+            # `redact_endpoint`, not `self.endpoint` (#273): the docstring above is about the whole
+            # dict, and the key was never the only credential a config can carry -- a URL with
+            # userinfo put its password in here verbatim while `api_key` was correctly a boolean.
+            "endpoint": redact_endpoint(self.endpoint),
             "model": self.model,
             "api_key": bool(self.api_key),
             "temperature": self.temperature,

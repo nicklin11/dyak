@@ -5929,6 +5929,26 @@ check(
 )
 check("but its presence is recorded", cfg.redacted()["api_key"] is True, str(cfg.redacted()))
 
+# #273: the key was never the only credential a config can carry, and this is why the two checks
+# above passed while the leak was live -- `cfg.endpoint` is `http://h/v1`, with no userinfo to
+# leak. `redacted()` promised "Config safe to write into a bundle" and wrote `endpoint` verbatim,
+# so an endpoint URL carrying `user:password@` put the password into every artefact that records
+# this dict (synth, audit, repair as `endpoint`; caption inside `model`). The value below is
+# invented, and no real credential appears anywhere in this file.
+cfg_userinfo = dyle.Config(
+    endpoint="http://svc:not-a-real-password@h:8317/v1", model="m", api_key="secret"
+)
+check(
+    "#273: the endpoint's userinfo is not in the redacted form either",
+    "not-a-real-password" not in json.dumps(cfg_userinfo.redacted()),
+    cfg_userinfo.redacted(),
+)
+check(
+    "#273: and the rest of the endpoint survives, so two runs stay comparable",
+    cfg_userinfo.redacted()["endpoint"] == "http://***@h:8317/v1",
+    cfg_userinfo.redacted()["endpoint"],
+)
+
 # The artefacts.
 dest = tmp / "synth-out"
 sn = dysy.run(scaps, stxt, src_path, dest, config=None, stream=io.StringIO())
