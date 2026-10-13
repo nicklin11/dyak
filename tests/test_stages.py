@@ -7313,15 +7313,22 @@ check("and it did not crash on a LaTeX-bearing canonical", True, "")
 # what it over-reports stays visible there as a warning; repair must not rewrite the note for
 # it. Every edge below was measured, not assumed: `\w` is Unicode-aware, and `(?<!\w)/(?!\w)`
 # is not `\b` -- see the C++ check further down.
-word_glossary = dyau.Glossary((("норма", "НОРМА"),))
+#
+# The pair is Latin because of #287: `норма -> НОРМА` differs by case alone, and G1 declines
+# exactly that (the detector is silent about that line -- the canonical is there,
+# case-insensitively, `audit.py:189` -- so the writer must not be bolder than the report; the
+# case-only row is pinned in `tests/test_repair_drift.py`). The edges this block exists for are
+# unchanged, only the spelling moved to one the guards accept, and `ilqf -> iLQR` is a real
+# row of the derived glossary.
+word_glossary = dyau.Glossary((("ilqf", "iLQR"),))
 bodies = ["содержимое"] * 8
 bodies[3] = (
-    "норма в начале строки\n"
-    "и в конце строки норма\n"
-    "См. (норма), далее.\n"
-    "Это норма-определение.\n"
-    "Здесь НОРМА заглавными и Норма с заглавной.\n"
-    "Здесь нормализация, НОРМАЛИЗАЦИЯ, xнорма, нормаx, норма_тест и норма1."
+    "ilqf в начале строки\n"
+    "и в конце строки ilqf\n"
+    "См. (ilqf), далее.\n"
+    "Это ilqf-определение.\n"
+    "Здесь ILQF заглавными и Ilqf с заглавной.\n"
+    "Здесь ilqfализация, ILQFАЛИЗАЦИЯ, xilqf, ilqfx, ilqf_тест и ilqf1."
 )
 wordy = audit_note(*bodies)
 fixed, rrep = dyrep.repair(
@@ -7332,19 +7339,19 @@ fixed, rrep = dyrep.repair(
 )
 check(
     "a glossary variant is substituted as a whole word (#277)",
-    "НОРМА в начале строки" in fixed
-    and "в конце строки НОРМА" in fixed
-    and "См. (НОРМА), далее." in fixed
-    and "Это НОРМА-определение." in fixed
-    and "Здесь НОРМА заглавными и НОРМА с заглавной." in fixed,
+    "iLQR в начале строки" in fixed
+    and "в конце строки iLQR" in fixed
+    and "См. (iLQR), далее." in fixed
+    and "Это iLQR-определение." in fixed
+    and "Здесь iLQR заглавными и iLQR с заглавной." in fixed,
     fixed.split("## ")[-1][:400],
 )
 check(
     "and a variant inside a longer word is left alone (#277)",
-    "Здесь нормализация, НОРМАЛИЗАЦИЯ, xнорма, нормаx, норма_тест и норма1." in fixed,
+    "Здесь ilqfализация, ILQFАЛИЗАЦИЯ, xilqf, ilqfx, ilqf_тест и ilqf1." in fixed,
     fixed.split("## ")[-1][:400],
 )
-bodies[3] = "Здесь нормализация и НОРМАЛИЗАЦИЯ, xнорма и нормаx."
+bodies[3] = "Здесь ilqfализация и ILQFАЛИЗАЦИЯ, xilqf и ilqfx."
 embed_only = audit_note(*bodies)
 fixed, rrep = dyrep.repair(
     embed_only,
@@ -7378,9 +7385,10 @@ check(
 # The lookarounds, not `\b`: a variant may end in a non-word character, and `\b` both refuses
 # to match it (measured: `\bC\+\+\b` does not match "C++ и") and matches it inside a longer
 # word (measured: `\bC\+\+\b` does match "C++x"). `C++` is too short to reach repair at all --
-# the guard above skips variants shorter than four -- so this uses the notation case: an
-# ASR-lowercased `j(u)` against the canonical `J(u)`.
-ops = dyau.Glossary((("j(u)", "J(u)"),))
+# the guard above skips variants shorter than four -- so this uses the notation case. The
+# canonical is the term the notation stands for, not `J(u)`: #287's G1 declines a case-only
+# rewrite, because the detector is silent about that line (`audit.py:189`).
+ops = dyau.Glossary((("j(u)", "функционал"),))
 bodies = ["содержимое"] * 8
 bodies[3] = "Считаем j(u) и всё."
 bodies[4] = "Считаем j(u)x и всё."
@@ -7393,13 +7401,17 @@ fixed, rrep = dyrep.repair(
 )
 check(
     "a variant ending in a non-word character is matched by lookarounds, not \\b (#277)",
-    "Считаем J(u) и всё." in fixed and "Считаем j(u)x и всё." in fixed,
+    "Считаем функционал и всё." in fixed and "Считаем j(u)x и всё." in fixed,
     f"fixed={fixed[-260:]}",
 )
 
-# A canonical containing a backslash must not be treated as a replacement template.
-la = dyau.Glossary((("пять", r"$\mathbf{x} \in \mathbb{R}^n$"),))
-bodies[3] = "Считаем пять."
+# A canonical containing a backslash must not be treated as a replacement template. The
+# variant is capitalised because #287's G2 declines the all-lowercase-Cyrillic form this pin
+# used to carry (`пять`): a lowercase Russian word and a mangled term are the same string to a
+# rule with no morphology, so the rewrite declines what it cannot defend. The escape handling
+# this check exists for is untouched by case.
+la = dyau.Glossary((("Пять", r"$\mathbf{x} \in \mathbb{R}^n$"),))
+bodies[3] = "Считаем Пять."
 latexy = audit_note(*bodies)
 fixed, rrep = dyrep.repair(
     latexy, dyau.audit(latexy, "", la, stream=io.StringIO()), la, dyln.lint(latexy, limg)

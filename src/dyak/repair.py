@@ -138,6 +138,96 @@ def _balance_inline(line: str) -> str:
     return line.replace("$", "\\$")
 
 
+def _fold_shape(text: str) -> str:
+    """Case-fold and drop every non-alphanumeric character: the shape G4 compares."""
+    return "".join(ch for ch in text.casefold() if ch.isalnum())
+
+
+def _guard_canonical_on_line(line: str, match: re.Match[str], canonical: str) -> bool:
+    """G1: the canonical is already on the line, case-insensitively -> decline.
+
+    This is `check_term_drift`'s own precondition (`audit.py:189`, "the canonical is not
+    there") applied to the writer, so the rewrite can never be bolder than the report that
+    describes it, and it is what makes a record whose `before` and `after` are equal
+    impossible. On the real note it is the first applicable guard for 46 of the 53
+    occurrences the pre-#277 rule can see.
+    """
+    return canonical.lower() in line.lower()
+
+
+def _guard_lowercase_cyrillic(line: str, match: re.Match[str], canonical: str) -> bool:
+    """G2: an all-lowercase-Cyrillic form that is not the canonical's -> decline.
+
+    The bounded set a rule without morphology cannot decide: an ordinary Russian word, an
+    inflected form of the term and a mangled term are the same string, and the corpus's
+    variant column holds all three (measured on the derived glossary: 97 of the 132 entries
+    are such forms). The form test, not a blanket lowercase refusal, is what keeps this guard
+    away from a plain case normalisation (`норма` -> `НОРМА`); that line is declined by G1
+    instead, because the detector is silent about it (`audit.py:189`).
+    """
+    text = match.group(0)
+    if not all(ch in " -" or "а" <= ch <= "я" or ch == "ё" for ch in text):
+        return False
+    return text.lower() != canonical.lower()
+
+
+def _guard_repeats_neighbour(line: str, match: re.Match[str], canonical: str) -> bool:
+    """G3: the replacement would repeat the word before or after the match -> decline.
+
+    Duplication is the report's headline shape (`Стандарт С++17` -> `Стандарт стандарт
+    C++17`) and seeing it needs no morphology, so this binds where G2 does not reach: a
+    capitalised or Latin variant can still be a word the canonical starts or ends with.
+    """
+    words = canonical.split()
+    if not words:
+        return False
+    before = line[: match.start()].split()
+    after = line[match.end() :].split()
+    if before and _fold_shape(before[-1]) == _fold_shape(words[0]):
+        return True
+    return bool(after) and _fold_shape(after[0]) == _fold_shape(words[-1])
+
+
+def _guard_canonical_wraps(line: str, match: re.Match[str], canonical: str) -> bool:
+    """G4: the match is a proper substring of the canonical, ignoring case and punctuation.
+
+    The canonical merely wraps what is already written (`компилятор c++17` against
+    `стандарт c++17`), so substituting adds a word instead of repairing one. Note the limit,
+    not an oversight: Cyrillic and Latin lookalikes are not folded, so the mixed-script
+    spelling of the same term (`С++17` with a Cyrillic `С`) passes this guard.
+    """
+    text = _fold_shape(match.group(0))
+    whole = _fold_shape(canonical)
+    return bool(text) and text != whole and text in whole
+
+
+# The four preconditions, in the order `_drift_ok` applies them, each labelled with the
+# guard the decision names so a revert of one is identifiable from its failure (#287).
+DRIFT_GUARDS = (
+    ("G1 the canonical is already on the line", _guard_canonical_on_line),
+    ("G2 an all-lowercase-Cyrillic form that is not the canonical's", _guard_lowercase_cyrillic),
+    ("G3 the replacement would repeat a neighbouring word", _guard_repeats_neighbour),
+    ("G4 the canonical merely wraps the match", _guard_canonical_wraps),
+)
+
+
+def _drift_ok(line: str, match: re.Match[str], canonical: str) -> bool:
+    """Whether this whole-word glossary match may be replaced by its canonical (#287).
+
+    A mechanical rule cannot tell a mangled term from a correct inflected Russian phrase:
+    the tree carries no morphology, `Glossary.parse` lowercases the variant (`audit.py:172`)
+    so the author's capitalisation is gone, and this corpus mixes Cyrillic and Latin
+    lookalikes. The guards below are the decidable consequences of that ambiguity, so the
+    rewrite declines what it cannot defend and leaves the text alone (#263's shape) rather
+    than writing a word the lecturer never said. Two limits stay limits: morphology (G2 is
+    the boundary, not a solution) and mixed script (G4 compares the letters as written).
+    """
+    for _name, guard in DRIFT_GUARDS:
+        if guard(line, match, canonical):
+            return False
+    return True
+
+
 def repair(
     markdown: str,
     audit_report: audit_mod.Report,
@@ -203,19 +293,33 @@ def repair(
     if markdown.endswith("\n") and not text.endswith("\n"):
         text += "\n"
 
-    # 2. Glossary drift: substitute the canonical term. The glossary holds confirmed forms
-    #    only, which is what makes substitution safe here and not in stage 7. The variant is
-    #    matched as a WHOLE WORD: the audit's own test is a substring one (`audit.py:189`) and
-    #    it reports drift without correcting it (`audit.py:181`), so its over-matching costs a
-    #    warning the reader judges, where the same over-match here rewrote «нормализация» into
-    #    «НОРМАлизация» (#277). Measured on `~/.local/state/dyak/занятие--2/note.md` with a
-    #    glossary built from `mscs/_terms`: a variant is a frontmatter `aliases:`/`forms:`
-    #    bullet, the canonical is the note's H1 heading, and the length guard below leaves 122
-    #    of the 132 bullets. The note holds 53 occurrences of those variants under this
-    #    stage's case-insensitive match: 35 whole-word and 18 inside a longer word
-    #    («функционала», «градиента»), which is the 18 the boundary is for. The entries that
-    #    hit drop from 10 to 8, and the repaired note differs on 5 lines, each restoring the
-    #    line the substring match had rewritten.
+    # 2. Glossary drift: substitute the canonical term where the replacement can be
+    #    defended, and leave the line alone where it cannot. The glossary holds confirmed
+    #    forms, but on this corpus the variant column holds ordinary Russian words and
+    #    inflections as often as mangled terms. Measured on
+    #    `~/.local/state/dyak/занятие--2/note.md` (487 lines) with the 122-entry glossary
+    #    derived from `mscs/_terms`: unguarded, the rewrite corrupts 17 of the 19 lines it
+    #    touches at the #277 head -- 7 with a duplicated word («стартуют все Прямые методы
+    #    методы»), 4 inflected phrases turned nominative, 2 homonyms (the Dubins straight
+    #    segments), 4 inflected forms («Смысловые части Функционал») -- to normalise 2, and
+    #    changes 12 lines whose canonical `check_term_drift` never warned about
+    #    (`audit.py:189`). The four guards are `_drift_ok`, and each one's effect is counted
+    #    on the note rather than asserted: of the 53 occurrences the pre-#277 substring rule
+    #    can see, G1 declines 46 as the first applicable guard and G2 the other 7 (of the 35
+    #    whole-word ones, 28 and 7). G3 and G4 take no occurrence here -- G1 and G2 already
+    #    cover the line -- but they are not decoration: applied alone they decline 6 and 9 of
+    #    the 53, and each is pinned by the case it exists for in `tests/test_repair_drift.py`
+    #    (a capitalised «С++17» whose canonical repeats the neighbouring word, a Latin
+    #    «c++17» the canonical wraps). With all four the note is byte-identical on every line
+    #    that used to differ, while the class the rule exists for still fires («Пантрягин» ->
+    #    «Понтрягин (П.С. Понтрягин)», «ilqf» -> «iLQR»). The price, stated: G1 declines the
+    #    case-only normalisation too («норма» -> «НОРМА»), because `check_term_drift` is
+    #    silent about that line (`audit.py:189` -- the canonical is there, case-insensitively)
+    #    and the rewrite cannot be bolder than the report that describes it. The
+    #    variant is matched as a WHOLE WORD: the audit's own test is a substring one
+    #    (`audit.py:189`) and it reports drift without correcting it (`audit.py:181`), so its
+    #    over-matching costs a warning the reader judges, where the same over-match here
+    #    rewrote «нормализация» into «НОРМАлизация» (#277).
     for variant, canonical in glossary.entries:
         # The audit's guard (`audit.py:187`, "too short to match without false positives"),
         # kept: it cannot be what widens the rule to variants that were skipped before.
@@ -226,24 +330,42 @@ def repair(
         # match "C++ и" but does match inside "C++x" -- while the lookarounds ask only that
         # neither neighbour be a word character.
         pattern = re.compile(rf"(?<!\w){re.escape(variant)}(?!\w)", re.IGNORECASE)
-        hit = pattern.search(text)
-        if hit:
-            # The fix log records the changed LINE. "ilqf -> iLQR" is not before/after
-            # text; the reader needs the sentence that was rewritten, because that is the
-            # sentence they have to re-check against the recording.
-            start = text.rfind("\n", 0, hit.start()) + 1
-            end = text.find("\n", hit.end())
-            end = len(text) if end == -1 else end
-            line_no = text.count("\n", 0, start) + 1
-            before_line = text[start:end]
-            after_line = pattern.sub(lambda _m, value=canonical: value, before_line)
-            report.changes.append(Change("term/drift", line_no, before_line, after_line))
-        # A function, not a string. `re.sub` parses backslash escapes in a string
-        # replacement, and a glossary canonical containing `\mathbf{x}` raises
-        # "bad escape \m" -- a term catalogue is exactly where LaTeX belongs.
-        new_text = pattern.sub(lambda _m, value=canonical: value, text)
-        if new_text != text:
-            text = new_text
+        # The fix log records the changed LINE, and "ilqf -> iLQR" is not before/after text:
+        # the reader needs the sentence that was rewritten, because that is the sentence they
+        # have to re-check against the recording. It must be the first ACCEPTED occurrence --
+        # `pattern.search` lands on one the guards declined instead, and the report then
+        # carries a change whose `before` and `after` are equal, measured at 3 of the 8
+        # records on this note (line 8 once, line 87 twice) before the guards.
+        first: Change | None = None
+        for index, line in enumerate(lines):
+            accepted = [m for m in pattern.finditer(line) if _drift_ok(line, m, canonical)]
+            if not accepted:
+                continue
+            before_line = line
+            # Joined from the pieces rather than handed to `re.sub`, which parses backslash
+            # escapes in a replacement: a canonical containing `\mathbf{x}` raises
+            # "bad escape \m", and a term catalogue is exactly where LaTeX belongs
+            # (`tests/test_stages.py` pins that insertion, with a capitalised variant the
+            # guards accept).
+            parts: list[str] = []
+            cursor = 0
+            for match in accepted:
+                parts.append(line[cursor : match.start()])
+                parts.append(canonical)
+                cursor = match.end()
+            parts.append(line[cursor:])
+            lines[index] = "".join(parts)
+            if first is None:
+                first = Change("term/drift", index + 1, before_line, lines[index])
+        if first is not None:
+            report.changes.append(first)
+
+    # The glossary step above rewrote `lines`, so the join before it is no longer the last
+    # word on the text -- the trailing newline included, which the same guard restores for
+    # the same reason it did then (`splitlines`/`join` drops it).
+    text = "\n".join(lines)
+    if markdown.endswith("\n") and not text.endswith("\n"):
+        text += "\n"
 
     report.repaired_bytes = len(text.encode("utf-8"))
     return text, report
