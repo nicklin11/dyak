@@ -46,6 +46,7 @@ rules ran", never "the mathematics is correct".
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sys
@@ -646,6 +647,14 @@ class _Section:
     over_limit: bool
 
 
+#: The two headings of a stage-9 request, in the order the request writes them (#123). They are
+#: the only text a request carries besides `CRITIC_SYSTEM` and the lecture's own material, so
+#: `prompt_digest` reads them from here rather than from a copy: an edit to the request's shape
+#: has to move the recorded digest, and two spellings of one heading would let them drift (#256).
+TRANSCRIPT_HEADING = "## СТЕНОГРАММА ЛЕКЦИИ"
+NOTE_HEADING = "## КОНСПЕКТ — "
+
+
 def _section_request(index: int, part: str, transcript_text: str) -> _Section | None:
     """The request for one `## ` section, or None when it has no body to audit.
 
@@ -666,8 +675,8 @@ def _section_request(index: int, part: str, transcript_text: str) -> _Section | 
                 # share the transcript as a common prefix, which is the condition a
                 # provider prefix-cache is built for; section-first made every request's
                 # prefix unique, so none of them could share anything.
-                f"## СТЕНОГРАММА ЛЕКЦИИ\n\n{transcript_text.strip()}"
-                f"\n\n## КОНСПЕКТ — {heading.strip()}\n\n{section_text[:SECTION_CHARS]}"
+                f"{TRANSCRIPT_HEADING}\n\n{transcript_text.strip()}"
+                f"\n\n{NOTE_HEADING}{heading.strip()}\n\n{section_text[:SECTION_CHARS]}"
             ),
         },
     ]
@@ -988,17 +997,46 @@ def run(
     (destination / REPORT_NAME).write_text(
         json.dumps(report.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    (destination / PROVENANCE_NAME).write_text(provenance(report) + "\n", encoding="utf-8")
+    (destination / PROVENANCE_NAME).write_text(provenance(report, config) + "\n", encoding="utf-8")
     if trace.calls:
         trace.write(destination / LLM_TRANSCRIPT_NAME)
     return report
 
 
-def provenance(report: Report) -> str:
+def prompt_digest() -> str:
+    """sha256 of what a stage-9 request carries that is not the lecture: `CRITIC_SYSTEM` and the
+    request's two envelope headings.
+
+    The same shape as `synth.prompt_digest` (#77), which digests `SYSTEM` plus the eight briefs
+    rather than `SYSTEM` alone, so an edit to the prompt cannot leave the record unchanged. Here
+    the instructions are one constant -- `CRITIC_SYSTEM` -- and the only other text a request
+    adds is its envelope, which `_section_request` reads from the same two constants this does.
+    What is deliberately NOT included is the lecture: the transcript and the section are the
+    request's input, they differ per run and per section, and digesting them would say which
+    lecture was audited rather than which prompt asked. `synth` leaves its source material out
+    the same way, so the two digests stay comparable across runs and across lectures -- which is
+    what a bundle reader needs to attribute a difference to the prompt rather than to the input
+    (#256).
+    """
+    return hashlib.sha256(
+        "\n".join([CRITIC_SYSTEM, TRANSCRIPT_HEADING, NOTE_HEADING]).encode("utf-8")
+    ).hexdigest()
+
+
+def provenance(report: Report, config: llm.Config | None = None) -> str:
     return json.dumps(
         {
             "stage": 9,
             "tool": "dyak-audit-v1",
+            # The seed's other half (#77, #256). `endpoint.seed` says which sample was asked for,
+            # this says which prompt asked; without both, two audits of one note are recorded
+            # identically and the difference between them cannot be attributed to anything.
+            # `config` is optional because a run without a model has no sample to describe --
+            # `requires_model: False` below is the same fact from the other side. Stage 10's
+            # `repair.provenance` still carries neither: it takes no `Config` and makes no model
+            # call, and #257 records what wiring it would take.
+            "prompt_sha256": prompt_digest(),
+            "endpoint": config.redacted() if config else None,
             "tier1": {
                 "requires_model": False,
                 "rules": [
