@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from .. import exitcodes as ec
 from .. import runner
@@ -93,11 +94,37 @@ def _recorded_parameters(engine: TranscriptionBackend, timeout: float) -> dict:
     stages 6, 7, 9 and 10. The misses are the same too: a name containing none of those words,
     a secret in the path, a secret in the host. The request keeps `self.base_url` verbatim
     (`whispercpp.py:173`, `openai_compat.py:274`); only the record is masked.
+
+    By value, not by key name (#301). Every string in the record goes through `redact_endpoint`,
+    wherever it sits. The first version masked `parameters["endpoint"]` only when that key was
+    present, so a backend that named its URL something else -- or nested it -- would have written
+    it raw, and the guard would not have failed: a skip is not a signal. Both backends today use
+    `endpoint` (`whispercpp.parameters()`, `openai_compat.parameters()`), which is what made the
+    limit unreached rather than wrong, and a limit that is merely unreached is one new backend
+    away from being live. #290 recorded it in a merged PR body, where the next author cannot read
+    it; the guard carries the warning now by having nothing left to skip.
     """
     parameters = engine.parameters(client_timeout=timeout)
-    if "endpoint" in parameters:
-        parameters["endpoint"] = redact_endpoint(parameters["endpoint"])
-    return parameters
+    return {key: _redact_value(value) for key, value in parameters.items()}
+
+
+def _redact_value(value: Any) -> Any:
+    """`value` with its credentials masked, structure and non-strings untouched (#301).
+
+    Recursive because `parameters()` nests: whisper.cpp and the OpenAI-compatible route both carry
+    a `fields` dict, the latter a `chunking` block, and a backend that nests its URL is as easy to
+    write as one that renames the key. `redact_endpoint` is the identity for a string with no
+    userinfo and no credential-named query or fragment parameter, which is every other value in
+    both backends' records -- measured in `tests/test_settings.py`, not assumed: `backend`,
+    `detail`, the `fields` entries and the `chunking` numbers come back byte for byte.
+    """
+    if isinstance(value, str):
+        return redact_endpoint(value)
+    if isinstance(value, dict):
+        return {key: _redact_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    return value
 
 
 def transcribe(
