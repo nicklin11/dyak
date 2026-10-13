@@ -675,7 +675,20 @@ def main() -> int:
 
         if failures:
             print(f"\nbundle kept for inspection: {bundle}")
-        return 1 if failures else 0
+            return 1
+        # Nothing failed, so the scratch has served its purpose: every retention arm above
+        # returns before this line (the missing fixture at :421-423, the failed `dyak process`
+        # at :435-437, a failed check at :676-678), which is why the removal lives here and not
+        # in the `finally` -- that runs on both paths (#293), and a
+        # `tempfile.TemporaryDirectory` would delete the bundle a failing run printed the path
+        # of, which `src/dyak/workspace.py:5-9` rejects for the pipeline's own work dir.
+        try:
+            shutil.rmtree(work)
+        except OSError as exc:
+            # Claiming a removal that did not happen has the same shape as the leak itself:
+            # `workspace.py:66-70` reports the failure instead of pretending, and so does this.
+            print(f"\nscratch directory could not be removed: {work} ({exc})")
+        return 0
     finally:
         for server in servers.values():
             server.shutdown()
