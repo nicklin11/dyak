@@ -9965,6 +9965,468 @@ check(
     repr(sorted(_short_transcript.as_dict()["calls"][0])),
 )
 
+# --- #240: the citation guard admits near-quotes, and the prompt's example survives it --------
+# Stage 9's guard was discarding almost everything the critic produced: 45 of 45 findings on a
+# replay of the 8 recorded stage-9 requests, and 68 of 72 in the run's own artefact, all but one
+# for "citation is not verbatim in the transcript". The near-match measurement (decision on
+# #240, comment 6137266759) says those are quoting artefacts rather than fabrication -- 0 of 45
+# verbatim as the guard tested them, 17 once `«»`/quotes/trailing punctuation were stripped, 35
+# once `…`/`...`/`;` fragments were allowed too, and 6 genuinely absent -- so the fix belongs in
+# the comparison, not in the requirement. A paraphrase is still discarded, the finding still has
+# to quote the note and name a confidence, and the finding is still WARN: no gate is added.
+#
+# The citations below are the real ones from that run's artefact, which is the sample the
+# measurement was taken on, and the haystacks they are checked against are that run's own text:
+# the two passages are copied verbatim out of its `transcript.txt` (the line numbers are that
+# file's). The recogniser writes one segment per line, so a citation the critic wrote as one
+# fragment matches text that is split here -- `_norm` collapses the whitespace between segments,
+# which is why a line-based `grep` does not find these and the guard does.
+_S240_TRANSCRIPT = (
+    # transcript.txt:2442-2445 -- what "там симметричность, ну, симметричность, понятно" quotes
+    "[00:36:51] там симметричность,\n"
+    "[00:36:52] ну,\n"
+    "[00:36:52] симметричность,\n"
+    "[00:36:53] понятно,\n"
+    # transcript.txt:2821-2826 -- the second span of the `…` joins below
+    "[00:42:28] если мы возьмем вот эту производную,\n"
+    "[00:42:30] то у нас будет,\n"
+    "[00:42:30] на самом деле,\n"
+    "[00:42:31] вектор,\n"
+    "[00:42:32] ну,\n"
+    "[00:42:32] как бы из трех этих компонентов.\n"
+)
+_S240_SECTION = "содержимое"
+_S240_FLOOR = getattr(dyau, "MIN_FRAGMENT_CHARS", None)
+check(
+    "#240: the fragment floor the decision asks for exists and is 20 normalised characters",
+    _S240_FLOOR == 20,
+    str(_S240_FLOOR),
+)
+for _s240_name, _s240_line in (
+    (
+        "the critic wrapped its citation in guillemets",
+        "- содержимое: не следует из лекции "
+        "[источник: «там симметричность, ну, симметричность, понятно»] [уверенность: высокая]",
+    ),
+    (
+        "the citation is in straight quotes and carries a trailing comma",
+        "- содержимое: не следует из лекции "
+        '[источник: "там симметричность, ну, симметричность, понятно",] '
+        "[уверенность: высокая]",
+    ),
+    (
+        "the citation joins two transcript spans with an ellipsis",
+        "- содержимое: не следует из лекции "
+        "[источник: там симметричность… из трех этих компонентов] [уверенность: средняя]",
+    ),
+    (
+        "the join is `...` rather than the ellipsis character",
+        "- содержимое: не следует из лекции "
+        "[источник: там симметричность... из трех этих компонентов] [уверенность: средняя]",
+    ),
+    (
+        "the join is a semicolon",
+        "- содержимое: не следует из лекции "
+        "[источник: там симметричность; из трех этих компонентов] [уверенность: низкая]",
+    ),
+    (
+        "the note quote is wrapped in guillemets",
+        "- «содержимое»: не следует из лекции "
+        "[источник: там симметричность, ну, симметричность, понятно] [уверенность: высокая]",
+    ),
+    (
+        "the note quote carries trailing punctuation",
+        "- содержимое,: не следует из лекции "
+        "[источник: там симметричность, ну, симметричность, понятно] [уверенность: высокая]",
+    ),
+):
+    _s240_kept, _s240_dropped = dyau.parse_critic_findings(
+        _s240_line, _S240_SECTION, _S240_TRANSCRIPT
+    )
+    check(
+        f"#240: a finding is kept when {_s240_name}",
+        len(_s240_kept) == 1 and not _s240_dropped,
+        str(_s240_dropped),
+    )
+
+# What the leniency must NOT admit. The first is the issue's own example: a paraphrase of the
+# sentence in the transcript, which is what ADR-0001 D5 requires a citation not to be.
+for _s240_name, _s240_line, _s240_why in (
+    (
+        "the issue's paraphrase, which the transcript does not contain",
+        "- содержимое: не следует из лекции "
+        "[источник: двойной путь познания (понимания, объяснения)] [уверенность: высокая]",
+        "citation is not verbatim in the transcript",
+    ),
+    (
+        "an invented citation",
+        "- содержимое: не следует из лекции "
+        "[источник: лектор упомянул теорему Банка] [уверенность: высокая]",
+        "citation is not verbatim in the transcript",
+    ),
+    (
+        # Both sides of the join are real transcript text, and both are shorter than the floor:
+        # without it, "понятно" (7 characters) would be accepted, and a two-word coincidence
+        # would count as evidence.
+        "a join whose fragments are all shorter than the floor",
+        "- содержимое: не следует из лекции "
+        "[источник: там симметричность… понятно] [уверенность: высокая]",
+        "citation is not verbatim in the transcript",
+    ),
+    (
+        "a note quote that is a summary rather than a fragment of the note",
+        "- это не конспект: не следует из лекции "
+        "[источник: там симметричность, ну, симметричность, понятно] [уверенность: высокая]",
+        "quote is not verbatim in the note",
+    ),
+):
+    _s240_kept, _s240_dropped = dyau.parse_critic_findings(
+        _s240_line, _S240_SECTION, _S240_TRANSCRIPT
+    )
+    check(
+        f"#240: and it is still discarded for {_s240_name}",
+        _s240_kept == [] and len(_s240_dropped) == 1 and _s240_dropped[0]["reason"] == _s240_why,
+        str(_s240_dropped),
+    )
+
+# The prompt's own example has to survive the guard. The previous one could not: its citation
+# was split across two lines, so the `- ` line carried `[источник: соответствие` with no closing
+# `]` -- the guard read that as "no citation into the transcript" -- and its first field was a
+# formula the note does not contain. The model reproduced the shape, which is why every finding
+# on the replay was discarded. An example that teaches a rejected format is a prompt bug.
+_s240_block = dyau.CRITIC_SYSTEM.split("Пример", 1)[1]
+_s240_lines = _s240_block.splitlines()
+_s240_bullets = [line for line in _s240_lines if line.startswith("- ")]
+check(
+    "#240: the example block holds exactly one bullet",
+    len(_s240_bullets) == 1,
+    str(_s240_bullets),
+)
+# Its physical extent, not just its first line: the previous example was wrapped, and its
+# continuation (`  динамической системы] [уверенность: высокая]`) does not start with `- `, so
+# counting bullets cannot see the wrapping this check exists to catch. The item runs to the next
+# blank line.
+_s240_start = next((i for i, line in enumerate(_s240_lines) if line.startswith("- ")), None)
+_s240_item = [] if _s240_start is None else [_s240_lines[_s240_start]]
+if _s240_start is not None:
+    for _s240_line in _s240_lines[_s240_start + 1 :]:
+        if not _s240_line.strip():
+            break
+        _s240_item.append(_s240_line)
+check(
+    "#240: and the example bullet is one physical line, so its citation cannot be split off it",
+    len(_s240_item) == 1,
+    str(_s240_item),
+)
+_s240_example = _s240_item[0] if _s240_item else ""
+_s240_match = dyau._CITATION.search(_s240_example)
+_s240_cite = _s240_match.group("cite").strip() if _s240_match else ""
+_s240_first = _s240_example[1:].split(":")[0].strip()
+# The note line the example's first field was copied from: note.md:392 of the recorded run,
+# verbatim, so the quote is a fragment of a real note line and not the whole of its haystack.
+_S240_NOTE = (
+    "**Симметричность.** Матрица $A$ симметрична, если $A = A^T$ (элементы симметричны "
+    "относительно главной диагонали). Если коэффициенты симметричной матрицы вещественны, то "
+    "вещественны и её собственные значения."
+)
+check(
+    "#240: and its citation is complete on that line, which the previous example's was not",
+    _s240_match is not None and _s240_match.end() < len(_s240_example),
+    _s240_example,
+)
+check(
+    "#240: the example's first field is a line from the note, not a formula of its own",
+    "$" not in _s240_first and _S240_FLOOR is not None and len(_s240_first) >= _S240_FLOOR,
+    _s240_first,
+)
+check(
+    "#240: the example's citation carries no quotes, because the model copies what it is shown",
+    bool(_s240_cite) and not any(char in _s240_cite for char in "«»\"'"),
+    _s240_cite,
+)
+# Both fragments are checked against that recorded text, never against the example's own fields:
+# a check that hands the guard the example's citation as its transcript passes for a well-formed
+# but invented citation, which is the class this has to catch.
+check(
+    "#240: the example's citation is a span of the recorded transcript",
+    bool(_s240_cite) and dyau._norm(_s240_cite) in dyau._norm(_S240_TRANSCRIPT),
+    _s240_cite,
+)
+check(
+    "#240: and its first field is a fragment of the recorded note, not the whole haystack",
+    bool(_s240_first) and dyau._norm(_s240_first) in dyau._norm(_S240_NOTE),
+    _s240_first,
+)
+_s240_kept, _s240_dropped = dyau.parse_critic_findings(_s240_example, _S240_NOTE, _S240_TRANSCRIPT)
+check(
+    "#240: the prompt's own example passes the guard against that corpus, so it cannot teach a "
+    "rejected format",
+    len(_s240_kept) == 1 and not _s240_dropped,
+    str(_s240_dropped),
+)
+# And the corpus is not vacuous: one word changed in the example's citation -- same shape, same
+# length, still plausible -- is discarded against the very same haystacks.
+_s240_invented = _s240_example.replace(_s240_cite, _s240_cite.replace("понятно", "конечно"))
+_s240_kept, _s240_dropped = dyau.parse_critic_findings(_s240_invented, _S240_NOTE, _S240_TRANSCRIPT)
+check(
+    "#240: while a one-word change to that citation is discarded against the same corpus",
+    _s240_invented != _s240_example and _s240_kept == [] and len(_s240_dropped) == 1,
+    str(_s240_dropped),
+)
+
+# The audit must not become a gate. Tier-2 findings are built WARN, `Report.ok` reads ERROR only
+# and the CLI's exit 5 is tier 1's -- deliberately (ADR-0001 D6): a model asked to check formulas
+# is unreliably correct, so it annotates and never blocks. A guard that admits more findings is
+# exactly the change that could turn the critic into a blocker by accident, so the property is
+# verified here rather than assumed.
+_s240_kept, _s240_dropped = dyau.parse_critic_findings(GOOD_LINE, SECTION, LECT)
+check(
+    "#240: a kept critic finding is WARN",
+    len(_s240_kept) == 1 and _s240_kept[0].severity == "WARN",
+    str(_s240_kept),
+)
+_s240_shout, _s240_dropped = dyau.parse_critic_findings(
+    "- содержимое: ERROR: критическая ошибка, размерности не сходятся "
+    "[источник: соответствие динамической системы] [уверенность: высокая]",
+    SECTION,
+    LECT,
+)
+check(
+    "#240: and a finding that shouts ERROR in its own text is still WARN -- a model cannot "
+    "escalate itself",
+    len(_s240_shout) == 1 and _s240_shout[0].severity == "WARN",
+    str(_s240_shout),
+)
+_s240_report = dyau.Report(findings=list(_s240_shout) + list(_s240_kept))
+check(
+    "#240: a report holding them is ok(), because `ok` reads ERROR only",
+    _s240_report.ok and not [f for f in _s240_report.findings if f.severity == "ERROR"],
+    _s240_report.summary(),
+)
+_s240_report.add("tier1", "dimension/mismatch", "ERROR", 1, "an ERROR-tier finding", quote="x")
+check(
+    "#240: while an ERROR-tier finding still makes it not ok, so the flag is not dead",
+    not _s240_report.ok,
+    _s240_report.summary(),
+)
+check(
+    "#240: and exit 5 still keys on ERROR-tier findings alone, unchanged (cli.py:319)",
+    'for f in result.audit.findings if f.severity == "ERROR"'
+    in Path(dyc.__file__).read_text(encoding="utf-8"),
+    "cli.py no longer filters the audit findings by ERROR",
+)
+
+
+# --- #253: stage 10 declines every finding in the audit report, not only the lint ones --------
+# Stage 9 publishes `audit/*`, and `Bundle.publish` MOVES the artefact out of the work dir
+# (bundle.py:271) -- the same move-then-read ordering as #82 and #89. Stage 10 then read
+# `adir / audit.REPORT_NAME`, the path the publish had just emptied, so `repair.run` found no
+# report at all and declined only the lint findings. Measured on the 2026-10-12 run: its
+# `audit.json` held 14 findings and its `repair.json` declined one, `math/display-unbalanced`,
+# which is a lint rule. Stages 9-12 below run for real, so the wiring is what is under test.
+class _StopAfterRepair(Exception):
+    pass
+
+
+_r253_bodies = ["содержимое"] * 8
+# The recorded run's shape: 14 audit findings (7 unsourced numbers, 7 dimension mismatches) and
+# one lint finding, of which stage 10 declined only the lint one. Reproduced here rather than
+# taken from the run's own report, so the check fails with those numbers on unmodified `main`.
+_r253_bodies[4] = "\n".join(f"Коэффициент $0.{37 + i}$ в переходе." for i in range(7))
+_r253_bodies[5] = (
+    decl + "\n\n" + "\n".join(f"$J_{i} = \\mathbf{{A}} + \\mathbf{{x}}$" for i in range(1, 8))
+)
+_r253_bodies[6] = "содержимое\n\n$$"
+_r253_note = audit_note(*_r253_bodies)
+
+
+def _r253_synth_run(captions, txt, source, sdir, *, config=None, title="", stream=None):
+    """Stage 7, writing the note the audit will find things in. No model, so no transcript."""
+    sdir = Path(sdir)
+    sdir.mkdir(parents=True, exist_ok=True)
+    (sdir / dysy.NOTE_NAME).write_text(_r253_note, encoding="utf-8")
+    for name in (dysy.REPORT_NAME, dysy.PROVENANCE_NAME):
+        (sdir / name).write_text("{}", encoding="utf-8")
+    return _Stub(synthesizer="template", markdown=_r253_note, filled=8, degraded=False)
+
+
+def _r253_caption_run(manifest, transcript_json, quality_report, images, dest, **kw):
+    """Stage 6, writing what it must publish and returning a report instead of stopping."""
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / dycap.REPORT_NAME).write_text(
+        json.dumps({"captions": [], "counts": {}}), encoding="utf-8"
+    )
+    (dest / dycap.PROVENANCE_NAME).write_text("{}", encoding="utf-8")
+    return _Stub(summary=lambda: "0 captioned, 0 reused, 0 refused"), _Stub()
+
+
+def _r253_stub_modules() -> None:
+    """Stages 1-6 stubbed; 7 writes the fixture note; 8-12 are the real modules."""
+    _info = _Stub(summary=lambda: "video h264")
+    dyp.probe = _Stub(
+        probe=lambda p: _info,
+        require_supported=lambda i: None,
+        provenance=lambda *a, **k: "{}",
+        PROVENANCE_NAME="source-provenance.json",
+    )
+    dyp.audio = _Stub(
+        extract=lambda src, wav: _Stub(duration=60.0, summary=lambda: "audio.wav 60.0s"),
+        check_coverage=lambda i, a: None,
+    )
+
+    def _r253_stt_write(transcript, dest):
+        dest = Path(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "transcript.json").write_text(
+            json.dumps({"segments": [{"index": 0, "text": "hello"}]}), encoding="utf-8"
+        )
+        (dest / "transcript.raw.json").write_text("{}", encoding="utf-8")
+        # The transcript is what `number/unsourced` compares against, so a fixture number the
+        # transcript does not contain is an audit finding to decline.
+        (dest / "transcript.txt").write_text("hello", encoding="utf-8")
+        return {
+            "json": dest / "transcript.json",
+            "raw": dest / "transcript.raw.json",
+            "txt": dest / "transcript.txt",
+        }
+
+    dyp.stt = _Stub(
+        backend=lambda *a, **k: SimpleNamespace(
+            info=lambda: dysb.BackendInfo(name="whispercpp", target="stub://whispercpp")
+        ),
+        transcribe=lambda wav, audio_duration, backend=None, on_progress=None: dyst.Transcript(
+            wav=wav, audio_duration=audio_duration, segments=(), backend="stub"
+        ),
+        write=_r253_stt_write,
+        RATE_RANGE=dysttc.RATE_RANGE,
+        WARMUP_SECONDS=dysttc.WARMUP_SECONDS,
+    )
+
+    def _r253_frames_run(src, frames_dir):
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        manifest = frames_dir / dyfr.MANIFEST
+        manifest.write_text(dyfr.MANIFEST_HEADER + "\n", encoding="utf-8")
+        frame = frames_dir / "f_0.png"
+        frame.write_bytes(b"\x89PNG\r\n\x1a\nframe")
+        return manifest, [frame]
+
+    dyp.frames = _Stub(
+        run=_r253_frames_run,
+        summary=lambda m, p: f"{len(p)} frames",
+        ffmpeg_version=lambda: "stub",
+    )
+
+    def _r253_quality_run(produced, dest, *, settings=None, bbox_source=None, stream=None):
+        for path in produced:
+            enhanced = Path(dest) / "enhanced"
+            enhanced.mkdir(parents=True, exist_ok=True)
+            (enhanced / f"enhanced_{path.name}").write_bytes(b"\x89PNG\r\n\x1a\nenhanced")
+        return _Stub(
+            passed=[_Stub(name=p.name) for p in produced], summary=lambda: "1/1 pass", ok=True
+        )
+
+    dyp.quality = _Stub(
+        Settings=lambda: _Stub(),
+        resolve_estimator=lambda name: None,
+        run=_r253_quality_run,
+        write=lambda report, target, settings: target.write_text("{}", encoding="utf-8"),
+        provenance=lambda qs, bbox_source: "{}",
+        enhanced_name=lambda name: f"enhanced_{name}",
+        REPORT_NAME=dyq.REPORT_NAME,
+        PROVENANCE_NAME=dyq.PROVENANCE_NAME,
+    )
+    dyp.caption = _Stub(
+        run=_r253_caption_run,
+        REPORT_NAME=dycap.REPORT_NAME,
+        PROVENANCE_NAME=dycap.PROVENANCE_NAME,
+    )
+    # `pipeline.synth` is the module object, so the stub carries the names `pipeline.py` reads
+    # off it, not just `run` (`publishes_stage7_transcript` walks `STAGE7_ARTEFACTS`).
+    dyp.synth = _Stub(
+        run=_r253_synth_run,
+        NOTE_NAME=dysy.NOTE_NAME,
+        LLM_TRANSCRIPT_NAME=dysy.LLM_TRANSCRIPT_NAME,
+        STAGE7_ARTEFACTS=dysy.STAGE7_ARTEFACTS,
+        SECTIONS=dysy.SECTIONS,
+    )
+
+
+with tempfile.TemporaryDirectory() as _r253_td:
+    _r253_root = Path(_r253_td)
+    _r253_src = _r253_root / "lecture.mp4"
+    _r253_src.write_bytes(b"x")
+    _r253_bundle = dyb.Bundle.open(
+        _r253_src, output_dir=str(_r253_root / "bundle"), overwrite=False
+    )
+    _r253_real = (
+        dyp.probe,
+        dyp.audio,
+        dyp.stt,
+        dyp.frames,
+        dyp.quality,
+        dyp.caption,
+        dyp.synth,
+        dyp.run,
+    )
+    _r253_error = ""
+    dyp.run = REAL_PIPELINE_RUN
+    _r253_stub_modules()
+    try:
+        REAL_PIPELINE_RUN(
+            _r253_src,
+            dyw.WorkDir(parent=_r253_root / "work"),
+            bundle=_r253_bundle,
+            stream=io.StringIO(),
+        )
+    except BaseException as _r253_exc:  # noqa: BLE001 -- the check below reports it
+        _r253_error = repr(_r253_exc)
+    finally:
+        (
+            dyp.probe,
+            dyp.audio,
+            dyp.stt,
+            dyp.frames,
+            dyp.quality,
+            dyp.caption,
+            dyp.synth,
+            dyp.run,
+        ) = _r253_real
+
+    def _r253_json(name: str) -> dict:
+        path = _r253_bundle.root / name
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+    _r253_audit = _r253_json(dyau.REPORT_NAME)
+    _r253_repair = _r253_json(dyrep.REPORT_NAME)
+    _r253_lint = _r253_json(dyln.REPORT_NAME)
+    _r253_audit_rules = sorted({f["rule"] for f in _r253_audit.get("findings", [])})
+    _r253_declined = _r253_repair.get("declined", [])
+    _r253_declined_rules = sorted({d["rule"] for d in _r253_declined})
+    check(
+        "#253: the run reaches stage 10 and the bundle holds an audit report with findings",
+        not _r253_error
+        and len(_r253_audit.get("findings", [])) >= 2
+        and "dimension/mismatch" in _r253_audit_rules,
+        f"error={_r253_error} audit={_r253_audit_rules}",
+    )
+    check(
+        "#253: and stage 10 declines every one of them, not only the lint findings -- it reads "
+        "the published report, which is the one that still exists",
+        len(_r253_declined)
+        == len(_r253_audit.get("findings", [])) + len(_r253_lint.get("findings", [])),
+        f"declined={len(_r253_declined)} audit={len(_r253_audit.get('findings', []))} "
+        f"lint={len(_r253_lint.get('findings', []))} rules={_r253_declined_rules}",
+    )
+    check(
+        "#253: the declined entries name the audit rules and each carries its reason",
+        bool(_r253_audit_rules)
+        and set(_r253_audit_rules) <= set(_r253_declined_rules)
+        and all(entry.get("reason") for entry in _r253_declined),
+        f"audit={_r253_audit_rules} declined={_r253_declined_rules}",
+    )
+
+
 _env.restore(SAVED_ENV)
 
 print()
