@@ -10,7 +10,6 @@ Only findings whose correction is unambiguous and local:
 
 - unbalanced `$` / `$$` -- close the delimiter, or escape a stray one
 - an empty `$$` block -- delete it
-- a section that declares itself empty and then is not -- restore the honest marker
 - glossary drift -- substitute the canonical term
 
 ## What is not
@@ -20,6 +19,15 @@ judgement about what the lecturer meant, and a mechanical substitution would pro
 plausible-looking note that is wrong in a new place. They are carried into `repair.json`
 under `declined`, which is the point: the note is written either way, and the reader is told
 exactly which parts of it are still suspect.
+
+A section that declares itself empty and then is not is declined for the same reason, and
+that is a revision of this module's own reading (#263). Either the marker is wrong or the
+text is, and the two readings delete opposite things: "restore the honest marker" deleted
+the lecture text and kept the marker, which is a judgement about what the lecturer meant
+dressed as a formatting fix. Measured on `~/.local/state/dyak/занятие--2` before the
+change: 3,334 characters of «2. Организационный блок» became the bare marker, the repaired
+note re-linted clean, and the run's own `report.json` kept `ok: true` -- so the record said a
+repair had happened while every character of that section's body was gone.
 
 ## Idempotence
 
@@ -50,7 +58,6 @@ REPAIRABLE = frozenset(
         "math/inline-unbalanced",
         "math/display-unbalanced",
         "math/empty",
-        "structure/claims-empty-but-is-not",
         "term/drift",
     }
 )
@@ -63,6 +70,16 @@ DECLINED = {
     "critic/finding": "a model's criticism is not evidence; a human decides",
     "structure/missing-section": "the material is absent, not the formatting",
     "asset/missing": "the frame is missing, not the reference",
+    # Was repairable until #263, and the reason is the module's own test for a repair: the
+    # marker and the section's text contradict each other, so "the correction" is a choice
+    # between deleting the text and deleting the marker. `lint.py:384` is the linter's
+    # whole-line test, and the finding it reports at `lint.py:392` is what a reader acts on;
+    # repair declining is what keeps repair from quietly acting on the choice instead.
+    # Measured: acting on it deleted 3,334 characters and the repaired note re-linted clean.
+    "structure/claims-empty-but-is-not": (
+        "the marker and the text contradict each other; deleting the text to keep the marker "
+        "is a judgement about what the lecturer meant (#263)"
+    ),
 }
 
 
@@ -186,28 +203,7 @@ def repair(
     if markdown.endswith("\n") and not text.endswith("\n"):
         text += "\n"
 
-    # 2. A section that declares itself empty and then is not, back to the honest marker.
-    if lint_report is not None and any(
-        f.rule == "structure/claims-empty-but-is-not" for f in lint_report.findings
-    ):
-        parts = re.split(r"^## ", text, flags=re.M)
-        head = parts[0]
-        rebuilt = [head]
-        for part in parts[1:]:
-            heading, _, body = part.partition("\n")
-            if lint_mod.synth.NOT_COVERED in body:
-                before = body
-                after = f"\n\n{lint_mod.synth.NOT_COVERED}\n"
-                rebuilt.append(f"## {heading}{after}")
-                if before.strip() != lint_mod.synth.NOT_COVERED:
-                    report.changes.append(
-                        Change("structure/claims-empty-but-is-not", 0, before, after)
-                    )
-            else:
-                rebuilt.append(f"## {part}")
-        text = "".join(rebuilt)
-
-    # 3. Glossary drift: substitute the canonical term. The glossary holds confirmed forms
+    # 2. Glossary drift: substitute the canonical term. The glossary holds confirmed forms
     #    only, which is what makes substitution safe here and not in stage 7.
     for variant, canonical in glossary.entries:
         if len(variant) < 4:

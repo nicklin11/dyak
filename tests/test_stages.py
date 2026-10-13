@@ -7194,13 +7194,41 @@ check("repair is idempotent", again == fixed and not rrep2.changed, "a second ru
 
 bodies[5] = dysy.NOT_COVERED + "\n\nИ на самом деле абзац."
 padded = audit_note(*bodies)
-fixed, rrep = dyrep.repair(
-    padded, dyau.audit(padded, "", A, stream=io.StringIO()), A, dyln.lint(padded, limg)
+_padded_lint = dyln.lint(padded, limg)
+fixed, rrep = dyrep.repair(padded, dyau.audit(padded, "", A, stream=io.StringIO()), A, _padded_lint)
+_padded_declined = {d["rule"]: d["reason"] for d in rrep.declined}
+check(
+    "a padded empty section is declined, not emptied (#263)",
+    fixed == padded
+    and "structure/claims-empty-but-is-not" not in dyrep.REPAIRABLE
+    and "И на самом деле абзац." in fixed
+    and "structure/claims-empty-but-is-not" in _padded_declined,
+    f"changed={fixed != padded} "
+    f"repairable={'structure/claims-empty-but-is-not' in dyrep.REPAIRABLE} "
+    f"declined={sorted(_padded_declined)}",
 )
 check(
-    "a padded empty section is restored to the honest marker",
-    dysy.NOT_COVERED in fixed and "И на самом деле абзац" not in fixed,
-    fixed[-400:],
+    "and the decline records why the text is kept, not just that it was (#263)",
+    "contradict" in _padded_declined.get("structure/claims-empty-but-is-not", ""),
+    _padded_declined.get("structure/claims-empty-but-is-not", "(rule is not in DECLINED)"),
+)
+
+# The section the linter flags, and one that only *mentions* the sentinel inside populated
+# text: the substring test emptied both bodies, and no finding ever named the second (#263).
+bodies[3] = f"Формулы приведены ниже.\n\n{dysy.NOT_COVERED}: строгое определение нормы."
+scoped = audit_note(*bodies)
+_scoped_lint = dyln.lint(scoped, limg)
+fixed, rrep = dyrep.repair(scoped, dyau.audit(scoped, "", A, stream=io.StringIO()), A, _scoped_lint)
+_flagged = [f for f in _scoped_lint.findings if f.rule == "structure/claims-empty-but-is-not"]
+check(
+    "only the section with the marker on its own line is flagged (#263)",
+    len(_flagged) == 1 and dysy.SECTIONS[5][1] in _flagged[0].detail,
+    str([(f.rule, f.severity, f.detail) for f in _scoped_lint.findings]),
+)
+check(
+    "and repair leaves both bodies alone, including the one no finding named (#263)",
+    fixed == scoped and "строгое определение нормы" in fixed and "И на самом деле абзац." in fixed,
+    f"changed={fixed != scoped}",
 )
 
 bodies[3] = "Применяется ILQF."
@@ -7249,7 +7277,6 @@ check(
             "math/inline-unbalanced",
             "math/display-unbalanced",
             "math/empty",
-            "structure/claims-empty-but-is-not",
             "term/drift",
         }
     ),
