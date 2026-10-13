@@ -51,17 +51,23 @@ of 57 captioned is a success. Read the counts on the `[6/12] caption` line, or c
 
 ## Stage 8 — the lint gate
 
-Nine mechanical checks against the note before the audit runs. Findings land in `lint.json`.
+Nine mechanical checks against the note before the audit runs. The nine counts checks *that ran*,
+which is not what `lint-provenance.json`'s `rules` list holds: that list names the ids those checks
+can report, and one check can report more than one. Findings land in `lint.json`.
 On run 13: `9 checks, 0 errors, 0 warnings`. That the deterministic half of the audit chain has
 run but never produced a finding on a real run is itself tracked:
 [#93](https://github.com/nicklin11/dyak/issues/93).
 
 ## Stage 9 — the audit
 
-Four tier-1 rules (deterministic) plus a tier-2 separate-context critic run over the note. Each
-finding quotes the line it judges. Findings above threshold exit 5; the note is still written
-and flagged, because the repairable state of a 3800-word note is worth more to the reader than
-a clean failure.
+Four deterministic tier-1 checks — term drift, dimension mismatch, unsourced numbers, empty math —
+plus a tier-2 separate-context critic run over the note. The four is the checks; `tier1.rules` in
+`audit-provenance.json` is the list of *ids* they can report, which is a different quantity: a check
+that finds nothing to check reports a `-skipped` marker for the absence, and `check_dimensions`
+alone reports up to three ids. `tier1.rules_run` beside it, and `tier1_rules_run` in `audit.json`,
+are the four checks that ran. Each finding quotes the line it judges. Findings above threshold exit
+5; the note is still written and flagged, because the repairable state of a 3800-word note is worth
+more to the reader than a clean failure.
 
 ## What the note should look like — the baseline comparison
 

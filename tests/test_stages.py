@@ -10212,11 +10212,54 @@ with tempfile.TemporaryDirectory() as _audit_tmp:
     _audit_file = json.loads(
         (_audit_dir / "out" / dyau.PROVENANCE_NAME).read_text(encoding="utf-8")
     )
+    _audit_report = json.loads((_audit_dir / "out" / dyau.REPORT_NAME).read_text(encoding="utf-8"))
 check(
     "#256: the written audit-provenance.json carries the digest and the seed",
     _audit_file.get("prompt_sha256") == dyau.prompt_digest()
     and _audit_file.get("endpoint", {}).get("seed") == dyle.SEED,
     repr({k: _audit_file.get(k) for k in ("prompt_sha256", "endpoint")}),
+)
+# --- #304: the record says what each of its two tier-1 counts counts -----------------
+# The bundle above is a real one, so the mechanism can be measured rather than described:
+# `rules_run` is 4 because all four `check_*` functions are called (`audit.py:903-906`) and each
+# counts itself first (`:184`, `:308`, `:387`, `:418`) -- `check_dimensions` incremented at `:308`
+# and then found no declared shape, so it reported `audit/dimensions-skipped` (`:311-317`) instead
+# of going uncounted. That is what "declared but did not run" actually is: the list holds *ids*
+# (a skipped marker is one, emitted by a check that ran) and the counter holds *checks*, so the
+# two are different quantities whatever their numbers are. #266's incompleteness in that list is
+# #303's; this change is the record and the docs saying which is which.
+_tier1 = _audit_file["tier1"]
+check(
+    "#304: audit-provenance.json says what `rules` and `rules_run` each count",
+    isinstance(_tier1.get("counting"), str)
+    and "`rules` names ids" in _tier1["counting"]
+    and "`rules_run` counts checks" in _tier1["counting"],
+    repr(_tier1.get("counting")),
+)
+check(
+    "#304: the counter counts checks that ran, including the one that had nothing to check",
+    _tier1["rules_run"] == 4
+    and _audit_report["tier1_rules_run"] == 4
+    and "audit/dimensions-skipped" in [f["rule"] for f in _audit_report["findings"]],
+    f"rules_run={_tier1['rules_run']} report={_audit_report['tier1_rules_run']} "
+    f"findings={[f['rule'] for f in _audit_report['findings']]}",
+)
+check(
+    "#304: the summary line names the counter with a word the list does not use",
+    dyau.Report(tier1_rules_run=4).summary().startswith("4 tier-1 checks,"),
+    dyau.Report(tier1_rules_run=4).summary(),
+)
+_quality_doc = (REPO / "docs" / "quality.md").read_text(encoding="utf-8")
+check(
+    "#304: docs/quality.md's stage-9 sentence is true of this bundle, not of the record's shape",
+    "Four deterministic tier-1 checks" in _quality_doc
+    and "Four tier-1 rules" not in _quality_doc
+    # "Four ... checks" is the claim, and this bundle is the evidence for it: `rules_run` is 4
+    # and `tier1.rules` is a list of ids, one of which (`audit/dimensions-skipped`) this run
+    # reported from a check that had no shape to check. A sentence that said "four tier-1 rules"
+    # would be true of neither the list nor the counter -- they are different quantities.
+    and _tier1["rules_run"] == 4,
+    "docs/quality.md stage 9 vs this bundle",
 )
 _llm_source = pathlib.Path(dyle.__file__).read_text(encoding="utf-8")
 check(
