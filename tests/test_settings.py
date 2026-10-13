@@ -17,6 +17,7 @@ Isolated with `tests/_env.py`, so a developer's exported `DYAK_*` cannot answer 
 
 import ast
 import io
+import json
 import os
 import sys
 import tempfile
@@ -852,6 +853,127 @@ check(
     and "/from/flag" in _cli_text
     and f"{len(settings.HONOURED_SETTINGS)} keys" in _cli_text,
     f"exit={_cli_code}",
+)
+
+# --- #284: the STT endpoint reaches the record redacted ------------------------
+# Stage 3 records its base URL: `stt/__init__.py` builds the `Transcript.parameters` dict and
+# `stt/core.py:336` writes it into `stt-provenance.json`, which the bundle publishes. That URL
+# is what the operator configured, so a userinfo password or a query credential in it landed in
+# the artefact verbatim -- the defect #273 fixed for the LLM endpoint and #279 half 1 for the
+# LLM's error messages, one layer over. The fix reuses `llm.redact_endpoint` rather than adding
+# a second redactor, so the closed credential-name list, the mask and the misses are identical
+# in stage 3 and in stages 6/7/9/10.
+#
+# A stub transport and a fake wav: nothing here reads a host, an endpoint or an env var the
+# test did not write itself (`use_file` clears every `DYAK_*` first), so this check answers the
+# same on a machine with a live STT endpoint and on one without.
+import dyak.stt as dystt  # noqa: E402
+from dyak import llm as dyll  # noqa: E402
+
+_stt_segment = [
+    {
+        "id": 0,
+        "text": " hello",
+        "start": 0.0,
+        "end": 1.4,
+        "words": [
+            {"word": " he", "start": 0.0, "end": 0.4},
+            {"word": "llo", "start": 0.4, "end": 1.4},
+        ],
+    }
+]
+
+
+class _StubTransport:
+    """Stands in for `urllib.request.urlopen`: records the request, returns the queued body."""
+
+    def __init__(self, bodies: list[bytes]) -> None:
+        self.bodies = list(bodies)
+        self.sent: list = []
+
+    def __call__(self, request, timeout=None):
+        self.sent.append(request)
+        body = self.bodies.pop(0)
+
+        class _Response:
+            def read(self, _n: int = -1) -> bytes:
+                return body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc) -> bool:
+                return False
+
+        return _Response()
+
+
+_real_stt_urlopen = whispercpp.urllib.request.urlopen
+_record_dir = Path(tempfile.mkdtemp(prefix="dyak-stt-record-"))
+_record_wav = _record_dir / "audio.wav"
+_record_wav.write_bytes(b"RIFF" + b"\0" * 60)
+
+# The shape #284 was filed for: a userinfo password and a query credential in one URL, beside
+# an ordinary parameter that has to survive.
+_stt_url = (
+    "http://svc:not-a-real-stt-password@h:8390/v1"
+    "?api_key=not-a-real-stt-query-secret&api-version=2026-01-01"
+)
+use_file(f'whispercpp_url = "{_stt_url}"\n')
+_transport = _StubTransport([b"ok", json.dumps(_stt_segment).encode()])
+whispercpp.urllib.request.urlopen = _transport
+try:
+    _recorded = dystt.transcribe(_record_wav, audio_duration=1.4, backend="whispercpp")
+    _prov_path = dystt.write(_recorded, _record_dir)["provenance"]
+    _prov_text = Path(_prov_path).read_text(encoding="utf-8")
+    _prov = json.loads(_prov_text)
+    _wire = _transport.sent[-1].full_url
+finally:
+    whispercpp.urllib.request.urlopen = _real_stt_urlopen
+
+check(
+    "#284: the STT record masks the credential's value and keeps its name",
+    "?api_key=***" in _prov["parameters"]["endpoint"],
+    _prov["parameters"]["endpoint"],
+)
+check(
+    "#284: the ordinary parameter beside it survives byte for byte",
+    "api-version=2026-01-01" in _prov["parameters"]["endpoint"]
+    and "***2026" not in _prov["parameters"]["endpoint"],
+    _prov["parameters"]["endpoint"],
+)
+check(
+    "#284: no invented credential is in stt-provenance.json",
+    "not-a-real-stt-password" not in _prov_text and "not-a-real-stt-query-secret" not in _prov_text,
+    _prov["parameters"]["endpoint"],
+)
+check(
+    "#284: the userinfo is masked in the record, not dropped",
+    "http://***@h:8390/v1" in _prov["parameters"]["endpoint"],
+    _prov["parameters"]["endpoint"],
+)
+check(
+    "#284: the raw endpoint still goes on the wire -- the request is untouched",
+    _wire == f"{_stt_url}/inference"
+    and "not-a-real-stt-password" in _wire
+    and "not-a-real-stt-query-secret" in _wire,
+    _wire,
+)
+check(
+    "#284: a name that only matches the list by substring is masked too (#279's price)",
+    dyll.redact_endpoint("http://h:8390/v1?monkey=1") == "http://h:8390/v1?monkey=***",
+    dyll.redact_endpoint("http://h:8390/v1?monkey=1"),
+)
+check(
+    "#284: a query with no credential name survives byte for byte",
+    dyll.redact_endpoint("http://h:8390/v1?api-version=2026-01-01&lang=ru")
+    == "http://h:8390/v1?api-version=2026-01-01&lang=ru",
+    dyll.redact_endpoint("http://h:8390/v1?api-version=2026-01-01&lang=ru"),
+)
+check(
+    "#284: one redactor -- the STT layer does not carry a second implementation",
+    dystt.redact_endpoint is dyll.redact_endpoint,
+    f"{dystt.redact_endpoint!r} vs {dyll.redact_endpoint!r}",
 )
 
 # --- report -------------------------------------------------------------------
