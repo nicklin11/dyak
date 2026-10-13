@@ -37,6 +37,7 @@ sys.path.insert(0, str(REPO / "src"))
 from dyak import cli as dyc  # noqa: E402
 from dyak import deps as dyd  # noqa: E402
 from dyak import exitcodes as ec  # noqa: E402
+from dyak import llm as dyll  # noqa: E402
 
 failures: list[str] = []
 
@@ -915,10 +916,11 @@ check(
 #
 # The two STT producers record the endpoint themselves -- `BackendInfo.target` in
 # `stt/whispercpp.py:94` and `stt/openai_compat.py:150`, and each backend's own failure
-# messages -- and three readers print that record: `deps.py:193` and `:196` for `doctor`,
-# `pipeline.py:667` for the stage-3 line. So the mask belongs where the record is built,
-# the shape #297 used for `Check.detail`, and `deps.py` is deliberately not touched: the
-# checks below drive the real `check_stt()` and read what `doctor` would print.
+# messages -- and three readers print that record: `deps.py:200` and `:203` for `doctor`,
+# `pipeline.py:667` for the stage-3 line. So the mask belongs where the record is built, the
+# shape #297 used for `Check.detail`; the checks below drive the real `check_stt()` and read
+# what `doctor` would print, and the block after them pins the same mask at `deps.py`'s own
+# `stt` detail, so the printed line does not depend on the producers alone.
 #
 # The URLs are invented. The probe is the suite's `fake_stt_urlopen` re-installed for this
 # block (`restore()` at :693 hands the real one back), so no verdict here depends on a live
@@ -1009,8 +1011,10 @@ try:
         repr(_s308_refusals),
     )
 
-    # `check_stt` is the printer -- `deps.py:193` for the failure, `:196` for the success --
-    # and it is unmodified: both verdicts come out of the code `doctor` calls.
+    # `check_stt` is the printer -- `deps.py:200` for the failure, `:203` for the success --
+    # and both verdicts come out of the code `doctor` calls: only the record the engine hands it
+    # is the producers' (this PR masks the same record a second time on its way into the detail,
+    # see the block below, and that does not move the verdicts these checks read).
     _s308_saved_backend = os.environ.get(gld_stt.ENV_BACKEND)
     _s308_saved_url = os.environ.get(dyoc.OPENAI_URL_ENV)
     os.environ[gld_stt.ENV_BACKEND] = "openai"
@@ -1044,6 +1048,233 @@ try:
 finally:
     stt_probe_error = None
     dywsc.urllib.request.urlopen = _S308_REAL_URLOPEN
+
+
+# The same surface at the *other* boundary: `check_stt` masks the record on its way into
+# `Check.detail` (`deps.py:200` on the failure verdict, `:203` on the success one), the boundary
+# `check_llm`/`check_vlm` use. The checks in the block above cannot see that hunk -- they pass
+# because both producers mask at construction -- so the engine below hands `check_stt` a record
+# whose `target` is raw, which is what a producer that has not been taught to mask would build.
+# The verdicts and messages are the real `check_stt`'s; only its engine is a stub.
+class _S308RawInfo:
+    """The four fields `check_stt` reads off a backend's record."""
+
+    def __init__(self, target: str) -> None:
+        self.name = "openai"
+        self.target = target
+        self.detail = "0.0 s"
+        self.notes: tuple[str, ...] = ()
+
+
+class _S308RawEngine:
+    """A backend whose record is raw, so only `deps.py` can mask what is printed."""
+
+    def __init__(self, target: str, fail: bool) -> None:
+        self._target, self._fail = target, fail
+
+    def info(self) -> _S308RawInfo:
+        return _S308RawInfo(self._target)
+
+    def check(self) -> None:
+        if self._fail:
+            raise dyd.runner.DependencyError(
+                "openai",
+                ec.DEPENDENCY_FAILED,
+                "connection refused",
+                remediation="check the endpoint is running",
+            )
+
+
+_s308_saved_backend = gld_stt.backend
+_s308_raw_verdicts = []
+try:
+    for _fail in (False, True):
+        gld_stt.backend = lambda _fail=_fail: _S308RawEngine(_S308_CRED, _fail)
+        _s308_raw_verdicts.append(dyd.check_stt())
+finally:
+    gld_stt.backend = _s308_saved_backend
+check(
+    "#297/#308: `check_stt` masks a raw record itself, on the failure verdict and the success one",
+    len(_s308_raw_verdicts) == 2
+    and all(
+        _S308_PASSWORD not in _check.detail
+        and _S308_SECRET not in _check.detail
+        and _S308_MASKED in _check.detail
+        for _check in _s308_raw_verdicts
+    ),
+    repr([_check.detail for _check in _s308_raw_verdicts]),
+)
+
+
+# --- #297: the credential reaches neither printer, and the wire keeps it ---------------
+# `Check.path` carried `resolve(DYAK_LLM_ENDPOINT).value` verbatim and the four failure branches
+# carried the same value in `Check.detail`, so `dyak doctor` printed `http://host/v1?api_key=<secret>`
+# to stdout -- and `cli.py:130` prints `detail` a second time when a run refuses to start. That
+# second reader is the reason the mask belongs where the value is *stored* (`deps.py` calls
+# `llm.redact_endpoint`, the single implementation the record sites already use) instead of in one
+# printer. What must not change is the string the probe sends, so these checks pin both directions:
+# a later "simplification" that masks `url` before the request fails here rather than silently
+# breaking every probe.
+SECRET_QUERY = "INVENTED-297-QUERY-1a2b3c4d"
+SECRET_USERINFO = "INVENTED-297-USERINFO-5e6f7a8b"
+SECRET_HEADER = "INVENTED-297-HEADER-9c0d1e2f"
+LLM_URL = f"http://127.0.0.1:47901/llm-v1?api_key={SECRET_QUERY}"
+VLM_URL = f"http://user:{SECRET_USERINFO}@127.0.0.1:47902/vlm-v1"
+wire: list[tuple[str, str | None]] = []
+
+
+class _Stub200:
+    """What `check_llm`/`check_vlm` need from a 200: a `status` and the context protocol."""
+
+    status = 200
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def owned_by_297(url: str) -> bool:
+    return ":47901/" in url or ":47902/" in url
+
+
+def wire_urlopen(request, timeout=None):
+    """A 200 that records what was sent, and owns only the two URLs above (#184).
+
+    `wire` is the inverse half of this check: `request.full_url` is what the probe asked for and
+    the `Authorization` header is the credential `llm.py:158` says is recorded only as a boolean,
+    so both must survive the redaction untouched. Any other URL -- the STT probe the suite stubs
+    above -- is delegated, because a stub that fabricates a verdict for a probe it does not own is
+    the #184 defect.
+    """
+    url = request.full_url
+    if not owned_by_297(url):
+        return _previous_urlopen[0](request, timeout=timeout)
+    wire.append((url, dict(request.header_items()).get("Authorization")))
+    return _Stub200()
+
+
+def http_404_urlopen(request, timeout=None):
+    raise dyd.urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+
+def dead_urlopen(request, timeout=None):
+    raise dyd.urllib.error.URLError("connection refused")
+
+
+saved_297 = {
+    key: os.environ.get(key)
+    for key in (dyd.LLM_ENV, dyd.LLM_MODEL_ENV, dyd.LLM_KEY_ENV, dyd.VLM_ENV, dyd.VLM_MODEL_ENV)
+}
+os.environ[dyd.LLM_ENV] = LLM_URL
+os.environ[dyd.LLM_MODEL_ENV] = "stub-model"
+os.environ[dyd.LLM_KEY_ENV] = SECRET_HEADER
+os.environ[dyd.VLM_ENV] = VLM_URL
+os.environ[dyd.VLM_MODEL_ENV] = "stub-vision"
+
+# (a) the command itself: both roles reachable, and both endpoints named without their secrets.
+_previous_urlopen = [dyd.urllib.request.urlopen]
+wire.clear()
+out, err = io.StringIO(), io.StringIO()
+with urlopen_stub(wire_urlopen), redirect_stdout(out), redirect_stderr(err):
+    rc_297 = dyc.main(["doctor"])
+text_297, err_297 = out.getvalue(), err.getvalue()
+check(
+    # Not `rc == OK`: this point in the file runs after blocks that leave a deliberately broken
+    # vault in the environment, and the vault's exit code is not what this check is about.
+    "both credentialled roles are probed and reported ok (#297)",
+    "[ok  ] llm" in text_297 and "[ok  ] vlm" in text_297,
+    f"rc={rc_297}",
+)
+check(
+    "no raw credential anywhere in the doctor output (#297)",
+    SECRET_QUERY not in text_297 + err_297
+    and SECRET_USERINFO not in text_297 + err_297
+    and SECRET_HEADER not in text_297 + err_297,
+    text_297 + err_297,
+)
+check("the query credential is masked, not dropped (#297)", "?api_key=***" in text_297, text_297)
+check(
+    "the userinfo credential is masked, not dropped (#297)", "***@127.0.0.1" in text_297, text_297
+)
+check(
+    "the two endpoints stay identifiable and distinguishable (#297): scheme, host, port, path",
+    "http://127.0.0.1:47901/llm-v1?api_key=***" in text_297
+    and "http://***@127.0.0.1:47902/vlm-v1" in text_297,
+    text_297,
+)
+check(
+    "the credential is still ON THE WIRE, URL and Authorization header (#297)",
+    wire
+    == [
+        # `llm.append_path` (#288) joins `/models` into the URL's *path*, so the query keeps its
+        # position and the secret is still on the wire -- which is what this check pins, two
+        # lines below the redaction the record applies.
+        (f"http://127.0.0.1:47901/llm-v1/models?api_key={SECRET_QUERY}", f"Bearer {SECRET_HEADER}"),
+        # The vision role has no key of its own here, so it falls back to the text pair's key
+        # (ADR-0004 D3) -- the same credential, and equally untouched by the redaction.
+        (f"http://user:{SECRET_USERINFO}@127.0.0.1:47902/vlm-v1/models", f"Bearer {SECRET_HEADER}"),
+    ],
+    repr(wire),
+)
+check(
+    "deps calls llm's mask rather than a second implementation (#297)",
+    # `getattr`, so a revert of the fix reads as this check failing rather than as an
+    # `AttributeError` that takes the suite's failure summary down with it.
+    getattr(dyd, "redact_endpoint", None) is dyll.redact_endpoint,
+    f"{getattr(dyd, 'redact_endpoint', None)!r} vs {dyll.redact_endpoint!r}",
+)
+
+# (b) the failure branches, whose `detail` carried the same value: HTTP error and unreachable,
+# rendered through the same printer `dyak doctor` uses.
+for label, stub, endpoint in (
+    ("HTTP", http_404_urlopen, "llm"),
+    ("unreachable", dead_urlopen, "llm"),
+    ("unreachable", dead_urlopen, "vlm"),
+):
+    secret = SECRET_USERINFO if endpoint == "vlm" else SECRET_QUERY
+    with urlopen_stub(stub):
+        failing = dyd.check_vlm() if endpoint == "vlm" else dyd.check_llm()
+    out, err = io.StringIO(), io.StringIO()
+    with redirect_stdout(out), redirect_stderr(err):
+        dyc._render([failing])
+    rendered = out.getvalue() + err.getvalue()
+    check(
+        f"the {label} failure line is masked too (#297): {endpoint}",
+        secret not in rendered and "***" in rendered,
+        rendered,
+    )
+    check(
+        f"and it still names the endpoint it probed (#297): {endpoint}",
+        (":47901/" if endpoint == "llm" else ":47902/") in rendered,
+        rendered,
+    )
+
+# (c) the second reader: `_preflight` prints `detail` again when a run refuses to start, so a
+# printer-side fix would have had to remember this one too.
+with urlopen_stub(dead_urlopen):
+    refusing = dyd.check_llm()
+saved_run_all_297 = dyc.run_all
+dyc.run_all = lambda *, required=None: [refusing]
+err = io.StringIO()
+with redirect_stderr(err):
+    rc_refused = dyc._preflight()
+dyc.run_all = saved_run_all_297
+check(
+    "the refusal path prints the same detail masked (#297)",
+    rc_refused == ec.DEPENDENCY_FAILED
+    and "refusing to start" in err.getvalue()
+    and SECRET_QUERY not in err.getvalue()
+    and "?api_key=***" in err.getvalue(),
+    f"rc={rc_refused} {err.getvalue()}",
+)
+
+for key, value in saved_297.items():
+    if value is None:
+        os.environ.pop(key, None)
+    else:
+        os.environ[key] = value
 
 _env.restore(SAVED_ENV)
 
