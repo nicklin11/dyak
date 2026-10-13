@@ -234,13 +234,12 @@ certifies as healthy.
 
 ```python
 IMPLEMENTED = 12
-REMAINING_NOTE = "every stage in ADR-0001 § The pipeline is built"
 ```
 
-Both were false while stage 6 had no vision client, and both are true as of #67. The count in
+It was false while stage 6 had no vision client, and it is true as of #67. The count in
 every progress line is an accurate claim again.
 
-Two defects in those six lines were real and are fixed:
+Two defects in that block were real and are fixed:
 
 - **The citation was wrong.** The module said "every stage D3 lists". `D3` is about reading
   frames from the source; the twelve-stage list is in ADR-0001 § *The pipeline*. An instance

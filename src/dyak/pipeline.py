@@ -66,7 +66,6 @@ from .workspace import WorkDir
 # dependency would be a cycle. `stages` holds it instead.
 IMPLEMENTED = stages.IMPLEMENTED
 FIRST_STAGE = stages.FIRST_STAGE
-REMAINING_NOTE = stages.REMAINING_NOTE
 
 # Multiplier on the upper bound of the stage-3 estimate. An interval that can
 # collapse to a single number reads as a precision claim nobody has measured.

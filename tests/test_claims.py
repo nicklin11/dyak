@@ -87,6 +87,25 @@ check(
     f"IMPLEMENTED={gst.IMPLEMENTED}, pipeline reports {len(reported)}",
 )
 
+# `REMAINING_NOTE` outlived its own obituary, and each step is a different commit. `2f69998`
+# created it as a multi-line expression ("stages 4-12 are not built yet (tracked in #3): ...")
+# together with the run's exit line that quoted it, as the constant `PROCESS_INCOMPLETE` (that
+# f-string) and the print of it; `1123489` rewrote the name into a one-line literal ("stages 8-12
+# are not built yet ...") and edited the f-string's tail; `7b39e58` moved the value to `stages`,
+# which is why `pipeline` re-exported it at all; and `21af2fc` -- the commit that built stage 12
+# -- deleted `PROCESS_INCOMPLETE` and its print, the only reader the name had, and rewrote the
+# value once more, to "every stage D3 lists is built". That deletion is what left the name
+# defined, exported from `pipeline` and read by nothing (#215). With `IMPLEMENTED = 12` and no
+# gap above, the state it described cannot occur: a "not built yet" line today is `_pending` for
+# a *subcommand* (`cli.py:136-142`), not a stage. The name is gone; this is what catches its
+# return, because a re-added constant that nothing prints is exactly the orphan #215 was.
+STAGES = (REPO / "src" / "dyak" / "stages.py").read_text(encoding="utf-8")
+check(
+    "no orphaned remaining-stages constant in stages.py or pipeline.py",
+    "REMAINING_NOTE" not in STAGES and "REMAINING_NOTE" not in PIPELINE,
+    "a name nothing prints is back; either print it at the run's end line or delete it (#215)",
+)
+
 # The README status table, *if it exists*, must have one row per stage plus doctor, and no
 # stage number may appear twice. A duplicate is how "6" ended up on two rows.
 #
