@@ -89,6 +89,14 @@ jobs:
       - name: Stage suite
         run: python tests/test_stages.py
 
+      # The term/drift rewrite declines what it cannot defend (#287): the four guards in
+      # `repair.DRIFT_GUARDS` and the corpus shape they come from, driven through the real
+      # `repair.repair` with the real derived glossary rows. Separate from the stage suite
+      # because the evidence is a corpus shape rather than a stage contract, and a suite
+      # nothing invokes cannot fail (#173) -- so it is wired here like every other one.
+      - name: Repair drift suite (#287)
+        run: python tests/test_repair_drift.py
+
       # The durable record a failed run leaves (#271): the reason reaches the bundle verbatim,
       # `detail` stays the category, and no traceback or host path travels with it.
       - name: Run-state suite (#271)
