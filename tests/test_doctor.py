@@ -247,12 +247,12 @@ check(
 )
 
 # --- 2c. the STT probe spends the stage-0 budget, not a bare 5 s (#189) -------
-# `check()` probes the endpoint before a run commits to it, and the endpoint #95 names as
-# supported -- the shipboard proxy on 100.64.0.1:10301 -- is wake-on-first-request: the
-# first `GET /health` after `whisper-idle-stop.timer` reclaimed the container is spent
-# waiting for the wake. A bare `timeout=5.0` therefore reported a working endpoint as
-# unreachable, and `_preflight` refused the run. The budget is now `PROBE_TIMEOUT`, the
-# constant `check_llm` and `check_vlm` already spend, so the three probes cannot disagree.
+# `check()` probes the endpoint before a run commits to it, and a whisper.cpp container is
+# often wake-on-first-request: the first `GET /health` against a cold one is spent waiting for
+# the wake. A bare `timeout=5.0` therefore reported a working endpoint as unreachable, and
+# `_preflight` refused the run. The budget is now `PROBE_TIMEOUT`, the constant `check_llm`
+# and `check_vlm` already spend, so the three probes cannot disagree. What used to make the
+# endpoint cold, and why it is no longer named here, is the ADR-0001 record (#259).
 #
 # The stub records the kwarg it was called with, so this pins the budget with no container,
 # no listener and no wall clock -- and goes red the moment a literal comes back.
