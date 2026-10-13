@@ -9860,10 +9860,10 @@ check(
 # and stages 7, 9 and 10's `endpoint` (#77, #257). Stage 10 sends no prompt, so it records no
 # digest beside it; the check further down states that rather than leaving it to the prose.
 # `.get` chains, not `["endpoint"]["seed"]`: when the #257 teeth removed the endpoint block the
-# suite died of `KeyError: 'endpoint'` after printing 922 of its 968 checks, so a check that aborts
-# reports nothing about the 46 checks after it. (t188 measured the same 922 of a 965-check suite;
-# the three-check difference is the #257 checks further down.) The file's contract is accumulate,
-# print, exit 1.
+# suite died of `KeyError: 'endpoint'` after printing 922 of its 968 checks. t188's run printed the
+# same 922 of the same 968-check suite, and the same 46 checks produced no verdict there -- the one
+# that crashed and the 45 after it; three of them are the checks that report FAIL when the endpoint
+# is missing but the chains are intact. The file's contract is accumulate, print, exit 1.
 _seed_config = dyle.Config("http://x", "m")
 
 
