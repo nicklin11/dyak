@@ -77,6 +77,47 @@ in the module named here.
 comment in `deps.py`). Standard Python/XDG variables — `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
 `TMPDIR` — are also consulted, each with a documented fallback.
 
+### Every honoured key and its default
+
+The table above says what each variable does; this one says what the resolver does when nothing
+supplies a value — no flag, no environment variable, no settings-file key. It is the code's own
+answer, not a transcription: the set is `settings.HONOURED_SETTINGS` (derived in `settings.py`
+from its own `DYAK_*` constants), the flat key is `settings.settings_key`, and the default is the
+`default=` argument at that key's `resolve()` call site, evaluated in the module that passes it.
+`tests/test_claims.py` re-derives all three and fails if a row and the code disagree, so a new
+setting cannot be declared without a row here.
+
+`DYAK_SETTINGS` is the one honoured variable with no row: it names the file being read, so the
+file cannot carry it. `none` means the resolver returns no value at all, which for several keys is
+the "not configured" state described above (the STT, LLM and VLM URLs); where a path is composed
+anyway — `output_dir` from `$XDG_STATE_HOME/dyak/<lecture>`, `terms_dir` from
+`<vault>/mscs/_terms`, the VLM pair from the LLM pair — that happens in the stage that needs it,
+after the resolver has said `none`. A default that is a path on the machine running the tool is
+written `$HOME`/`$TMPDIR` here, because this document has to read the same on another machine.
+
+| environment variable | settings-file key | built-in default |
+|---|---|---|
+| `DYAK_VAULT` | `vault` | `$HOME/Documents/obs_notes` |
+| `DYAK_TERMS_DIR` | `terms_dir` | none |
+| `DYAK_WORKDIR` | `workdir` | `$TMPDIR` |
+| `DYAK_OUTPUT_DIR` | `output_dir` | none |
+| `DYAK_BBOX_SOURCE` | `bbox_source` | `geometric` |
+| `DYAK_SERIAL` | `serial` | `0` |
+| `DYAK_STT` | `stt` | `auto` |
+| `DYAK_WHISPERCPP_URL` | `whispercpp_url` | none |
+| `DYAK_WHISPERCPP_LANGUAGE` | `whispercpp_language` | none |
+| `DYAK_OPENAI_URL` | `openai_url` | none |
+| `DYAK_OPENAI_KEY` | `openai_key` | none |
+| `DYAK_OPENAI_MODEL` | `openai_model` | `whisper-1` |
+| `DYAK_OPENAI_MAX_UPLOAD_BYTES` | `openai_max_upload_bytes` | `26214400` |
+| `DYAK_LLM_ENDPOINT` | `llm_endpoint` | none |
+| `DYAK_LLM_MODEL` | `llm_model` | none |
+| `DYAK_LLM_KEY` | `llm_key` | none |
+| `DYAK_LLM_CONCURRENCY` | `llm_concurrency` | `1` |
+| `DYAK_VLM_ENDPOINT` | `vlm_endpoint` | none |
+| `DYAK_VLM_MODEL` | `vlm_model` | none |
+| `DYAK_VLM_KEY` | `vlm_key` | none |
+
 ## `dyak doctor`
 
 Reports missing or conflicting dependencies and exits 2/3 with the reason and remediation.

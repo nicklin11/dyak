@@ -22,6 +22,8 @@ thing that makes it true is a check that fails when it stops being true.
 
 import argparse
 import ast
+import importlib
+import os
 import re
 import subprocess
 import sys
@@ -50,6 +52,7 @@ from dyak import probe  # noqa: E402
 from dyak import quality  # noqa: E402
 from dyak import repair  # noqa: E402
 from dyak import report as dyro  # noqa: E402
+from dyak import settings as dys  # noqa: E402
 from dyak import stages as gst  # noqa: E402
 from dyak import synth  # noqa: E402
 from dyak.stt import core as sttcore  # noqa: E402
@@ -952,6 +955,199 @@ check(
     "both code-4 causes reach the rendered --help, not just the parser attribute",
     all(wording in HELP_RENDERED for wording in HELP_CAUSES.values()),
     HELP_RENDERED,
+)
+
+# --- 8d. every honoured key is documented with the default the resolver returns (#243) --------
+# #243's `dyak settings` answers "what settings do we have" at a terminal; this is the same answer
+# as a document, and it is re-derived here so it cannot go stale. Each cell comes from the thing
+# that owns it:
+#
+#   * the set is `settings.HONOURED_SETTINGS`, which settings.py derives from its own `DYAK_*`
+#     constants (`_ENV_NAMES`) -- not a list retyped into the doc, and `tests/test_deps.py` holds
+#     that set to the source in both directions;
+#   * the flat key is `settings.settings_key(env)`, the one mapping between the two names;
+#   * the default is the `default=` argument at that key's own `resolve()` call site, evaluated in
+#     the namespace of the module that passes it. `resolve()` carries no default of its own -- the
+#     call site supplies it -- so a table built from `resolve(env).value` would read `None` in
+#     every row and be wrong twenty times.
+#
+# `DYAK_SETTINGS` is the one honoured variable with no row: it names the file being read, so the
+# file cannot carry it and `settings_path` reads it directly (settings.py:177).
+#
+# A default that is a path on this host is written `$HOME`/`$TMPDIR` in the doc, because the
+# document has to read the same on another machine. The comparison normalises the evaluated value
+# the same way, so that is a rule rather than a hand-kept list of exceptions.
+SETTINGS_HEADING = "### Every honoured key and its default"
+
+
+def _string_constants(tree: ast.Module) -> dict[str, str]:
+    """Module-level `NAME = "literal"` bindings, so `resolve(ENDPOINT_ENV)` can be named.
+
+    The same harvest `tests/test_deps.py` runs for its call-site check. The suites are standalone
+    scripts, so the lines are repeated rather than imported from a file that runs a suite on
+    import.
+    """
+    consts: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        value = node.value
+        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                consts[target.id] = value.value
+    return consts
+
+
+def _imported_constants(tree: ast.Module, known: dict[str, str]) -> dict[str, str]:
+    """`from .settings import NAME as ALIAS` bindings, resolved to the literal in settings.py."""
+    consts: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        if not node.module.endswith("settings"):
+            continue
+        for alias in node.names:
+            if alias.name in known:
+                consts[alias.asname or alias.name] = known[alias.name]
+    return consts
+
+
+def _default_arguments() -> dict[str, set[tuple[str, str]]]:
+    """`{env name: {(module, default source)}}`, one entry per `default=` a resolve() call passes.
+
+    A call without `default=` is not recorded: that is the "unset means not configured" case, and
+    the doc writes `none` for it.
+    """
+    sites: dict[str, set[tuple[str, str]]] = {}
+    for src_path in sorted((REPO / "src" / "dyak").rglob("*.py")):
+        module = ".".join(src_path.relative_to(REPO / "src").with_suffix("").parts)
+        tree = ast.parse(src_path.read_text(encoding="utf-8"), filename=str(src_path))
+        consts = {**_string_constants(tree), **_imported_constants(tree, SETTINGS_CONSTANTS)}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not node.args:
+                continue
+            func = node.func
+            if isinstance(func, ast.Attribute):
+                called = func.attr
+            elif isinstance(func, ast.Name):
+                called = func.id
+            else:
+                continue
+            if called != "resolve":
+                continue
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                env = arg.value
+            elif isinstance(arg, ast.Name) and arg.id in consts:
+                env = consts[arg.id]
+            elif isinstance(arg, ast.Attribute) and arg.attr in SETTINGS_CONSTANTS:
+                env = SETTINGS_CONSTANTS[arg.attr]
+            else:
+                continue
+            for keyword in node.keywords:
+                if keyword.arg == "default":
+                    sites.setdefault(env, set()).add((module, ast.unparse(keyword.value)))
+    return sites
+
+
+def _evaluated(module: str, source: str) -> str:
+    """The default expression's value, evaluated where it is written, or `none` for `None`.
+
+    `str(DEFAULT_VAULT)`, `str(DEFAULT_CONCURRENCY)` and `tempfile.gettempdir()` are the shapes
+    that are not literals, and a hand-kept table of what they evaluate to is the drift this check
+    exists to remove -- so the expression is evaluated in its own module's namespace. It is this
+    repository's own source, read a few lines above; nothing here is user input.
+
+    `None` is the resolver's own answer for a key no call site gives a default to, so an explicit
+    `default=None` -- `dyak settings` passes one through a table (#247) -- reads the same as no
+    `default=` at all. Without that the doc's `none` would disagree with the string "None".
+    """
+    value = eval(source, vars(importlib.import_module(module)))
+    return "none" if value is None else str(value)
+
+
+def _as_documented(text: str) -> str:
+    """`text` with this host's home and temp directory written `$HOME`/`$TMPDIR`."""
+    tokens = ((str(Path.home()), "$HOME"), (str(tempfile.gettempdir()), "$TMPDIR"))
+    for path, token in sorted(tokens, key=lambda pair: len(pair[0]), reverse=True):
+        text = text.replace(path, token)
+    return text
+
+
+SETTINGS_CONSTANTS = _string_constants(
+    ast.parse((REPO / "src" / "dyak" / "settings.py").read_text(encoding="utf-8"))
+)
+SETTINGS_SECTION = RUNNING.split(SETTINGS_HEADING, 1)
+documented_settings: dict[str, tuple[str, str]] = {}
+if len(SETTINGS_SECTION) == 2:
+    # The section ends at the next level-2 heading; a level-3 one inside it does not ("\n## "
+    # needs the space, so "###" does not match).
+    for line in SETTINGS_SECTION[1].split("\n## ", 1)[0].splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) == 3 and cells[0].startswith("`DYAK_"):
+            documented_settings[cells[0].strip("`")] = (cells[1].strip("`"), cells[2].strip("`"))
+
+HONOURED_VARS = {f"DYAK_{key.upper()}" for key in deps.HONOURED_SETTINGS}
+check(
+    "every honoured setting has a row in the settings table, and only those (#243)",
+    set(documented_settings) == HONOURED_VARS,
+    f"in the table, not honoured: {sorted(set(documented_settings) - HONOURED_VARS)}; "
+    f"honoured, no row: {sorted(HONOURED_VARS - set(documented_settings))}",
+)
+check(
+    "the settings table is populated, so the check above is not vacuous (#243)",
+    len(documented_settings) >= 15,
+    f"{len(documented_settings)} rows",
+)
+
+# The resolver is asked with nothing set: this file isolates the environment at the top, and the
+# settings *file* is pointed at an absent path, because a developer's own
+# `~/.config/dyak/settings.toml` would otherwise supply half these values and the check would
+# pass against the wrong layer.
+DEFAULT_SITES = _default_arguments()
+os.environ[deps.SETTINGS_PATH_ENV] = str(Path(tempfile.mkdtemp()) / "absent.toml")
+settings_problems: list[str] = []
+for _var, _key in sorted((f"DYAK_{key.upper()}", key) for key in deps.HONOURED_SETTINGS):
+    # The env name is built from the key by the inverse of `settings_key`, and that inverse is the
+    # whole mapping between the two name systems -- so it has to round-trip. `resolve` would raise
+    # on a name that is not honoured, and a raise is not a finding a reviewer can read.
+    if dys.settings_key(_var) != _key:
+        settings_problems.append(
+            f"{_var}: settings_key gives {dys.settings_key(_var)!r}, not {_key!r}"
+        )
+    _flat, _shown = documented_settings.get(_var, ("<no row>", "<no row>"))
+    if _flat != _key:
+        settings_problems.append(f"{_var}: row says {_flat!r}, key is {_key!r}")
+    _values = {
+        _as_documented(_evaluated(module, source))
+        for module, source in DEFAULT_SITES.get(_var, set())
+    }
+    if len(_values) > 1:
+        settings_problems.append(
+            f"{_var}: the code passes more than one default: {sorted(_values)}"
+        )
+        continue
+    _derived = next(iter(_values), "none")
+    if _shown != _derived:
+        settings_problems.append(f"{_var}: doc says {_shown!r}, the call site says {_derived!r}")
+    _resolved = dys.resolve(_var, default=None if _derived == "none" else _derived)
+    if _resolved.value != (None if _derived == "none" else _derived) or (
+        _resolved.source != dys.SOURCE_DEFAULT
+    ):
+        settings_problems.append(
+            f"{_var}: with nothing set resolve() gave {_resolved.value!r} from {_resolved.source!r}"
+        )
+os.environ.pop(deps.SETTINGS_PATH_ENV, None)
+check(
+    "every documented default is the one the resolver returns when nothing is set (#243)",
+    not settings_problems,
+    "; ".join(settings_problems) or f"{len(documented_settings)} rows agree",
 )
 
 # --- 9. bundle.RUN_ARTEFACTS is the set `clear_root` deletes ------------------------
