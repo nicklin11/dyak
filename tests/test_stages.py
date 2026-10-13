@@ -6303,6 +6303,52 @@ check(
     len(found) == 1 and found[0].line == broken[: broken.index("$x = u")].count("\n") + 1,
     str(found),
 )
+# The fence is the mechanism (#265). `_outside_code` drops every fenced line, so the list the
+# delimiters check scans is SHORTER than the note while its numbers stay DOCUMENT lines. The
+# rule re-indexed that list with a document number, so on a fenced note a document line 432
+# finding quoted document line 458's text, and one at document line 465 raised IndexError out
+# of `lint.run` -- which `pipeline.py:893` calls unguarded, so stage 8 died with it. Every
+# other delimiter test above builds a fence-free note, where the two index spaces coincide.
+fence = "```python\nx = 1\ny = 2\nz = 3\n```"
+fenced_bodies = ["содержимое раздела"] * 8
+fenced_bodies[0] = fence
+fenced_bodies[1] = "Хвост $x = u."
+fenced = note(*fenced_bodies)
+fenced_found = rules(fenced, "math/inline-unbalanced")
+check("an unclosed $ after a fence is still an error (#265)", fenced_found, "no finding")
+check(
+    "and it names the document line, not its position in the fence-filtered list (#265)",
+    len(fenced_found) == 1
+    and fenced_found[0].line == fenced[: fenced.index("Хвост $x = u")].count("\n") + 1,
+    str(fenced_found),
+)
+check(
+    "and it quotes that line, not a line further down (#265)",
+    len(fenced_found) == 1 and "Хвост $x = u" in fenced_found[0].detail,
+    str(fenced_found),
+)
+# The same document number past the end of the shortened list is the crash half: the fence
+# drops 5 of this note's 37 lines, so section 8's line number 37 exceeds the 32-entry list.
+fenced_bodies[1] = "содержимое раздела"
+fenced_bodies[7] = "Хвост $x = u."
+check(
+    "a fenced note whose odd $ is past the filtered list's end does not crash (#265)",
+    rules(note(*fenced_bodies), "math/inline-unbalanced"),
+    "no finding, or lint.run raised",
+)
+fenced_bodies[7] = "Хвост $x = u$ и $y$."
+check(
+    "and a balanced fenced note reports nothing (#265)",
+    not rules(note(*fenced_bodies), "math/inline-unbalanced"),
+    str(rules(note(*fenced_bodies), "math/inline-unbalanced")),
+)
+fenced_bodies[7] = "содержимое раздела"
+fenced_bodies[0] = "```python\nprint('$x')\n```"
+check(
+    "a $ inside a fence is not linted at all (#265)",
+    not rules(note(*fenced_bodies), "math/inline-unbalanced"),
+    "$ in fenced code was reported",
+)
 bodies[5] = "Блочная $$x = u$$ и $y$."
 check(
     "balanced display math is clean",
