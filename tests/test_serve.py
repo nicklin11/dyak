@@ -15,17 +15,23 @@ checked from outside the module:
     exposure       token always, Host and Origin checked, a file contained under --root, one run
                    at a time, loopback by default with a warning when it is not
     the codes      every code in `exitcodes.DESCRIPTIONS` has the design's sentence in the page
+    the page       the page's own JavaScript is run under node against a stub DOM: the log
+                   listener parses the SSE payload, and a load during a run attaches to it
     docs and CI    `## dyak serve` names the subcommand and every flag, and ci.yml runs this file
 
 Everything is local and stubbed: a fake pipeline (the shape `tests/test_stages.py` uses) and a
 loopback server on port 0. No ffmpeg, no endpoint, no host state -- the result is the same on a
-machine with a live transcriber and on one without (#175, #184).
+machine with a live transcriber and on one without (#175, #184). The one tool it may use is node,
+for the page's JavaScript; a host without node prints SKIP for that section rather than passing it
+silently, and CI has node.
 """
 
 import ast
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -385,6 +391,15 @@ def call(path, *, method="GET", payload=None, token=TOKEN, host=None, origin=Non
         return 0, str(exc), {}
 
 
+def json_of(body: str) -> dict:
+    """The parsed body, or an empty dict. A broken tree answers with a traceback, not JSON."""
+    try:
+        parsed = json.loads(body)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 try:
     status, body, headers = call("/")
     check(
@@ -434,6 +449,24 @@ try:
         call("/", host="evil.example")[0] == 403,
         "403",
     )
+    # The bracketed IPv6 form: a browser writes the port after the bracket, and a rebinding page
+    # can write anything at all. `_host_ok` reads up to the `]` and takes what follows only if it
+    # is a port, so the loopback spellings are allowed and every foreign or malformed one is not.
+    for _host, _want in (
+        ("[::1]", 200),
+        (f"[::1]:{state.port}", 200),
+        (f"localhost:{state.port}", 200),
+        ("[::ffff:127.0.0.1]:80", 200),
+        ("[evil.example]:80", 403),
+        ("[::1]evil", 403),
+        ("[::1", 403),
+        ("evil.example:80", 403),
+    ):
+        check(
+            f"Host: {_host} is answered with {_want}",
+            call("/", host=_host)[0] == _want,
+            f"got {call('/', host=_host)[0]}",
+        )
     check(
         "a state-changing request from another Origin is refused (CSRF)",
         call(
@@ -460,14 +493,27 @@ try:
         call("/api/run", method="POST", payload={})[0] == 400,
         call("/api/run", method="POST", payload={})[1],
     )
+    # `Path.resolve()` raises ValueError for a NUL byte, and the name is untrusted input, so the
+    # refusal is a 400 with a reason. A 500 here is a traceback in the server's log, which is the
+    # one thing a request from a page must never be able to cause.
+    _nul_status, _nul_body = call(
+        "/api/run", method="POST", payload={"name": "lecture1\u0000.mp4"}
+    )[:2]
+    check(
+        "a NUL byte in the requested name is a 400, not a 500 traceback",
+        _nul_status == 400 and json_of(_nul_body).get("error"),
+        f"{_nul_status} {_nul_body[:120]}",
+    )
 
     frames: list[tuple[str, str]] = []
+    sse_headers: dict[str, str] = {}
     stop_reader = threading.Event()
 
     def read_events() -> None:
         try:
             request = urllib.request.Request(f"{BASE}/api/events?token={TOKEN}")
             with urllib.request.urlopen(request, timeout=10) as reply:
+                sse_headers.update(dict(reply.headers))
                 name, data = "", ""
                 deadline = time.time() + 25
                 while not stop_reader.is_set() and time.time() < deadline:
@@ -498,8 +544,34 @@ try:
     busy_status, busy_body = call("/api/run", method="POST", payload={"name": "lecture1.mp4"})[:2]
     check(
         "a second run while one is in flight is refused, and names the one running",
-        busy_status == 409 and "lecture1.mp4" in busy_body,
+        busy_status == 409 and json_of(busy_body).get("name") == "lecture1.mp4",
         f"{busy_status} {busy_body}",
+    )
+    # The race: a run can start between `busy_with()` and `state.start()`. Stubbing the first check
+    # out is how that path is reached, and it has to name the run for the same reason the other one
+    # does -- the page attaches by name, and "already working on a lecture" leaves it nothing to
+    # attach to.
+    _real_busy_with = state.busy_with
+    state.busy_with = lambda: None
+    try:
+        race_status, race_body = call("/api/run", method="POST", payload={"name": "lecture1.mp4"})[
+            :2
+        ]
+    finally:
+        state.busy_with = _real_busy_with
+    check(
+        "the 409 past busy_with() names the run too, so both paths let the page attach",
+        race_status == 409 and json_of(race_body).get("name") == "lecture1.mp4",
+        f"{race_status} {race_body}",
+    )
+    # What the page's load path reads to decide whether to attach: the run belongs to the server,
+    # so /api/result has to say it is in flight while it is, not only once it is over.
+    live_status, live_body = call("/api/result")[:2]
+    live = json_of(live_body)
+    check(
+        "GET /api/result reports the run in flight, which is how a reloaded page attaches",
+        live_status == 200 and live.get("running") is True and live.get("name") == "lecture1.mp4",
+        f"{live_status} {live_body[:200]}",
     )
     release.set()
     for _ in range(100):
@@ -508,6 +580,14 @@ try:
         time.sleep(0.1)
     reader.join(timeout=10)
     stop_reader.set()
+    check(
+        "the SSE response carries the same security headers as every other one",
+        sse_headers.get("Cache-Control") == "no-store"
+        and sse_headers.get("Referrer-Policy") == "no-referrer"
+        and "default-src 'none'" in sse_headers.get("Content-Security-Policy", ""),
+        f"{sse_headers.get('Cache-Control')} / {sse_headers.get('Referrer-Policy')} / "
+        f"{sse_headers.get('Content-Security-Policy')}",
+    )
 
     log_lines = [e["fields"]["text"] for e in state.log._events if e["event"] == "log"]
     start = next(
@@ -580,6 +660,140 @@ finally:
     release.set()
     httpd.shutdown()
     httpd.server_close()
+
+# --- the page's own JavaScript, run rather than read -------------------------------------
+# The server half of the page's contract is pinned above, against a live server. The browser half
+# -- the log listener parsing the SSE payload instead of showing the envelope, and the load path
+# attaching when /api/result says a run is in flight -- only runs in a browser, and a source-level
+# string match would not pin it. `node` runs the page's own script against a stub document, fetch
+# and EventSource, so the behaviour is observed. Where node is absent the suite prints SKIP and
+# this half is unpinned there, the convention tests/test_e2e.py:688 uses for ffmpeg; the CI image
+# provides node, so CI does run it (see the PR body for the run that shows the PASS lines).
+PAGE_JS = re.search(r"<script>(.*?)</script>", web.PAGE, re.S).group(1)
+
+HARNESS = r"""
+// Runs the page's own script with a stub document, fetch and EventSource. argv[2] is the scenario,
+// argv[3] the page's script; the exit code is the verdict and the last line says which check ran.
+const fs = require('fs');
+const scenario = process.argv[2];
+const script = fs.readFileSync(process.argv[3], 'utf8');
+const elements = {};
+function el(id) {
+  if (!elements[id]) {
+    const node = {
+      id, textContent: '', hidden: false, disabled: false, scrollTop: 0, children: [],
+      listeners: {}, classList: { add() {}, remove() {} }, innerHTML: '',
+      addEventListener(name, fn) { (node.listeners[name] ||= []).push(fn); },
+      appendChild(child) { node.children.push(child); },
+    };
+    elements[id] = node;
+  }
+  return elements[id];
+}
+global.document = {
+  getElementById: el,
+  createElement: () => el('created-' + Object.keys(elements).length),
+  querySelectorAll: () => [],
+};
+const sources = [];
+class EventSource {
+  constructor(url) { this.url = url; this.listeners = {}; sources.push(this); }
+  addEventListener(name, fn) { (this.listeners[name] ||= []).push(fn); }
+  close() { this.closed = true; }
+  fire(name, data) { for (const fn of this.listeners[name] || []) fn({ data }); }
+}
+global.EventSource = EventSource;
+global.location = { search: '?token=TOK' };
+global.navigator = { clipboard: { writeText() {} } };
+let resultPayload = { code: null, note: null };
+let runStatus = 200;
+let runBody = { started: true, name: 'lecture1.mp4' };
+if (scenario === 'running' || scenario === 'log') {
+  resultPayload = { running: true, name: 'lecture1.mp4', code: null, note: null };
+}
+if (scenario === 'busy') {
+  runStatus = 409;
+  runBody = { error: 'already working on \u00ablecture1.mp4\u00bb', name: 'lecture1.mp4' };
+}
+global.fetch = async (url) => {
+  if (url.startsWith('/api/files')) {
+    return { ok: true, status: 200, json: async () => ({ files: [] }) };
+  }
+  if (url.startsWith('/api/result')) {
+    return { ok: true, status: 200, json: async () => resultPayload };
+  }
+  if (url.startsWith('/api/run')) {
+    return { ok: runStatus < 400, status: runStatus, json: async () => runBody };
+  }
+  return { ok: false, status: 404, json: async () => ({}) };
+};
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+(async () => {
+  eval(script);
+  await wait(60);
+  if (scenario === 'busy' || (scenario === 'log' && !sources.length)) {
+    for (const fn of el('start').listeners['click'] || []) await fn();
+    await wait(60);
+  }
+  if (scenario === 'idle') {
+    console.log(`${sources.length === 0 ? 'PASS' : 'FAIL'}  idle load attached ${sources.length}`);
+    process.exit(sources.length === 0 ? 0 : 1);
+  }
+  if (scenario === 'running') {
+    const ok = sources.length === 1 && sources[0].url.includes('/api/events?token=TOK');
+    console.log(`${ok ? 'PASS' : 'FAIL'}  load attached ${sources.length} stream(s)`);
+    process.exit(ok ? 0 : 1);
+  }
+  if (scenario === 'log') {
+    if (!sources.length) { console.log('FAIL  no stream to fire a log event at'); process.exit(1); }
+    sources[0].fire('log', JSON.stringify({ text: '[1/12] probe starting' }));
+    await wait(10);
+    const seen = el('log').textContent;
+    const ok = seen === '[1/12] probe starting\n';
+    console.log(`${ok ? 'PASS' : 'FAIL'}  panel shows ${JSON.stringify(seen)}`);
+    process.exit(ok ? 0 : 1);
+  }
+  const ok = sources.length === 1 && sources[0].url.includes('/api/events?token=TOK');
+  console.log(`${ok ? 'PASS' : 'FAIL'}  409 attached ${sources.length} stream(s)`);
+  process.exit(ok ? 0 : 1);
+})();
+"""
+
+NODE = shutil.which("node")
+if NODE is None:
+    print(
+        "SKIP  node is not on PATH, so the page's own JavaScript is not run "
+        "(the browser half of the page is unpinned on this host)",
+        file=OUT,
+    )
+else:
+    with tempfile.TemporaryDirectory() as _js_tmp:
+        _harness = Path(_js_tmp) / "harness.js"
+        _harness.write_text(HARNESS, encoding="utf-8")
+        _page_js = Path(_js_tmp) / "page.js"
+        _page_js.write_text(PAGE_JS, encoding="utf-8")
+        for _scenario, _what in (
+            ("idle", "a page load with no run attaches no stream"),
+            ("running", "a page load during a run attaches to it"),
+            ("log", "the panel shows the line, not the JSON envelope"),
+            ("busy", "a 409 attaches the page to the run in flight"),
+        ):
+            try:
+                _done = subprocess.run(
+                    [NODE, str(_harness), _scenario, str(_page_js)],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                _code = _done.returncode
+                _out = (_done.stdout + _done.stderr).strip().replace("\n", " | ")
+            except (OSError, subprocess.SubprocessError) as exc:
+                _code, _out = 1, str(exc)
+            check(
+                f"the page's own JavaScript: {_what}",
+                _code == 0,
+                _out[:200],
+            )
 
 # --- the docs and the CI wiring ---------------------------------------------------------
 RUNNING = (REPO / "docs" / "running.md").read_text(encoding="utf-8")

@@ -55,9 +55,10 @@ from . import exitcodes as ec
 LOOPBACK = "127.0.0.1"
 
 #: Hosts that are this machine: the loopback address itself, `localhost` (a browser may render the
-#: loopback URL that way), the IPv6 loopback `::1`, and its IPv4-mapped form. `_host_ok` strips
-#: the brackets before comparing, so a `Host: [::1]:8765` header matches the `::1` member here --
-#: which is why the bracketed spelling is not a member of this set.
+#: loopback URL that way), the IPv6 loopback `::1`, and its IPv4-mapped form. `_host_ok` reads a
+#: bracketed host up to its `]` and ignores a port after it, so `Host: [::1]` and
+#: `Host: [::1]:8765` both compare as `::1` -- which is why the bracketed spelling is not a member
+#: of this set. `_host_ok` compares against this set, so the check and `exposure_warning` agree.
 LOOPBACK_HOSTS = frozenset({LOOPBACK, "localhost", "::1", "::ffff:127.0.0.1"})
 
 #: The design's port (`#242` section 3.1); any free port works, and `--port 0` asks the OS.
@@ -568,9 +569,28 @@ class Handler(BaseHTTPRequestHandler):
         return secrets.compare_digest(supplied, self.state.token)
 
     def _host_ok(self) -> bool:
+        """The `Host` header must name this machine, so a rebinding page cannot reach the server.
+
+        A bracketed IPv6 host is read up to its `]`, and what follows must be nothing or a port:
+        `[::1]` and `[::1]:8765` both compare as `::1`, which is why the bracketed spelling is not
+        a member of `LOOPBACK_HOSTS`. Outside brackets a port is split off a name with a single
+        colon (`localhost:8765` compares as `localhost`); a bare IPv6 address is malformed in a
+        `Host` header but is compared whole, which is how `::1` and `::ffff:127.0.0.1` match. The
+        set is the module's own, so this check and `exposure_warning` cannot drift apart.
+        """
         host = (self.headers.get("Host") or "").strip()
-        name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
-        return name.strip("[]") in {LOOPBACK, "localhost", "::1", self.state.bind.strip("[]")}
+        if host.startswith("["):
+            end = host.find("]")
+            if end < 0:
+                return False
+            name, rest = host[1:end], host[end + 1 :]
+            if rest and not rest.startswith(":"):
+                return False
+        elif host.count(":") == 1:
+            name = host.rsplit(":", 1)[0]
+        else:
+            name = host
+        return name in LOOPBACK_HOSTS | {self.state.bind.strip("[]")}
 
     def _origin_ok(self) -> bool:
         """A state-changing request that names an Origin must name this server's own.
