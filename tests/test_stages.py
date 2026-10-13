@@ -8333,7 +8333,7 @@ with tempfile.TemporaryDirectory() as _vc_td:
 # anything is written (`pipeline.py:409`), and nothing failed if that line went: the #121 test
 # above copies the caption cache before the clear, the stale-`audit.json` test below is
 # deliberately independent of it ("even with the clear deliberately skipped"), and
-# `tests/test_claims.py:839-845` is about the `RUN_ARTEFACTS` constant. So "a second run clears
+# `tests/test_claims.py:840-846` is about the `RUN_ARTEFACTS` constant. So "a second run clears
 # the root first" was a comment with no assertion behind it.
 #
 # The pin is the case the clear exists for. Run 1 with the LLM synthesizer publishes
@@ -10989,6 +10989,25 @@ with tempfile.TemporaryDirectory() as _r253_td:
 
 
 _env.restore(SAVED_ENV)
+
+# The work directory is removed on both exits, not only on the success path. The shape is the one
+# PR #306 uses in `tests/test_serve.py` for #294's leak, copied rather than reinvented: nothing reads
+# `tmp` after the run -- the `DYAK_*` variables that point into it (`tests/test_stages.py:226`,
+# `:236`, `:243`) are restored on the line above, no check prints its path, and the failure line
+# below lists check *names*. A directory kept for inspection would have no reader, and it costs
+# 96 KiB of tmpfs blocks per run (one fresh `dyak-test-*`, `du -sk`, measured on this host
+# 2026-10-13), once per full-gate run: 246 accumulated directories were sitting there when #307
+# was filed, and that accumulation is the whole defect.
+#
+# `shutil.rmtree` and not `tempfile.TemporaryDirectory`: `tmp` is created at
+# `tests/test_stages.py:224` and read by checks thousands of lines below, so its lifetime is the
+# module's rather than a `with` block's. A removal that fails is reported instead of swallowed --
+# "could not be removed" is the phrase `src/dyak/workspace.py:70` and `tests/test_stages.py:385`
+# use for the same situation, and silence would be the leak with a false report on top.
+try:
+    shutil.rmtree(tmp)
+except OSError as exc:
+    print(f"\nstage suite work directory could not be removed: {tmp} ({exc})")
 
 print()
 if failures:
