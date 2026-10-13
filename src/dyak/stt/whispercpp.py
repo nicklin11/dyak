@@ -40,6 +40,7 @@ from pathlib import Path
 
 from .. import exitcodes as ec
 from .. import runner
+from ..llm import redact_endpoint
 from ..deps import PROBE_TIMEOUT
 from ..settings import WHISPERCPP_LANGUAGE_ENV as ENV_LANGUAGE
 from ..settings import WHISPERCPP_URL_ENV, resolve
@@ -85,7 +86,12 @@ class HttpWhisperCpp:
     def info(self) -> BackendInfo:
         return BackendInfo(
             name=self.name,
-            target=self.base_url or "(not configured)",
+            # `redact_endpoint` here, where the record is built, not at any printer (#308):
+            # `BackendInfo.target` is read by `doctor`'s two lines (`deps.py:193`, `:196`) and by
+            # the stage-3 line (`pipeline.py:667`), and masking at one of them would leave the
+            # next printer to be found by hand -- the shape #297 fixed for `Check.detail`. The
+            # raw URL stays in `self.base_url` for the probe and the wire.
+            target=redact_endpoint(self.base_url) or "(not configured)",
             detail="whisper.cpp native /inference",
             notes=("this build does not serve the OpenAI-compatible /v1/* routes",),
         )
@@ -105,7 +111,11 @@ class HttpWhisperCpp:
             raise runner.DependencyError(
                 name=self.name,
                 code=ec.USAGE,
-                message=f"DYAK_WHISPERCPP_URL is not an http(s) URL: {self.base_url!r}",
+                # Masked at the message, for the same reason as `target` above (#308): this
+                # string becomes `Check.detail`, which `doctor` prints.
+                message=(
+                    f"DYAK_WHISPERCPP_URL is not an http(s) URL: {redact_endpoint(self.base_url)!r}"
+                ),
                 remediation=ENDPOINT_REMEDIATION,
             )
         try:
@@ -139,7 +149,9 @@ class HttpWhisperCpp:
             raise runner.DependencyError(
                 name=self.name,
                 code=ec.DEPENDENCY_FAILED,
-                message=f"whisper.cpp is not reachable at {self.base_url}: {_reason(exc)}",
+                message=(
+                    f"whisper.cpp is not reachable at {redact_endpoint(self.base_url)}: {_reason(exc)}"
+                ),
                 remediation=ENDPOINT_REMEDIATION,
             ) from exc
 

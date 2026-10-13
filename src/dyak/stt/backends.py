@@ -37,7 +37,11 @@ from ..settings import STT_BACKEND_ENV as ENV_BACKEND
 
 @dataclass(frozen=True)
 class BackendInfo:
-    """What `doctor` prints and what the stage report records."""
+    """What `doctor` prints and what the stage report records.
+
+    `target` is the redacted endpoint (`llm.redact_endpoint`), because every reader of this
+    record prints it: masking at the producers covers all of them (#308).
+    """
 
     name: str
     target: str
