@@ -9976,12 +9976,24 @@ check(
 # to quote the note and name a confidence, and the finding is still WARN: no gate is added.
 #
 # The citations below are the real ones from that run's artefact, which is the sample the
-# measurement was taken on.
+# measurement was taken on, and the haystacks they are checked against are that run's own text:
+# the two passages are copied verbatim out of its `transcript.txt` (the line numbers are that
+# file's). The recogniser writes one segment per line, so a citation the critic wrote as one
+# fragment matches text that is split here -- `_norm` collapses the whitespace between segments,
+# which is why a line-based `grep` does not find these and the guard does.
 _S240_TRANSCRIPT = (
-    "[00:12:34] там симметричность, ну, симметричность, понятно\n"
-    "[00:12:40] если мы возьмем вот эту производную, то у нас будет, на самом деле, вектор, "
-    "ну, как бы из трех этих компонентов\n"
-    "[00:13:02] двойной путь от данных к антологии системы\n"
+    # transcript.txt:2442-2445 -- what "там симметричность, ну, симметричность, понятно" quotes
+    "[00:36:51] там симметричность,\n"
+    "[00:36:52] ну,\n"
+    "[00:36:52] симметричность,\n"
+    "[00:36:53] понятно,\n"
+    # transcript.txt:2821-2826 -- the second span of the `…` joins below
+    "[00:42:28] если мы возьмем вот эту производную,\n"
+    "[00:42:30] то у нас будет,\n"
+    "[00:42:30] на самом деле,\n"
+    "[00:42:31] вектор,\n"
+    "[00:42:32] ну,\n"
+    "[00:42:32] как бы из трех этих компонентов.\n"
 )
 _S240_SECTION = "содержимое"
 _S240_FLOOR = getattr(dyau, "MIN_FRAGMENT_CHARS", None)
@@ -10082,17 +10094,41 @@ for _s240_name, _s240_line, _s240_why in (
 # `]` -- the guard read that as "no citation into the transcript" -- and its first field was a
 # formula the note does not contain. The model reproduced the shape, which is why every finding
 # on the replay was discarded. An example that teaches a rejected format is a prompt bug.
-_s240_block = dyau.CRITIC_SYSTEM.split("Пример")[1]
-_s240_lines = [line for line in _s240_block.splitlines() if line.startswith("- ")]
+_s240_block = dyau.CRITIC_SYSTEM.split("Пример", 1)[1]
+_s240_lines = _s240_block.splitlines()
+_s240_bullets = [line for line in _s240_lines if line.startswith("- ")]
 check(
-    "#240: the prompt's example is one line -- a wrapped item cannot carry a complete citation",
-    len(_s240_lines) == 1,
-    str(_s240_lines),
+    "#240: the example block holds exactly one bullet",
+    len(_s240_bullets) == 1,
+    str(_s240_bullets),
 )
-_s240_example = _s240_lines[0] if _s240_lines else ""
+# Its physical extent, not just its first line: the previous example was wrapped, and its
+# continuation (`  динамической системы] [уверенность: высокая]`) does not start with `- `, so
+# counting bullets cannot see the wrapping this check exists to catch. The item runs to the next
+# blank line.
+_s240_start = next((i for i, line in enumerate(_s240_lines) if line.startswith("- ")), None)
+_s240_item = [] if _s240_start is None else [_s240_lines[_s240_start]]
+if _s240_start is not None:
+    for _s240_line in _s240_lines[_s240_start + 1 :]:
+        if not _s240_line.strip():
+            break
+        _s240_item.append(_s240_line)
+check(
+    "#240: and the example bullet is one physical line, so its citation cannot be split off it",
+    len(_s240_item) == 1,
+    str(_s240_item),
+)
+_s240_example = _s240_item[0] if _s240_item else ""
 _s240_match = dyau._CITATION.search(_s240_example)
 _s240_cite = _s240_match.group("cite").strip() if _s240_match else ""
 _s240_first = _s240_example[1:].split(":")[0].strip()
+# The note line the example's first field was copied from: note.md:392 of the recorded run,
+# verbatim, so the quote is a fragment of a real note line and not the whole of its haystack.
+_S240_NOTE = (
+    "**Симметричность.** Матрица $A$ симметрична, если $A = A^T$ (элементы симметричны "
+    "относительно главной диагонали). Если коэффициенты симметричной матрицы вещественны, то "
+    "вещественны и её собственные значения."
+)
 check(
     "#240: and its citation is complete on that line, which the previous example's was not",
     _s240_match is not None and _s240_match.end() < len(_s240_example),
@@ -10108,10 +10144,33 @@ check(
     bool(_s240_cite) and not any(char in _s240_cite for char in "«»\"'"),
     _s240_cite,
 )
-_s240_kept, _s240_dropped = dyau.parse_critic_findings(_s240_example, _s240_first, _s240_cite)
+# Both fragments are checked against that recorded text, never against the example's own fields:
+# a check that hands the guard the example's citation as its transcript passes for a well-formed
+# but invented citation, which is the class this has to catch.
 check(
-    "#240: the prompt's own example passes the guard, so it cannot teach a rejected format",
+    "#240: the example's citation is a span of the recorded transcript",
+    bool(_s240_cite) and dyau._norm(_s240_cite) in dyau._norm(_S240_TRANSCRIPT),
+    _s240_cite,
+)
+check(
+    "#240: and its first field is a fragment of the recorded note, not the whole haystack",
+    bool(_s240_first) and dyau._norm(_s240_first) in dyau._norm(_S240_NOTE),
+    _s240_first,
+)
+_s240_kept, _s240_dropped = dyau.parse_critic_findings(_s240_example, _S240_NOTE, _S240_TRANSCRIPT)
+check(
+    "#240: the prompt's own example passes the guard against that corpus, so it cannot teach a "
+    "rejected format",
     len(_s240_kept) == 1 and not _s240_dropped,
+    str(_s240_dropped),
+)
+# And the corpus is not vacuous: one word changed in the example's citation -- same shape, same
+# length, still plausible -- is discarded against the very same haystacks.
+_s240_invented = _s240_example.replace(_s240_cite, _s240_cite.replace("понятно", "конечно"))
+_s240_kept, _s240_dropped = dyau.parse_critic_findings(_s240_invented, _S240_NOTE, _S240_TRANSCRIPT)
+check(
+    "#240: while a one-word change to that citation is discarded against the same corpus",
+    _s240_invented != _s240_example and _s240_kept == [] and len(_s240_dropped) == 1,
     str(_s240_dropped),
 )
 
