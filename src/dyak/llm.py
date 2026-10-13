@@ -482,10 +482,11 @@ def chat(
         except urllib.error.HTTPError as exc:
             detail = _body(exc)
             # `redact_endpoint` here and in the three messages below, not `config.url` (#279):
-            # these strings leave the process -- into logs, and into the `error` field stage
-            # provenance records -- and an endpoint URL can carry a credential in its userinfo or
-            # its query string. The request built above keeps the raw `config.url`, because that
-            # string goes to the endpoint and authentication may live in it.
+            # these strings leave the process -- into logs (`runner.py:101` prints the message to
+            # stderr) and into `run-state.json`'s `error` field, which keeps the reason verbatim
+            # (`pipeline.py:280`, #271/#286) -- and an endpoint URL can carry a credential in its
+            # userinfo or its query string. The request built above keeps the raw `config.url`,
+            # because that string goes to the endpoint and authentication may live in it.
             last = EndpointError(f"HTTP {exc.code} from {redact_endpoint(config.url)}: {detail}")
             if exc.code not in RETRY_STATUS:
                 raise last from exc

@@ -5982,9 +5982,11 @@ check(
     _monkey_cfg.redacted()["endpoint"],
 )
 # The other route out of the process: the four `EndpointError` messages quote the URL, and their
-# text reaches logs and stage provenance's `error` field. They print the redacted form, while the
-# request itself keeps the raw one -- redacting that would break authentication rather than a
-# record.
+# text reaches logs (`runner.py:101`, stderr) and `run-state.json`'s `error` field, which keeps
+# the reason verbatim (`pipeline.py:280`, #271/#286). Not a stage provenance `error`: no
+# provenance writer has that key -- the claim this comment used to make, corrected by #285. They
+# print the redacted form, while the request itself keeps the raw one -- redacting that would
+# break authentication rather than a record.
 _llm_source = pathlib.Path(dyle.__file__).read_text(encoding="utf-8")
 check(
     "#279: the error messages quote the redacted URL, and the request still gets the raw one",
@@ -6156,6 +6158,71 @@ check(
     and _path_cfg.redacted()["endpoint"] == "http://h:8317/v1?api_key=***&api-version=2026-01-01"
     and "not-a-real-query-secret" not in json.dumps(_path_cfg.redacted()),
     repr({"url": _path_cfg.url, "redacted": _path_cfg.redacted()["endpoint"]}),
+)
+
+# #285: the artefact those four strings reach is the bundle's run state, not a stage provenance.
+# Read from the writer rather than from the sentence: this is the call `pipeline.run` makes from
+# its `finally` (`pipeline.py:547-556`), with the verbatim reason it hands over at `:540`.
+_rs_cfg = dyle.Config(
+    endpoint="http://svc:not-a-real-password@h:8317/v1?api_key=not-a-real-query-secret",
+    model="m",
+    api_key="k",
+)
+_rs_reason = f"HTTP 500 from {dyle.redact_endpoint(_rs_cfg.url)}: nope"
+# Under the suite's own scratch, not a fresh `mkdtemp`: `tmp` is removed on both exits
+# (`tests/test_stages.py:224`, `:11126`, #307/#315), so a `dyak-run-state-*` directory here
+# would be the eighth leak of exactly the kind #315 closed -- one per run, never removed.
+_rs_dir = tmp / "run-state"
+_rs_dir.mkdir()
+_rs_src = _rs_dir / "lecture.mp4"
+_rs_src.write_bytes(b"x")
+(_rs_dir / "bundle").mkdir()
+try:
+    dyp.write_run_state(
+        dyb.Bundle.open(_rs_src, output_dir=str(_rs_dir / "bundle"), overwrite=False),
+        source=_rs_src,
+        run_id="r",
+        started_at="t",
+        reports=[],
+        outcome="failed",
+        detail="EndpointError",
+        error=_rs_reason,
+    )
+    _rs_state = json.loads((_rs_dir / "bundle" / dyp.RUN_STATE_NAME).read_text(encoding="utf-8"))
+except (OSError, TypeError, ValueError) as _rs_exc:
+    _rs_state = {"raised": repr(_rs_exc)}
+check(
+    "#285: the text the redacted messages build lands in run-state.json's `error`, verbatim",
+    _rs_state.get("error") == _rs_reason
+    and _rs_state.get("detail") == "EndpointError"
+    and "not-a-real-password" not in str(_rs_state.get("error"))
+    and "not-a-real-query-secret" not in str(_rs_state.get("error")),
+    repr({k: _rs_state.get(k) for k in ("error", "detail", "raised")}),
+)
+_pipeline_source = pathlib.Path(dyp.__file__).read_text(encoding="utf-8")
+check(
+    "#285: and pipeline hands that writer the exception's own message, so the string arrives there",
+    "str(exc) or None" in _pipeline_source
+    and "error=error," in _pipeline_source
+    and '"error": error,' in _pipeline_source,
+    repr(
+        {
+            "str(exc) or None": "str(exc) or None" in _pipeline_source,
+            "error=error,": "error=error," in _pipeline_source,
+            '"error": error,': '"error": error,' in _pipeline_source,
+        }
+    ),
+)
+_provenance_writers = (dysy, dyau, dyrep, dycap, dyln, dylk, dyro, dyprobe, dyq)
+_prov_sources = {
+    pathlib.Path(module.__file__).name: pathlib.Path(module.__file__).read_text(encoding="utf-8")
+    for module in _provenance_writers
+}
+check(
+    "#285: no stage-provenance document has an `error` field -- that key is run-state.json's",
+    all(hasattr(module, "PROVENANCE_NAME") for module in _provenance_writers)
+    and all('"error":' not in source for source in _prov_sources.values()),
+    repr({name: '"error":' in source for name, source in _prov_sources.items()}),
 )
 
 # The artefacts.
