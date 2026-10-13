@@ -416,11 +416,12 @@ check(
     f"{getattr(unset_exc, 'code', None)} {getattr(unset_exc, 'message', None)}",
 )
 check(
-    "the not-configured remediation names the env var, the proxy and the 300 s reclaim (#95)",
+    "the not-configured remediation names the variables to set and fits one line (#259)",
     unset_exc is not None
     and "DYAK_WHISPERCPP_URL" in unset_exc.remediation
-    and "100.64.0.1:10301" in unset_exc.remediation
-    and "300 s" in unset_exc.remediation,
+    and "DYAK_OPENAI_URL" in unset_exc.remediation
+    and "10301" not in unset_exc.remediation
+    and len(unset_exc.remediation) <= 120,
     getattr(unset_exc, "remediation", ""),
 )
 for _name, _exc in explicit_excs.items():
@@ -463,10 +464,12 @@ check(
     f"{getattr(configured_exc, 'code', None)} {getattr(configured_exc, 'message', None)}",
 )
 check(
-    "the unreachable remediation also names the proxy and the 300 s reclaim (#95)",
+    "the unreachable remediation names the variables to set and fits one line (#259)",
     configured_exc is not None
-    and "100.64.0.1:10301" in configured_exc.remediation
-    and "300 s" in configured_exc.remediation,
+    and "DYAK_WHISPERCPP_URL" in configured_exc.remediation
+    and "DYAK_OPENAI_URL" in configured_exc.remediation
+    and "10301" not in configured_exc.remediation
+    and len(configured_exc.remediation) <= 120,
     getattr(configured_exc, "remediation", ""),
 )
 

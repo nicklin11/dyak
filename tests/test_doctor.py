@@ -201,12 +201,15 @@ check("the failing check is named", "stt" in msg, msg)
 check("the unreachable target is named", "127.0.0.1" in out.getvalue(), out.getvalue())
 check("the remediation names the env var", "DYAK_WHISPERCPP_URL" in msg, msg)
 check("shipboard is no longer the reason", "pipx install shipboard" not in msg, msg)
-# #95: the failure path must name the trap the default used to walk into -- the raw
-# container port is not the supported target, the proxy is, and the raw one is reclaimed
-# by the idle timer. Without this the operator gets a URL and no reason.
+# #259: the failure path names the variables to set. The raw-port-versus-proxy history and the
+# idle timer are ADR-0001's (`docs/adr/0001-lecture-pipeline.md:1144-1156`, there at this
+# change's base), not the line an operator reads mid-failure.
 check(
-    "the STT remediation names the proxy and the 300 s reclaim (#95)",
-    "100.64.0.1:10301" in msg and "300 s" in msg and "whisper-idle-stop" in msg,
+    "the STT remediation names the variables to set (#259)",
+    "DYAK_WHISPERCPP_URL" in msg
+    and "DYAK_OPENAI_URL" in msg
+    and "10301" not in msg
+    and "whisper-idle-stop" not in msg,
     msg,
 )
 check(
@@ -245,12 +248,12 @@ check(
 )
 
 # --- 2c. the STT probe spends the stage-0 budget, not a bare 5 s (#189) -------
-# `check()` probes the endpoint before a run commits to it, and the endpoint #95 names as
-# supported -- the shipboard proxy on 100.64.0.1:10301 -- is wake-on-first-request: the
-# first `GET /health` after `whisper-idle-stop.timer` reclaimed the container is spent
-# waiting for the wake. A bare `timeout=5.0` therefore reported a working endpoint as
-# unreachable, and `_preflight` refused the run. The budget is now `PROBE_TIMEOUT`, the
-# constant `check_llm` and `check_vlm` already spend, so the three probes cannot disagree.
+# `check()` probes the endpoint before a run commits to it, and a whisper.cpp container is
+# often wake-on-first-request: the first `GET /health` against a cold one is spent waiting for
+# the wake. A bare `timeout=5.0` therefore reported a working endpoint as unreachable, and
+# `_preflight` refused the run. The budget is now `PROBE_TIMEOUT`, the constant `check_llm`
+# and `check_vlm` already spend, so the three probes cannot disagree. What used to make the
+# endpoint cold, and why it is no longer named here, is the ADR-0001 record (#259).
 #
 # The stub records the kwarg it was called with, so this pins the budget with no container,
 # no listener and no wall clock -- and goes red the moment a literal comes back.
@@ -807,12 +810,11 @@ with urlopen_stub(fake_stt_urlopen):
     )
     check(
         # The `auto` path reaches this failure too, and it is the path a default install
-        # takes, so the proxy/300 s trap must be named here and not only on the
-        # explicit-backend path.
-        "the auto STT refusal names the proxy and the 300 s reclaim (#95)",
+        # takes, so #259's wording is pinned here and not only on the explicit-backend path.
+        "the auto STT refusal names the variables to set (#259)",
         stt_check is not None
-        and "100.64.0.1:10301" in (stt_check.remediation or "")
-        and "300 s" in (stt_check.remediation or ""),
+        and "DYAK_WHISPERCPP_URL" in (stt_check.remediation or "")
+        and "10301" not in (stt_check.remediation or ""),
         getattr(stt_check, "remediation", ""),
     )
 

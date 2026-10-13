@@ -300,9 +300,14 @@ check(
 )
 
 # --- 5. no shipboard ----------------------------------------------------------
-# #48 wrote `grep -rn shipboard src/` must be empty. It is not, and should not
-# be: backends.py records *why* the backend was removed. The invariant that
-# matters is that nothing imports it.
+# #48 wrote `grep -rn shipboard src/` must be empty. It was not, and should not have been: the
+# removed backend's *why* lived in `stt/backends.py`. #259 retired the word, not that reason --
+# the reason is still there (`backends.py:14-16`, "See issue #49") -- and the description of what
+# the old wording named is ADR-0001's (`docs/adr/0001-lecture-pipeline.md:1060-1156`, already
+# there at this change's base; this PR appends an amendment, it does not move the record).
+# Two invariants, and they are different: nothing may import the removed backend (the graph
+# below, which a word scan cannot see), and nothing in shipped code may carry the host-specific
+# wording either (the rule after it).
 
 offenders: list[tuple[str, int]] = []
 for path in sorted((REPO / "src" / "dyak").rglob("*.py")):
@@ -320,6 +325,22 @@ check(
     "nothing imports the removed backend",
     not offenders,
     "; ".join(f"{p}:{ln}" for p, ln in offenders),
+)
+
+# The word-level half of the same section (#259). A word scan is right for *this* invariant
+# and wrong for the one above: the record that justifies the word lives in `docs/adr/`, so
+# what remains in `src/` must name the variables to set and nothing about this host.
+LORE = re.compile(r"shipboard|100\.64\.0\.1|10301|whisper-idle-stop", re.I)
+word_offenders = [
+    f"{p.relative_to(REPO).as_posix()}:{i}"
+    for p in sorted((REPO / "src" / "dyak").rglob("*.py"))
+    for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+    if LORE.search(line)
+]
+check(
+    "no host-specific STT lore in shipped code (#259)",
+    not word_offenders,
+    "; ".join(word_offenders),
 )
 
 # --- 6. paths named in messages exist ------------------------------------------
@@ -1440,7 +1461,8 @@ PROBE_SRC = (REPO / "src" / "dyak" / "probe.py").read_text(encoding="utf-8")
 # The claim is checked against the AST, not the text: `probe.py`'s own docstring names
 # `read_bytes()` to say why that shape was rejected for the input, and a text scan would read
 # the sentence explaining the choice as the choice. Same reason section 5 parses the import
-# graph rather than grepping for the word "shipboard".
+# graph for its import invariant -- a word scan cannot see an import -- and #259 added the
+# word-level rule beside it, where a scan is exactly the right instrument.
 _probe_tree = ast.parse(PROBE_SRC)
 probe_digest_calls = [
     node.attr

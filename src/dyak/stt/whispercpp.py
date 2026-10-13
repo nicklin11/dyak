@@ -43,20 +43,12 @@ from .. import runner
 from ..deps import PROBE_TIMEOUT
 from ..settings import WHISPERCPP_LANGUAGE_ENV as ENV_LANGUAGE
 from ..settings import WHISPERCPP_URL_ENV, resolve
-from .backends import BackendInfo
+from .backends import ENDPOINT_REMEDIATION, BackendInfo
 
-# The trap this names is the one #62 measured and #95 decided: `127.0.0.1:10302` is the
-# container directly, with no `_Heartbeat` to refresh the idle marker, so
-# `whisper-idle-stop.timer` reclaims it after 300 s -- mid-request. The supported target is
-# the shipboard proxy, which does refresh the marker. This is a remediation string, not an
-# essay: the reader is mid-failure and needs the address and the reason in one line.
-REMEDIATION = (
-    "set DYAK_WHISPERCPP_URL (or the whispercpp_url settings key) to a whisper.cpp "
-    "POST /inference endpoint. The supported target on this host is the shipboard proxy on "
-    "http://100.64.0.1:10301, which refreshes the idle marker; a raw container port such as "
-    "http://127.0.0.1:10302 has no auto-start and is reclaimed after 300 s by "
-    "whisper-idle-stop.timer"
-)
+# Every whisper.cpp failure below prints the same remediation as the two `auto` failures in
+# `backends.resolve`, imported rather than restated so the two paths cannot drift apart (#259).
+# It names the variables to set; what the endpoint used to be, and why it stopped being it,
+# is the ADR-0001 record, not the line an operator reads mid-failure.
 
 # The server-side guard must outlast the client's, because a client timeout discards a
 # lecture-length run that has already been paid for. The pipeline computes the client
@@ -107,23 +99,23 @@ class HttpWhisperCpp:
                 name=self.name,
                 code=ec.MISSING_DEPENDENCY,
                 message="the whisper.cpp endpoint is not configured",
-                remediation=REMEDIATION,
+                remediation=ENDPOINT_REMEDIATION,
             )
         if not self.base_url.startswith(("http://", "https://")):
             raise runner.DependencyError(
                 name=self.name,
                 code=ec.USAGE,
                 message=f"DYAK_WHISPERCPP_URL is not an http(s) URL: {self.base_url!r}",
-                remediation=REMEDIATION,
+                remediation=ENDPOINT_REMEDIATION,
             )
         try:
             request = urllib.request.Request(f"{self.base_url}/health", method="GET")
-            # The stage-0 probe budget, not a bare literal (#189). The endpoint #95 names as
-            # supported -- the shipboard proxy -- is wake-on-first-request, so the first
-            # `GET /health` against a reclaimed container is spent waiting for the wake: a
-            # 5.0 s literal here reported a working endpoint as unreachable and `_preflight`
-            # turned that into a refusal. `PROBE_TIMEOUT` is the budget the sibling `llm`
-            # (`deps.py:360`) and `vlm` probes already spend, so the three cannot disagree.
+            # The stage-0 probe budget, not a bare literal (#189). A whisper.cpp container is
+            # often wake-on-first-request, so the first `GET /health` against a cold one is
+            # spent waiting for the wake: a 5.0 s literal here reported a working endpoint as
+            # unreachable and `_preflight` turned that into a refusal. `PROBE_TIMEOUT` is the
+            # budget the sibling `llm` (`deps.py:360`) and `vlm` probes already spend, so the
+            # three cannot disagree.
             with urllib.request.urlopen(request, timeout=PROBE_TIMEOUT) as response:
                 response.read(1)
         except urllib.error.HTTPError as exc:
@@ -141,14 +133,14 @@ class HttpWhisperCpp:
                 code=ec.DEPENDENCY_FAILED,
                 message=f"the endpoint answered GET /health with HTTP {exc.code}",
                 stderr=exc.read()[:2000],
-                remediation=REMEDIATION,
+                remediation=ENDPOINT_REMEDIATION,
             ) from exc
         except (urllib.error.URLError, OSError) as exc:
             raise runner.DependencyError(
                 name=self.name,
                 code=ec.DEPENDENCY_FAILED,
                 message=f"whisper.cpp is not reachable at {self.base_url}: {_reason(exc)}",
-                remediation=REMEDIATION,
+                remediation=ENDPOINT_REMEDIATION,
             ) from exc
 
     # -- transcription ---------------------------------------------------------
@@ -184,14 +176,14 @@ class HttpWhisperCpp:
                 code=ec.DEPENDENCY_FAILED,
                 message=f"whisper.cpp returned HTTP {exc.code} for POST /inference",
                 stderr=exc.read()[:2000],
-                remediation=REMEDIATION,
+                remediation=ENDPOINT_REMEDIATION,
             ) from exc
         except (urllib.error.URLError, OSError) as exc:
             raise runner.DependencyError(
                 name=self.name,
                 code=ec.DEPENDENCY_FAILED,
                 message=f"POST /inference failed: {_reason(exc)}",
-                remediation=REMEDIATION,
+                remediation=ENDPOINT_REMEDIATION,
             ) from exc
 
     def _fields(self, client_timeout: float) -> list[tuple[str, str]]:

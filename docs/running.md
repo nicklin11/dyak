@@ -21,7 +21,7 @@ environment variable lowercased:
 ```toml
 vault = "/path/to/vault"
 stt = "whispercpp"
-whispercpp_url = "http://100.64.0.1:10301"
+whispercpp_url = "http://127.0.0.1:8080"
 llm_endpoint = "http://127.0.0.1:10300/v1"
 llm_model = "qwen3.6-35b"
 openai_max_upload_bytes = 26214400
@@ -48,7 +48,7 @@ path.
 | variable | read by | purpose, default |
 |---|---|---|
 | `DYAK_STT` | `stt/backends.py` | backend selection: `auto` (default), `whispercpp`, `openai`. `auto` probes whisper-cpp first, so with both configured the local one keeps the recording on the host; neither configured or reachable exits 2 |
-| `DYAK_WHISPERCPP_URL` | `stt/whispercpp.py` | whisper.cpp `POST /inference` endpoint. **No built-in default** (#95): unset means "not configured" (exit 2), not a probe of `127.0.0.1:10302`. The supported target is the shipboard proxy on `http://100.64.0.1:10301`, which refreshes the idle marker; a raw container port has no auto-start and is reclaimed after 300 s by `whisper-idle-stop.timer` |
+| `DYAK_WHISPERCPP_URL` | `stt/whispercpp.py` | whisper.cpp `POST /inference` endpoint. **No built-in default** (#95): unset means "not configured" (exit 2). Point it at the address your whisper.cpp server listens on, e.g. `http://127.0.0.1:8080`; `DYAK_OPENAI_URL` is the hosted alternative |
 | `DYAK_WHISPERCPP_LANGUAGE` | `stt/whispercpp.py` | pin the language; unset means autodetect |
 | `DYAK_OPENAI_URL` | `stt/openai_compat.py` | hosted STT endpoint (OpenAI-compatible `/v1/audio/transcriptions`). **No built-in default** (#95): unset means "not configured", not the whisper.cpp port |
 | `DYAK_OPENAI_KEY` | `stt/openai_compat.py` | key for the hosted STT endpoint |
@@ -188,7 +188,7 @@ stages that print detail trimmed:
 ```
   [1/12] probe       0.0s  video h264 1920x1080, audio aac 48000Hz 2ch, 180.0s
   [2/12] audio       0.2s  audio.wav 180.0s 16000Hz mono, 5.5 MiB  (A)
-  [3/12] stt     starting  180s of audio through whispercpp at http://100.64.0.1:10301, expect 36s-54s; this backend reports no progress  (A)
+  [3/12] stt     starting  180s of audio through whispercpp at http://127.0.0.1:8080, expect 36s-54s; this backend reports no progress  (A)
   [3/12] stt         9.1s  52 segments, 611 timed words, speech to 180.0s of 180.0s audio [whispercpp]  (A)
   [4/12] frames     12.5s  7 frames, 2.7 MiB, median gap 9s  (B)
   [5/12] quality     3.7s  7/7 frames pass (MEGE 57230-146128, threshold 38303, 7 cropped)  (B)
