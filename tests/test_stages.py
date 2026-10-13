@@ -8941,9 +8941,10 @@ check(
 # rendezvous arm below times out on purpose, which is what "one at a time" means observably),
 # the pre-#115 stage order, and a stream with no branch tags in it.
 #
-# The last arm kills *both* branches at different times. One dead branch only shows that the run
-# ends; two dead branches are what show the join's choice is the earlier failure by the time it
-# happened, and that the later one is recorded rather than raised.
+# The last two arms kill *both* branches at different times, once in each order. One dead branch
+# only shows that the run ends; two dead branches are what show the join's choice is the earlier
+# failure by the time it happened, that the later one is recorded rather than raised, and -- with
+# the order run both ways -- that the choice is not simply the branch inspected first.
 #
 # The wall-time measurement itself needs the user's lecture, real ffmpeg and a real STT
 # endpoint. It is in the PR body, because a stub cannot have a wall clock.
@@ -8969,7 +8970,12 @@ def _br_digests(root: Path) -> dict[str, str]:
 
 
 def _br_stub_modules(
-    *, bundle: dyb.Bundle, meet, fail_stt: bool = False, fail_quality: bool = False
+    *,
+    bundle: dyb.Bundle,
+    meet,
+    fail_stt: bool = False,
+    fail_quality: bool = False,
+    stt_first: bool = True,
 ) -> None:
     """Stages 1-6 stubbed, with a rendezvous both branches have to reach before stage 6 runs.
 
@@ -8977,9 +8983,10 @@ def _br_stub_modules(
     branch bodies were in flight at the same time. `fail_stt` is the endpoint-down case --
     branch A dies while branch B is still working, after branch B has started. `fail_quality`
     is the both-die case: branch B runs both its stages to the end (so `frames:done` and
-    `quality:done` are in `events`) and then dies on the gate report, after branch A's failure,
-    which is what makes the join choose between two real failures instead of between a failure
-    and a success.
+    `quality:done` are in `events`) and then dies on the gate report, which is what makes the
+    join choose between two real failures instead of between a failure and a success. Which of
+    the two dies first is `stt_first`: the arms below run it both ways, so the pair says whether
+    the raised error is the earlier failure or just the branch the join inspected first.
     """
     seen = _br_seen
     seen.clear()
@@ -8988,11 +8995,13 @@ def _br_stub_modules(
         events=[],
         missing=[],
         join={},
-        # The handshake the both-die arm orders its two failures with. A body cannot read
+        # The handshake the both-die arms order their two failures with. A body cannot read
         # `_Branch.failed_at` (the pipeline stamps it after the body raises), so the sibling's
         # failure is announced by the body that knows it died.
         a_failed=threading.Event(),
-        b_failed=False,
+        b_failed=threading.Event(),
+        a_died=False,
+        b_died=False,
     )
     note_lock = threading.Lock()
 
@@ -9000,6 +9009,17 @@ def _br_stub_modules(
         # Under a lock: two threads append, and the interleaving is the evidence being read.
         with note_lock:
             seen["events"].append(event)
+
+    def later_failure(sibling: threading.Event) -> None:
+        """Wait for the sibling's failure, then long enough to be stamped after it.
+
+        `_Branch` stamps `failed_at` after the body raises, so a body cannot hand-shake with the
+        stamp itself; the wait is what makes this failure the later one by construction rather
+        than by luck -- the sibling's stamp lands microseconds after its event is set, this waits
+        250 ms before raising.
+        """
+        sibling.wait(timeout=10.0)
+        time.sleep(0.25)
 
     def rendezvous() -> None:
         if meet is not None:
@@ -9039,7 +9059,10 @@ def _br_stub_modules(
         seen["order"].append("stt")
         note("stt:enter")
         if fail_stt:
+            if not stt_first:
+                later_failure(seen["b_failed"])
             note("stt:fail")
+            seen["a_died"] = True
             # Before the raise, so the sibling's own failure can be ordered after this one.
             seen["a_failed"].set()
             raise dyr.DependencyError(name="whispercpp", code=2, message="connection refused")
@@ -9100,15 +9123,13 @@ def _br_stub_modules(
         if not fail_quality:
             target.write_text("{}", encoding="utf-8")
             return
-        # The later of the two failures: `frames:done` and `quality:done` are already in
-        # `events`, so this branch ran both its stages before dying.
-        seen["a_failed"].wait(timeout=10.0)
-        # `_Branch` stamps `failed_at` after the body raises, so a body cannot hand-shake with
-        # the stamp itself; the wait is what makes this failure the later one by construction
-        # rather than by luck -- the sibling's stamp lands microseconds after the event above
-        # is set, this waits 250 ms before raising.
-        time.sleep(0.25)
-        seen["b_failed"] = True
+        # The branch that dies on the gate report, having run both its stages (`frames:done` and
+        # `quality:done` are already in `events`).
+        if stt_first:
+            later_failure(seen["a_failed"])
+        note("quality:fail")
+        seen["b_died"] = True
+        seen["b_failed"].set()
         raise dyr.DependencyError(
             name="quality", code=2, message="the gate report could not be written"
         )
@@ -9149,6 +9170,7 @@ def _br_run(
     meet,
     fail_stt: bool = False,
     fail_quality: bool = False,
+    stt_first: bool = True,
 ) -> dict:
     """One arm of the fork: what the stubs saw, the stream, and the bundle it wrote into.
 
@@ -9164,7 +9186,9 @@ def _br_run(
         os.environ["DYAK_SERIAL"] = "1"
     else:
         os.environ.pop("DYAK_SERIAL", None)
-    _br_stub_modules(bundle=bundle, meet=meet, fail_stt=fail_stt, fail_quality=fail_quality)
+    _br_stub_modules(
+        bundle=bundle, meet=meet, fail_stt=fail_stt, fail_quality=fail_quality, stt_first=stt_first
+    )
     outcome: dict = {"reached_join": False}
     try:
         REAL_PIPELINE_RUN(source, dyw.WorkDir(parent=root / "work"), bundle=bundle, stream=stream)
@@ -9268,11 +9292,12 @@ with tempfile.TemporaryDirectory() as _br_td:
         str(sorted(p.name for p in _br_fail_root.iterdir())),
     )
 
-    # Arm 5: both branches die, at different times -- branch A immediately, branch B once it has
-    # run both its stages and after A's failure. The join has to raise the *earlier* failure,
-    # which is `pipeline.py`'s `sorted(..., key=lambda branch: branch.failed_at)` and nothing
-    # else: a join that raised the branch it inspected first, or the last one to die, or the one
-    # whose error type it preferred, fails here. Both branches reaching their end is the other
+    # Arms 5 and 6: both branches die, at different times, and the pair of arms runs the order
+    # both ways. Arm 5 kills A first and arm 6 kills B first, so between them they pin what the
+    # join's choice is: not the branch it inspected first (`(stt_running, frames_running)` --
+    # always A), and not the one that died last (that is B in arm 5 and A in arm 6), but the
+    # earlier failure by the time it happened, which is `pipeline.py`'s `sorted(..., key=lambda
+    # branch: branch.failed_at)` and nothing else. Both branches reaching their end is the other
     # half of the claim -- neither is cancelled by the other's death.
     _br_both = _br_run(
         _br_root, "both-failed", serial=False, meet=None, fail_stt=True, fail_quality=True
@@ -9281,14 +9306,44 @@ with tempfile.TemporaryDirectory() as _br_td:
     _br_both_error = str(_br_both.get("error"))
     check(
         "#115: with both branches failing, each runs to its own end and the join raises the "
-        "earlier branch's error, the later one recorded rather than raised",
+        "earlier branch's error, the later one recorded rather than raised (A dies first here)",
         _br_both.get("reached_join") is False
         and "connection refused" in _br_both_error
         and "gate report" not in _br_both_error
-        and _br_both.get("b_failed") is True
+        and _br_both.get("a_died") is True
+        and _br_both.get("b_died") is True
         and {"stt:fail", "frames:done", "quality:done"} <= set(_br_both_events)
-        and _br_both_events.index("stt:fail") < _br_both_events.index("quality:done"),
-        f"error={_br_both_error} b_failed={_br_both.get('b_failed')} events={_br_both_events}",
+        and _br_both_events.index("stt:fail") < _br_both_events.index("quality:fail"),
+        f"error={_br_both_error} a_died={_br_both.get('a_died')} b_died={_br_both.get('b_died')} "
+        f"events={_br_both_events}",
+    )
+
+    # Arm 6: the same two failures with the order inverted -- B dies first, so the earlier
+    # failure is now the *second* branch the join inspects. A join that raised the branch it
+    # inspected first, or the one that died last, raises A's error here and fails this check.
+    _br_both_rev = _br_run(
+        _br_root,
+        "both-failed-reversed",
+        serial=False,
+        meet=None,
+        fail_stt=True,
+        fail_quality=True,
+        stt_first=False,
+    )
+    _br_both_rev_events = _br_both_rev.get("events", [])
+    _br_both_rev_error = str(_br_both_rev.get("error"))
+    check(
+        "#115: and with the order inverted -- B dies first, A second -- the raised error is "
+        "still the earlier one, so the join is choosing by time and not by branch order",
+        _br_both_rev.get("reached_join") is False
+        and "gate report" in _br_both_rev_error
+        and "connection refused" not in _br_both_rev_error
+        and _br_both_rev.get("a_died") is True
+        and _br_both_rev.get("b_died") is True
+        and {"stt:fail", "frames:done", "quality:done"} <= set(_br_both_rev_events)
+        and _br_both_rev_events.index("quality:fail") < _br_both_rev_events.index("stt:fail"),
+        f"error={_br_both_rev_error} a_died={_br_both_rev.get('a_died')} "
+        f"b_died={_br_both_rev.get('b_died')} events={_br_both_rev_events}",
     )
 
     check(

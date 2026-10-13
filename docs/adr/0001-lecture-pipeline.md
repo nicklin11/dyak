@@ -379,15 +379,18 @@ than the shorter branch's whole duration. Of the 128 files the two arms publishe
 byte-identical. The five that differ are the two clock files, `transcript.json` (which records
 the per-run work-dir path in `wav`), and `captions.json`/`caption-provenance.json` — the vision
 model's own non-determinism, not the fork: the pre-change run of the same source differs from
-either arm in exactly those fields (225 differing leaves, same frame order, same gate verdicts),
-and that run is the bundle beside the lecture,
+either arm in exactly those fields, with the same frame order and the same gate verdicts. Those
+counts are a recursive diff of the JSON, one per differing leaf path, one-sided keys and
+container/list-length mismatches counted once each: 225 over the whole `captions.json` (174 over
+the `alignments` array alone; 160 against the serial arm), and 463 for the glimpse run below
+(410 over `alignments`). That pre-change run is the bundle beside the lecture,
 `/home/existingloner/Videos/lectures/Оптимальные СУ/` — `timings.json` `dyak-timings-v1`, total
 1546.3 s; `run-state.json` run_id `2026-10-12T02:55:29+00:00-e47fbbda-1_lecture_OCS`,
 02:55:29 → 03:21:15, `completed`. `/tmp/dyak87-real` is a *different* pre-change run of the same
 source — glimpse-era (`glimpse-timings-v1`, `glimpse-stt-v1`) and cache-warm
-(`caption: {captioned: 0, reused: 57}`), differing from the arms in more places (463 leaves,
-including fields this code no longer writes the same way) — so it measures the two code eras
-rather than this fork.
+(`caption: {captioned: 0, reused: 57}`), differing from the arms in more places (463 leaves by
+that count, 410 over `alignments`, including fields this code no longer writes the same way) —
+so it measures the two code eras rather than this fork.
 
 Measured with the endpoint refusing `POST /inference` (a stub that answers the stage-0 probe
 with 404, the "no /health to answer" case of `stt/whispercpp.py:129`, and refuses the
