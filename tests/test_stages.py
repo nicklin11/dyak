@@ -10062,6 +10062,32 @@ check(
     "config=llm_config" in _repair_call,
     repr([ln.strip() for ln in _repair_call.splitlines() if ln.strip()]),
 )
+# #261: the sentence beside `audit.provenance` said stage 10 "carries neither: it takes no `Config`
+# and makes no model call" -- the first half false from the moment #257 gave stage 10 the Config.
+# Pinned the way #256 pins llm.py's call sites: the two clauses that went false must not come back,
+# and the three facts the replacement states must still hold, so the name fails in either direction
+# rather than describing a sentence that has since moved. The `llm.chat(` scan is the same shape as
+# #256's call-site check, including its bluntness: a comment naming the call would trip it, which is
+# the safe direction -- someone reword, rather than a stage quietly gaining a model call.
+_audit_source = pathlib.Path(dyau.__file__).read_text(encoding="utf-8")
+_repair_source = pathlib.Path(dyrep.__file__).read_text(encoding="utf-8")
+check(
+    "#261: audit's prose no longer says stage 10 lacks a Config, and stage 10 still sends no prompt",
+    "takes no `Config`" not in _audit_source
+    and "carries neither" not in _audit_source
+    and _repair_provenance.get("endpoint") is not None
+    and "prompt_sha256" not in _repair_provenance
+    and "llm.chat(" not in _repair_source,
+    repr(
+        {
+            "audit.py: takes no `Config`": "takes no `Config`" in _audit_source,
+            "audit.py: carries neither": "carries neither" in _audit_source,
+            "endpoint": _repair_provenance.get("endpoint"),
+            "prompt_sha256": _repair_provenance.get("prompt_sha256"),
+            "repair.py llm.chat(": "llm.chat(" in _repair_source,
+        }
+    ),
+)
 
 # #252: the transcript records the answer as well as the question. ADR-0004 D4 asks for the
 # *exact* model output, so the text is recorded in full -- a truncation would re-create, at a
