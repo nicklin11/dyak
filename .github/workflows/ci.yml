@@ -107,6 +107,14 @@ jobs:
       - name: Model-id provenance suite (#61)
         run: python tests/test_llm.py
 
+      # The local web view (#242 M1): the subcommand is registered, its five endpoints answer,
+      # the run's lines reach the SSE stream exactly as `pipeline.run` wrote them, and the token,
+      # Host, Origin and `--root` checks hold. It binds a real server on loopback port 0 with a
+      # stubbed pipeline, so it needs no ffmpeg and no gateway and gives the same answer on this
+      # runner as on a host with a live transcriber -- the failure mode of #175 and #184.
+      - name: Local web view suite (#242 M1)
+        run: python tests/test_serve.py
+
       # The only step that leaves this process. Every other suite replaces functions in
       # place -- `runner.run`, `urlopen`, `llm.chat` -- which is exactly why the bugs
       # this one exists for were found by a human doing a real run and by nothing here:

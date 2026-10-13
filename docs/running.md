@@ -224,6 +224,38 @@ immediately before stage 3. Run 14 sat at 266 bytes for 16 minutes with its last
 gateway. The obvious reading of that log is a 16-minute transcription stall, and what disproved
 it was the bundle's file mtimes rather than the log itself.
 
+## `dyak serve`
+
+```
+dyak serve [--root DIR] [--port N] [--bind ADDR] [--token TOKEN] [--open]
+```
+
+Serves a local page that lists the recordings under `--root`, runs one at a time through the
+same code `process` runs — the same exit-code ladder, work dir, bundle and vault export — and
+shows that run's own output while it goes. This is M1 of #242: there is no Stop button (stop a
+run with Ctrl-C in the terminal, and the page says so), no readiness screen and no math
+rendering yet.
+
+| flag | meaning |
+|---|---|
+| `--root DIR` | the folder the page may list and process (default: the current directory). A requested file must resolve inside it, symlinks included, so a link pointing out of the folder is refused rather than followed |
+| `--port N` | TCP port to listen on (default: `8765`). `--port 0` asks the OS for a free one |
+| `--bind ADDR` | the interface to listen on (default: `127.0.0.1`, loopback only). Any other address — a tailnet address included — exposes the page to whatever can reach that interface, and a warning is printed saying so. IPv4 only: the server socket is `AF_INET`, so an IPv6 address fails to bind and the subcommand exits 2 |
+| `--token TOKEN` | pin the token instead of generating one per start, so the page URL can be bookmarked |
+| `--open` | open the page in this machine's browser once the server is listening |
+
+Every request must present the per-start token, as `Authorization: Bearer …` or as `?token=…`
+(the page's own URL carries it, because `EventSource` cannot set a header), and every request
+must arrive under a `Host` this machine answers to. There is no anonymous endpoint and no
+request that reaches outside `--root`. The token is a capability rather than a secret: while the
+server runs, whoever holds it can process a file under `--root` on this machine.
+
+The page keeps the run's lines in a Details panel, exactly as the terminal prints them, and
+shows the sentence that belongs to the run's exit code — the same eleven codes `process` uses
+(`exitcodes.py`), never a new one and never a percentage the page worked out for itself. Closing
+the page does not stop the run: the run is in the server's process, and a reloaded page
+reattaches to it.
+
 ## `dyak audit`
 
 ```
