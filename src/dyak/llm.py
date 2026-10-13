@@ -172,7 +172,10 @@ class Config:
             "temperature": self.temperature,
             # Recorded because the seed is an input to the note: without it a bundle says which
             # model answered and not which sample was asked for (#77). It is the one sampling
-            # input every stage shares, since all four call sites go through `chat()`.
+            # input the four `chat()` call sites share -- stage 7's synthesis, stage 9's two
+            # critic loops (sequential and concurrent) and stage 6's captioner. Stage 10's
+            # repair makes no model call, so it shares nothing: the sentence here said "every
+            # stage" until #256, and that was false for the one stage that sends nothing.
             "seed": self.seed,
         }
 
@@ -316,9 +319,11 @@ def chat(
         "model": config.model,
         "messages": messages,
         "temperature": config.temperature,
-        # #77: the same constant for every call in every stage, so the note is a function of
-        # (source, transcript digest, model, prompt, seed) rather than of whatever the endpoint
-        # happened to sample. Sent here, at the one choke point, rather than by each stage.
+        # #77: the same constant for every call that reaches a model -- the four call sites in
+        # stages 6, 7 and 9 -- so the note is a function of (source, transcript digest, model,
+        # prompt, seed) rather than of whatever the endpoint happened to sample. Sent here, at
+        # the one choke point, rather than by each stage. Stage 10 sends no prompt at all, so it
+        # is outside the claim rather than an exception to it.
         "seed": config.seed,
         "stream": False,
     }

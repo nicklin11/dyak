@@ -1096,8 +1096,9 @@ def prompt_digest() -> str:
     half #74 edits, so a digest that skipped it would not change when the prompt did -- which
     is the gap the decision records: two runs with different prompts are recorded identically
     today, and the 3961 -> 7785 word swing between the artefacts cannot be attributed from a
-    bundle. Stage 9's equivalent (`audit.provenance` with `CRITIC_SYSTEM`) is not here: that
-    is `src/dyak/audit.py`, which an open PR holds.
+    bundle. Stage 9's equivalent is not here: `audit.prompt_digest` covers `CRITIC_SYSTEM` and
+    the request's two envelope headings, and it is recorded as `prompt_sha256` beside `tool` in
+    `audit-provenance.json`, which #256 landed.
     """
     return hashlib.sha256(
         "\n".join([SYSTEM, *(brief for _, _, brief in SECTIONS)]).encode("utf-8")

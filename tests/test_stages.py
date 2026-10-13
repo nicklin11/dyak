@@ -9847,15 +9847,17 @@ check(
     _sent_payload.get("seed") == dyle.SEED and _sent_payload.get("temperature") == 0.2,
     repr({k: _sent_payload.get(k) for k in ("seed", "temperature")}),
 )
-# The two stages whose provenance is built from `Config.redacted()` -- stage 6's `model` field and
-# stage 7's `endpoint`. Audit and repair provenance are not handed the Config at all, so they
-# cannot carry the seed (#256), and the check must not claim otherwise.
+# The three stages whose provenance is built from `Config.redacted()` -- stage 6's `model` field
+# and stage 7's and stage 9's `endpoint`. Stage 10's repair provenance is handed no Config and
+# makes no model call, so it cannot carry the seed; the check must not claim otherwise, and #257
+# records what wiring it would take.
 _seed_config = dyle.Config("http://x", "m")
 check(
-    "#77: redacted() carries the seed, which synth and caption provenance record",
+    "#77: redacted() carries the seed, which synth, audit and caption provenance record",
     _seed_config.redacted().get("seed") == dyle.SEED
     and json.loads(dysy.provenance(dysy.Note(markdown="x"), _seed_config))["endpoint"]["seed"]
     == dyle.SEED
+    and json.loads(dyau.provenance(dyau.Report(), _seed_config))["endpoint"]["seed"] == dyle.SEED
     and json.loads(
         dycap.provenance(
             dycap.Settings(),
@@ -9912,11 +9914,84 @@ check(
     ).hexdigest(),
     dysy.prompt_digest()[:16],
 )
+# The audit's half of the same record (#256), one stage over and the same convention: the
+# instruction constant plus the only other text a stage-9 request adds. The transcript and the
+# section are the lecture, so they stay out -- `synth` leaves its source material out too.
+_audit_provenance = json.loads(dyau.provenance(dyau.Report(), None))
+check(
+    "#256: audit provenance carries the prompt digest beside the tool string",
+    _audit_provenance.get("prompt_sha256") == dyau.prompt_digest(),
+    repr(_audit_provenance.get("prompt_sha256")),
+)
+check(
+    "#256: the digest covers the request's envelope, so a prompt edit cannot leave it unchanged",
+    dyau.prompt_digest() != hashlib.sha256(dyau.CRITIC_SYSTEM.encode("utf-8")).hexdigest()
+    and dyau.prompt_digest()
+    == hashlib.sha256(
+        "\n".join([dyau.CRITIC_SYSTEM, dyau.TRANSCRIPT_HEADING, dyau.NOTE_HEADING]).encode("utf-8")
+    ).hexdigest(),
+    dyau.prompt_digest()[:16],
+)
+# The digest is only worth recording if it moves with the request, so the request is read where
+# it is built: a heading written inline again, bypassing the constants the digest reads, fails
+# here instead of drifting silently.
+_audit_request = dyau._section_request(0, "## Раздел 1\n\nтекст раздела", "текст стенограммы")
+check(
+    "#256: the request builds its envelope from the constants the digest reads",
+    _audit_request is not None
+    and _audit_request.messages[0]["content"] == dyau.CRITIC_SYSTEM
+    and dyau.TRANSCRIPT_HEADING in _audit_request.messages[1]["content"]
+    and dyau.NOTE_HEADING in _audit_request.messages[1]["content"],
+    repr(_audit_request.messages[1]["content"][:80] if _audit_request else None),
+)
+# And it reaches the file, which is what a bundle reader opens: the function-level checks above
+# cannot tell whether `run()` hands the config to `provenance()`.
+with tempfile.TemporaryDirectory() as _audit_tmp:
+    _audit_dir = pathlib.Path(_audit_tmp)
+    (_audit_dir / "note.md").write_text("## Раздел 1\n\nтекст раздела\n", encoding="utf-8")
+    (_audit_dir / "transcript.txt").write_text("текст стенограммы\n", encoding="utf-8")
+    dyau.run(
+        _audit_dir / "note.md",
+        _audit_dir / "transcript.txt",
+        _audit_dir / "out",
+        config=_seed_config,
+    )
+    _audit_file = json.loads(
+        (_audit_dir / "out" / dyau.PROVENANCE_NAME).read_text(encoding="utf-8")
+    )
+check(
+    "#256: the written audit-provenance.json carries the digest and the seed",
+    _audit_file.get("prompt_sha256") == dyau.prompt_digest()
+    and _audit_file.get("endpoint", {}).get("seed") == dyle.SEED,
+    repr({k: _audit_file.get(k) for k in ("prompt_sha256", "endpoint")}),
+)
 _llm_source = pathlib.Path(dyle.__file__).read_text(encoding="utf-8")
 check(
     "#77: the seed is documented as sent with its limit named, never as a promise",
     "was sent" in _llm_source and "not verifiable" in _llm_source,
     "llm.py seed prose",
+)
+# The coverage the two clauses above claim, counted rather than quoted (#256): four call sites
+# reach a model -- synth, audit twice, caption -- and the repair stage reaches none, so a fifth
+# call site has to update the sentence and fails here first.
+_sampling_sites = [
+    f"{path.name}:{number}"
+    for path in sorted(pathlib.Path(dyle.__file__).parent.glob("*.py"))
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+    if "llm.chat(" in line
+]
+check(
+    "#256: the four sampling call sites are the four the seed prose names",
+    len(_sampling_sites) == 4 and "every stage" not in _llm_source,
+    repr(_sampling_sites),
+)
+# The other half of that sentence, and the gap #257 owns: stage 10 carries neither the seed nor a
+# digest, which the prose must not claim away. Pinned so that wiring it is a deliberate edit here.
+_repair_provenance = json.loads(dyrep.provenance(dyrep.Report()))
+check(
+    "#256: stage 10's provenance carries no endpoint, as the prose and #257 say",
+    "endpoint" not in _repair_provenance and "prompt_sha256" not in _repair_provenance,
+    repr(sorted(_repair_provenance)),
 )
 
 # #252: the transcript records the answer as well as the question. ADR-0004 D4 asks for the
