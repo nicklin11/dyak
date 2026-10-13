@@ -89,6 +89,11 @@ jobs:
       - name: Stage suite
         run: python tests/test_stages.py
 
+      # The durable record a failed run leaves (#271): the reason reaches the bundle verbatim,
+      # `detail` stays the category, and no traceback or host path travels with it.
+      - name: Run-state suite (#271)
+        run: python tests/test_run_state.py
+
       - name: Doctor suite
         run: python tests/test_doctor.py
 
