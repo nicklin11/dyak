@@ -204,11 +204,23 @@ def repair(
         text += "\n"
 
     # 2. Glossary drift: substitute the canonical term. The glossary holds confirmed forms
-    #    only, which is what makes substitution safe here and not in stage 7.
+    #    only, which is what makes substitution safe here and not in stage 7. The variant is
+    #    matched as a WHOLE WORD: the audit's own test is a substring one (`audit.py:189`) and
+    #    it reports drift without correcting it (`audit.py:181`), so its over-matching costs a
+    #    warning the reader judges, where the same over-match here rewrote «нормализация» into
+    #    «НОРМАлизация» (#277). Measured on `~/.local/state/dyak/занятие--2` with a glossary
+    #    built from `mscs/_terms`: 18 of 36 variant occurrences sit inside a longer word,
+    #    «функционала» and «градиента» among them.
     for variant, canonical in glossary.entries:
+        # The audit's guard (`audit.py:187`, "too short to match without false positives"),
+        # kept: it cannot be what widens the rule to variants that were skipped before.
         if len(variant) < 4:
             continue
-        pattern = re.compile(re.escape(variant), re.IGNORECASE)
+        # `(?<!\w) ... (?!\w)`, not `\b`: `\b` wants a word/non-word transition, so it refuses
+        # to match a variant ending in a non-word character -- measured, `\bC\+\+\b` does not
+        # match "C++ и" but does match inside "C++x" -- while the lookarounds ask only that
+        # neither neighbour be a word character.
+        pattern = re.compile(rf"(?<!\w){re.escape(variant)}(?!\w)", re.IGNORECASE)
         hit = pattern.search(text)
         if hit:
             # The fix log records the changed LINE. "ilqf -> iLQR" is not before/after

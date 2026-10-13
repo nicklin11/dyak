@@ -7239,6 +7239,95 @@ fixed, rrep = dyrep.repair(
 check("glossary drift is canonicalised", "iLQR (iterative LQR)" in fixed, "not replaced")
 check("and it did not crash on a LaTeX-bearing canonical", True, "")
 
+# #277: a variant stands for a term, so repair matches a whole word. The audit keeps its
+# substring test (`audit.py:189`) and reports drift without correcting it (`audit.py:181`), so
+# what it over-reports stays visible there as a warning; repair must not rewrite the note for
+# it. Every edge below was measured, not assumed: `\w` is Unicode-aware, and `(?<!\w)/(?!\w)`
+# is not `\b` -- see the C++ check further down.
+word_glossary = dyau.Glossary((("норма", "НОРМА"),))
+bodies = ["содержимое"] * 8
+bodies[3] = (
+    "норма в начале строки\n"
+    "и в конце строки норма\n"
+    "См. (норма), далее.\n"
+    "Это норма-определение.\n"
+    "Здесь НОРМА заглавными и Норма с заглавной.\n"
+    "Здесь нормализация, НОРМАЛИЗАЦИЯ, xнорма, нормаx, норма_тест и норма1."
+)
+wordy = audit_note(*bodies)
+fixed, rrep = dyrep.repair(
+    wordy,
+    dyau.audit(wordy, "", word_glossary, stream=io.StringIO()),
+    word_glossary,
+    dyln.lint(wordy, limg),
+)
+check(
+    "a glossary variant is substituted as a whole word (#277)",
+    "НОРМА в начале строки" in fixed
+    and "в конце строки НОРМА" in fixed
+    and "См. (НОРМА), далее." in fixed
+    and "Это НОРМА-определение." in fixed
+    and "Здесь НОРМА заглавными и НОРМА с заглавной." in fixed,
+    fixed.split("## ")[-1][:400],
+)
+check(
+    "and a variant inside a longer word is left alone (#277)",
+    "Здесь нормализация, НОРМАЛИЗАЦИЯ, xнорма, нормаx, норма_тест и норма1." in fixed,
+    fixed.split("## ")[-1][:400],
+)
+bodies[3] = "Здесь нормализация и НОРМАЛИЗАЦИЯ, xнорма и нормаx."
+embed_only = audit_note(*bodies)
+fixed, rrep = dyrep.repair(
+    embed_only,
+    dyau.audit(embed_only, "", word_glossary, stream=io.StringIO()),
+    word_glossary,
+    dyln.lint(embed_only, limg),
+)
+check(
+    "and a note whose variants are all embedded comes back byte-identical (#277)",
+    fixed == embed_only and not [c for c in rrep.changes if c.rule == "term/drift"],
+    f"changed={fixed != embed_only} "
+    f"changes={[(c.rule, c.line) for c in rrep.changes if c.rule == 'term/drift']}",
+)
+
+# The rule still fires for what it is for: the ASR form of a term, as a whole word. The audit
+# reports both lines (its substring test flags the longer word too, by design); repair fixes
+# the whole word and leaves the longer word alone.
+bodies[3] = "Применяется Пантрягин и его принцип максимума."
+bodies[4] = "Пантрягинский принцип не рассматривается."
+genuine = audit_note(*bodies)
+gaudit = dyau.audit(genuine, "", A, stream=io.StringIO())
+fixed, rrep = dyrep.repair(genuine, gaudit, A, dyln.lint(genuine, limg))
+check(
+    "the drift the rule exists for is still reported and still fixed (#277)",
+    any(f.rule == "term/drift" for f in gaudit.findings)
+    and "Понтрягин (П.С. Понтрягин) и его принцип максимума." in fixed
+    and "Пантрягинский" in fixed,
+    f"audit={[f.detail for f in gaudit.findings]} fixed={fixed[-260:]}",
+)
+
+# The lookarounds, not `\b`: a variant may end in a non-word character, and `\b` both refuses
+# to match it (measured: `\bC\+\+\b` does not match "C++ и") and matches it inside a longer
+# word (measured: `\bC\+\+\b` does match "C++x"). `C++` is too short to reach repair at all --
+# the guard above skips variants shorter than four -- so this uses the notation case: an
+# ASR-lowercased `j(u)` against the canonical `J(u)`.
+ops = dyau.Glossary((("j(u)", "J(u)"),))
+bodies = ["содержимое"] * 8
+bodies[3] = "Считаем j(u) и всё."
+bodies[4] = "Считаем j(u)x и всё."
+notation = audit_note(*bodies)
+fixed, rrep = dyrep.repair(
+    notation,
+    dyau.audit(notation, "", ops, stream=io.StringIO()),
+    ops,
+    dyln.lint(notation, limg),
+)
+check(
+    "a variant ending in a non-word character is matched by lookarounds, not \\b (#277)",
+    "Считаем J(u) и всё." in fixed and "Считаем j(u)x и всё." in fixed,
+    f"fixed={fixed[-260:]}",
+)
+
 # A canonical containing a backslash must not be treated as a replacement template.
 la = dyau.Glossary((("пять", r"$\mathbf{x} \in \mathbb{R}^n$"),))
 bodies[3] = "Считаем пять."
