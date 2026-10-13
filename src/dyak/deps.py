@@ -375,7 +375,11 @@ def check_llm() -> Check:
         return Check(
             name="llm",
             ok=False,
-            detail=f"{url} unreachable: {exc}",
+            # The URL the request went to, redacted the same way as the HTTP-status branch
+            # above: `url` is the raw env value, so an unreachable endpoint with a userinfo or
+            # query credential printed it verbatim (#292). The same expression as that branch,
+            # so one probe's two reports cannot disagree about which URL was tried.
+            detail=f"{llm.redact_endpoint(llm.append_path(url, '/models'))} unreachable: {exc}",
             remediation="check the endpoint is running and reachable from this host",
             code=ec.DEPENDENCY_FAILED,
         )
@@ -477,7 +481,11 @@ def check_vlm() -> Check:
         return Check(
             name="vlm",
             ok=False,
-            detail=f"{url} unreachable: {exc}",
+            # The URL the request went to, redacted the same way as the HTTP-status branch
+            # above: `url` is the raw env value, so an unreachable endpoint with a userinfo or
+            # query credential printed it verbatim (#292). The same expression as that branch,
+            # so one probe's two reports cannot disagree about which URL was tried.
+            detail=f"{llm.redact_endpoint(llm.append_path(url, '/models'))} unreachable: {exc}",
             remediation="check the endpoint is running and reachable from this host",
             code=ec.DEPENDENCY_FAILED,
         )

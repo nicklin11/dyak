@@ -238,9 +238,23 @@ def append_path(url: str, segment: str) -> str:
 
     The same join is behind both `deps.py` probes, which is why this is a shared helper rather
     than a property: they append a different segment (`/models`), and nothing else about them
-    differs. Malformed input is passed through rather than refused, exactly as the concatenation
-    was: `urlsplit` splits any string and raises on none, so an endpoint with no scheme still
-    yields a URL, and `Config.url` stays safe to call from an error path.
+    differs.
+
+    Malformed input is passed through rather than refused wherever `urlsplit` can split it,
+    exactly as the concatenation was. That is most of it, and not all of it: no scheme, an empty
+    string, `%zz`, `not a url` and a relative path all still yield a URL, so `Config.url` stays
+    safe to call from an error path -- but a bracketed netloc that is not an IPv4/IPv6/IPvFuture
+    literal (`http://[myhost]:8317/v1`, `http://[not-an-ipv6]/v1`) and an unterminated bracket
+    (`http://[::1/v1`) raise `ValueError`, and `Config.url` therefore raises for those where the
+    old concatenation returned a string. Measured, the impact is that the failure moves one call
+    earlier and not that it appears: `urllib.request.Request(<that string>)` raised the same
+    `ValueError` with the same message at the base. The raise is kept rather than guarded,
+    because it names the join as the problem instead of the transport.
+
+    `urlunsplit` normalises twice more, and both are stated rather than fixed: the scheme is
+    lowercased (`HTTP://H:8317/V1` -> `http://H:8317/V1/chat/completions`; host and path keep
+    their case), and an empty query or fragment loses its delimiter, so a bare `?` or `#` is
+    dropped.
     """
     parts = urllib.parse.urlsplit(url)
     return urllib.parse.urlunsplit(parts._replace(path=parts.path.rstrip("/") + segment))

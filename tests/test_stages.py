@@ -6051,23 +6051,105 @@ check(
 _deps_source = pathlib.Path(dyd.__file__).read_text(encoding="utf-8")
 check(
     "#281: both /models probes share the helper, and neither concatenates an endpoint",
-    _deps_source.count("append_path(url,") == 4
+    _deps_source.count('llm.append_path(url, "/models")') == 2
+    and _deps_source.count("llm.append_path(url, '/models')") == 4
     and "url.rstrip" not in _deps_source
     and "{url}/models" not in _deps_source,
     repr(
         {
-            "append_path(url,": _deps_source.count("append_path(url,"),
+            "requests": _deps_source.count('llm.append_path(url, "/models")'),
+            "reports": _deps_source.count("llm.append_path(url, '/models')"),
             "old concat": _deps_source.count("{url}/models"),
         }
     ),
 )
-_odd_endpoints = ["h:8317/v1", "", "::::", "%zz", "//h/v1", "not a url"]
+_odd_endpoints = ["h:8317/v1", "", "::::", "%zz", "//h/v1", "not a url", "/relative/v1"]
 check(
     "#281: an endpoint with no scheme still yields the string it always did, and none raise",
     [dyle.Config(endpoint=one, model="m").url for one in _odd_endpoints]
     == [f"{one}/chat/completions" for one in _odd_endpoints],
     repr([(one, dyle.Config(endpoint=one, model="m").url) for one in _odd_endpoints]),
 )
+
+
+# Which strings `urlsplit` refuses, stated because the first version of this block got it wrong:
+# it is not "any string, raising on none". A bracketed netloc that is not an IPv4/IPv6/IPvFuture
+# literal, and an unterminated bracket, raise `ValueError` -- so `Config.url` raises there where
+# the old concatenation returned a string. The impact is smaller than that sounds and is checked
+# below: `urllib.request.Request(<that string>)` raised the same `ValueError` with the same
+# message at the base, so the failure moves one call earlier rather than appearing. The raise is
+# deliberately kept: it names the join instead of the transport.
+def _join_error(endpoint: str):
+    try:
+        dyle.Config(endpoint=endpoint, model="m").url
+    except ValueError as exc:
+        return exc
+    return None
+
+
+_bracket_errors = [_join_error(one) for one in ("http://[myhost]:8317/v1", "http://[::1/v1")]
+check(
+    "#281/#292: a bracketed netloc that is not an IP literal raises in Config.url, and says why",
+    all(isinstance(one, ValueError) for one in _bracket_errors)
+    and "IPv4 or IPv6" in str(_bracket_errors[0])
+    and "Invalid IPv6 URL" in str(_bracket_errors[1]),
+    repr([f"{type(one).__name__}: {one}" for one in _bracket_errors]),
+)
+
+# #292: each probe makes *two* failure reports, and both name the URL the same way. The
+# HTTP-status branch redacted from the start; the unreachable branch printed the raw env value,
+# so `<url>?api_key=<secret> unreachable: ...` reached the terminal -- the interpolation #279
+# half 1 fixed in `llm.py`, one branch over, and nothing pinned either branch. Both now print
+# `llm.redact_endpoint(llm.append_path(url, '/models'))`; this drives all four sites, and the
+# source check holds the count, so reverting the redaction at any one of them fails here.
+_probe_url = "http://svc:not-a-real-probe-password@h:8317/v1?api_key=not-a-real-probe-secret"
+check(
+    "#292: all four deps.py failure reports go through redact_endpoint",
+    _deps_source.count("llm.redact_endpoint(") == 4 and "{url}" not in _deps_source,
+    repr(
+        {
+            "redacted": _deps_source.count("llm.redact_endpoint("),
+            "raw {url} uses": _deps_source.count("{url}"),
+        }
+    ),
+)
+_saved_probe_env = {
+    key: os.environ.get(key)
+    for key in (dyd.LLM_ENV, dyd.LLM_MODEL_ENV, dyd.VLM_ENV, dyd.VLM_MODEL_ENV)
+}
+os.environ[dyd.LLM_ENV] = _probe_url
+os.environ[dyd.VLM_ENV] = _probe_url
+os.environ[dyd.LLM_MODEL_ENV] = "m"
+os.environ[dyd.VLM_MODEL_ENV] = "vm"
+_real_probe_urlopen = dyd.urllib.request.urlopen
+
+
+def _probe_transport(failure: BaseException):
+    def _urlopen(*_args, **_kwargs):
+        raise failure
+
+    return _urlopen
+
+
+try:
+    for _probe in (dyd.check_llm, dyd.check_vlm):
+        for _kind, _failure in (
+            ("HTTP status", urllib.error.HTTPError(_probe_url, 500, "Server Error", {}, None)),
+            ("unreachable", urllib.error.URLError(OSError(111, "Connection refused"))),
+        ):
+            dyd.urllib.request.urlopen = _probe_transport(_failure)
+            _report = _probe()
+            check(
+                f"#292: {_probe.__name__}'s {_kind} report names the redacted URL",
+                "not-a-real-probe-password" not in _report.detail
+                and "not-a-real-probe-secret" not in _report.detail
+                and "http://***@h:8317/v1/models?api_key=***" in _report.detail,
+                _report.detail,
+            )
+finally:
+    dyd.urllib.request.urlopen = _real_probe_urlopen
+    for _key, _value in _saved_probe_env.items():
+        os.environ.pop(_key, None) if _value is None else os.environ.__setitem__(_key, _value)
 check(
     "#281: the wire keeps the raw endpoint and provenance keeps the masked one (#273/#279)",
     "not-a-real-query-secret" in _path_cfg.url
