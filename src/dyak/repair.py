@@ -208,9 +208,14 @@ def repair(
     #    matched as a WHOLE WORD: the audit's own test is a substring one (`audit.py:189`) and
     #    it reports drift without correcting it (`audit.py:181`), so its over-matching costs a
     #    warning the reader judges, where the same over-match here rewrote «нормализация» into
-    #    «НОРМАлизация» (#277). Measured on `~/.local/state/dyak/занятие--2` with a glossary
-    #    built from `mscs/_terms`: 18 of 36 variant occurrences sit inside a longer word,
-    #    «функционала» and «градиента» among them.
+    #    «НОРМАлизация» (#277). Measured on `~/.local/state/dyak/занятие--2/note.md` with a
+    #    glossary built from `mscs/_terms`: a variant is a frontmatter `aliases:`/`forms:`
+    #    bullet, the canonical is the note's H1 heading, and the length guard below leaves 122
+    #    of the 132 bullets. The note holds 53 occurrences of those variants under this
+    #    stage's case-insensitive match: 35 whole-word and 18 inside a longer word
+    #    («функционала», «градиента»), which is the 18 the boundary is for. The entries that
+    #    hit drop from 10 to 8, and the repaired note differs on 5 lines, each restoring the
+    #    line the substring match had rewritten.
     for variant, canonical in glossary.entries:
         # The audit's guard (`audit.py:187`, "too short to match without false positives"),
         # kept: it cannot be what widens the rule to variants that were skipped before.
