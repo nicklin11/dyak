@@ -107,11 +107,13 @@ STAGE7_ARTEFACTS = (NOTE_NAME, REPORT_NAME, PROVENANCE_NAME)
 #: per-section request can state -- the full wording lives in the skill, not here.
 #:
 #: That compression is what dropped the skill's table rules: §4, §5 and §7 each ask for a
-#: table, none of the three briefs named one, and only §3 -- whose brief did -- has tables in
-#: the generated note (#74). They are back below, and `tests/test_stages.py` fails if one is
-#: dropped again. The brief is the place they have to live: the skill file itself is never sent
-#: to the model (`synthesise` sends `SYSTEM` plus this brief), so editing only `SKILL.md`
-#: changes nothing at run time.
+#: table, and none of the three briefs named one. The generated note has tables in sections 3
+#: (33 data rows, 5 tables) and 7 (8 data rows, 1 table) -- and §7's is there although its
+#: brief named none, so the brief is not the only thing that can produce a table. It is the
+#: only place a rule can be *stated*: the skill file itself is never sent to the model
+#: (`synthesise` sends `SYSTEM` plus this brief), so editing only `SKILL.md` changes nothing
+#: at run time. The four rules are back below, and `tests/test_stages.py` fails if one is
+#: dropped again.
 SECTIONS: tuple[tuple[int, str, str], ...] = (
     (
         1,

@@ -9734,7 +9734,9 @@ with tempfile.TemporaryDirectory() as _br_td:
 # #74: the skill's table rules live in the briefs, because the brief is what the request
 # carries. `synthesise` sends `SYSTEM` plus one brief, so a rule that exists only in `SKILL.md`
 # never reaches the model -- which is how the skill's §4/§5/§7 table requirements were lost in
-# the condensation while §3's survived, and §3 is the only section with tables in the note.
+# the condensation while §3's survived. The artefact has tables in §3 (33 data rows, 5 tables)
+# and §7 (8 data rows, 1 table), and §7's is there although its brief named none: a brief is not
+# the only thing that can produce a table, it is the only place a rule can be stated.
 _briefs = {number: brief for number, _title, brief in dysy.SECTIONS}
 check(
     "#74: every brief whose skill section asks for a table names one",
@@ -9845,10 +9847,24 @@ check(
     _sent_payload.get("seed") == dyle.SEED and _sent_payload.get("temperature") == 0.2,
     repr({k: _sent_payload.get(k) for k in ("seed", "temperature")}),
 )
+# The two stages whose provenance is built from `Config.redacted()` -- stage 6's `model` field and
+# stage 7's `endpoint`. Audit and repair provenance are not handed the Config at all, so they
+# cannot carry the seed (#256), and the check must not claim otherwise.
+_seed_config = dyle.Config("http://x", "m")
 check(
-    "#77: redacted() records it, so synth, audit, repair and caption provenance all carry it",
-    dyle.Config("http://x", "m").redacted().get("seed") == dyle.SEED,
-    repr(dyle.Config("http://x", "m").redacted()),
+    "#77: redacted() carries the seed, which synth and caption provenance record",
+    _seed_config.redacted().get("seed") == dyle.SEED
+    and json.loads(dysy.provenance(dysy.Note(markdown="x"), _seed_config))["endpoint"]["seed"]
+    == dyle.SEED
+    and json.loads(
+        dycap.provenance(
+            dycap.Settings(),
+            _seed_config,
+            dycap.CaptionOutcome(captioned=1, reused=0, failed=0, model="m", served_model=None),
+        )
+    )["model"]["seed"]
+    == dyle.SEED,
+    repr(_seed_config.redacted()),
 )
 _saved_seed_env = {
     name: os.environ.get(name)
