@@ -423,7 +423,13 @@ def check_empty_math(markdown: str, lines: list[tuple[int, str]], report: Report
 
 # --- tier 2 -------------------------------------------------------------------------
 
-
+# The example below is not decorative: it is the shape the model copies, and the previous one
+# could not survive `parse_critic_findings` -- its citation was split across two lines, so the
+# `- ` line held `[источник: соответствие` with no closing `]`, and its citation was the
+# phrase "соответствие динамической системы" against a formula the note does not contain. The
+# model reproduced that shape: 45 of 45 findings on the replay were discarded (#240). Both
+# fragments here are real -- the note sentence and the transcript span it was checked against,
+# from the 2026-10-12 run -- and the whole item is one line, which is what the guard reads.
 CRITIC_SYSTEM = """\
 Ты — рецензент конспекта лекции. Твоя единственная задача — найти в конспекте ошибки.
 
@@ -449,9 +455,11 @@ CRITIC_SYSTEM = """\
    Находка без цитаты в стенограмме будет отброшена: это мнение, а не свидетельство.
 3. [уверенность: ...] — одно из трёх слов. Находка без неё тоже отбрасывается.
 
-Пример:
-- $J = \\mathbf{A} + \\mathbf{x}$: матрица складывается с вектором [источник: соответствие
-  динамической системы] [уверенность: высокая]
+Пример (одной строкой — многострочный пункт не читается до конца):
+
+- Если коэффициенты симметричной матрицы вещественны, то вещественны и её собственные значения: в стенограмме названа только симметричность, вывода о собственных значениях нет [источник: там симметричность, ну, симметричность, понятно] [уверенность: высокая]
+
+Оба фрагмента скопированы, ни один не пересказан. Первый — строка из конспекта, не твой заголовок и не твоя формулировка. [источник: ...] — то, что прозвучало в стенограмме, слово в слово. Не оборачивай цитату в кавычки и не дописывай знаков: кавычки, тире и запятые, которых нет в стенограмме, — твоя пунктуация, и проверка читает её как пересказ.
 
 Если находок нет — одно слово: OK"""
 
@@ -468,10 +476,76 @@ def _norm(text: str) -> str:
     """Collapse whitespace and drop `[hh:mm:ss]` stamps, for substring comparison only.
 
     The timestamps are stripped because a citation is evidence about what was *said*; the
-    clock offset is metadata the critic has no reason to reproduce. Nothing else is
-    normalised -- a citation that does not survive this much cleaning is not a quotation.
+    clock offset is metadata the critic has no reason to reproduce. Whitespace, case and the
+    stamps are the whole of it -- everything else a citation is compared with is in
+    `_verbatim`, which says what a quotation is allowed to be wrapped in (#240).
     """
     return re.sub(r"\s+", " ", _STAMP.sub("", text)).strip().lower()
+
+
+#: What a citation may be wrapped in without changing what it quotes. The critic writes
+#: `[источник: «...»]` although the format line asks for a bare fragment, and on the
+#: 2026-10-12 run that alone discarded 17 of 45 findings (#240).
+_CITE_WRAPPERS = "«»\"'“”„‟`()[]{}"
+#: Punctuation the critic may leave at either end of a citation, for the same reason: it is the
+#: critic's sentence, not the lecturer's.
+_CITE_EDGE = ",.;:!?—–-…"
+#: Separators the critic uses to join two spans inside one citation. Each side is a real
+#: transcript span and the join is the critic's (#240).
+_CITE_SPLIT = re.compile(r"\.{3}|…|;")
+#: The shortest fragment that counts as a citation. A shorter match is not evidence that the
+#: lecturer said it -- "двойной путь" (12 characters) sits inside both the paraphrase the issue
+#: is about and the real sentence it paraphrases -- so a citation split on `…`/`...`/`;` has to
+#: yield a fragment at least this long (#240). A whole citation is matched as it always was,
+#: at any length: an exact short quote was kept before this change and is still kept.
+MIN_FRAGMENT_CHARS = 20
+
+
+def _strip_cite_wrappers(text: str) -> str:
+    """Drop the quoting a citation may be wrapped in, and the punctuation at its edges.
+
+    Measured on the 2026-10-12 run (#240, comment 6137266759): of 68 discards, 67 were this --
+    a citation that is in the transcript character for character once `«»`/quotes/brackets and
+    a stray trailing comma are removed. A quotation mark is not a difference in what was said,
+    and the guard was discarding findings over guillemets.
+
+    The two strips alternate until the text stops changing, because the critic writes both
+    orders: `"цитата",` needs the comma off before the quote is at the end, and `(цитата)`
+    needs the bracket off before the parenthesis is.
+    """
+    text = text.strip()
+    while True:
+        before = text
+        while text and text[0] in _CITE_WRAPPERS:
+            text = text[1:].lstrip()
+        while text and text[-1] in _CITE_WRAPPERS:
+            text = text[:-1].rstrip()
+        text = text.strip(_CITE_EDGE).strip()
+        if text == before:
+            return text
+
+
+def _cite_fragments(text: str) -> list[str]:
+    """The spans one citation quotes, when the critic joins two with `…`, `...` or `;`."""
+    return [part.strip() for part in _CITE_SPLIT.split(text) if part.strip()]
+
+
+def _verbatim(cite: str, haystack: str, *, fragments: bool) -> str:
+    """The normalised span of `cite` that is verbatim in `haystack`, or "".
+
+    `fragments` accepts a citation that quotes two places and marks the gap with `…`/`...`/`;`:
+    each side is still exact and the join is the critic's (#240). The note-quote side passes
+    False -- the quote is the finding's evidence anchor, not a summary of it.
+    """
+    text = _norm(_strip_cite_wrappers(cite))
+    if text and text in haystack:
+        return text
+    if fragments:
+        for part in _cite_fragments(text):
+            part = _norm(part)
+            if len(part) >= MIN_FRAGMENT_CHARS and part in haystack:
+                return part
+    return ""
 
 
 def parse_critic_findings(
@@ -484,6 +558,11 @@ def parse_critic_findings(
     section, the citation is verbatim from the transcript, and a confidence was stated.
     Anything else is discarded *and logged* -- an enforced format that silently drops
     half its output is indistinguishable from one that is not enforced at all.
+
+    "Verbatim" is `_verbatim`: whitespace, case and `[hh:mm:ss]` stamps are ignored, the
+    citation may be wrapped in quotes or brackets and may carry edge punctuation, and a
+    citation that joins two spans with `…`/`...`/`;` counts if one span is long enough. What
+    it still rejects is a paraphrase -- text that is not in the transcript at all (#240).
     """
     haystack_note, haystack_transcript = _norm(section), _norm(transcript)
     kept: list[Finding] = []
@@ -520,12 +599,12 @@ def parse_critic_findings(
             )
             continue
         cite = citation.group("cite").strip()
-        if not cite or _norm(cite) not in haystack_transcript:
+        if not _verbatim(cite, haystack_transcript, fragments=True):
             dropped.append(
                 {"line": body[:300], "reason": "citation is not verbatim in the transcript"}
             )
             continue
-        if not quote or _norm(quote) not in haystack_note:
+        if not _verbatim(quote, haystack_note, fragments=False):
             dropped.append({"line": body[:300], "reason": "quote is not verbatim in the note"})
             continue
 

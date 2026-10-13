@@ -909,9 +909,15 @@ def _stages(
     # --- stage 10: repair -----------------------------------------------------
     began = time.monotonic()
     rdir = work.dir("repair")
+    # The published report, not `adir / audit.REPORT_NAME`. Stage 9 publishes (MOVES) the
+    # report into the bundle -- `Bundle.publish` is a `shutil.move` (bundle.py:271) -- so the
+    # work-dir path was empty by the time this ran, `repair.run` found no report at all, and
+    # only the lint findings were declined. Measured on the 2026-10-12 run: `audit.json` held
+    # 14 findings and `repair.json` declined one, the lint rule `math/display-unbalanced`
+    # (#253). The same mechanism as #82/#89: a reader handed the pre-publish path.
     rreport = repair.run(
         artefacts[synth.NOTE_NAME],
-        adir / audit.REPORT_NAME,
+        artefacts[f"audit/{audit.REPORT_NAME}"],
         rdir,
         glossary_path=Path(glossary_path) if glossary_path else None,
         lint_report_path=artefacts[lint.REPORT_NAME],
