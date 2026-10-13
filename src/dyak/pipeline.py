@@ -924,7 +924,8 @@ def _stages(
         stream=out,
         # The Config the run already holds (#257): stage 10 sends no prompt, but its provenance
         # records the endpoint and the seed, so `repair-provenance.json` is the fourth stage
-        # provenance the #77 decision names. Same `llm_config` as stages 6, 7 and 9 above.
+        # provenance the #77 decision names. Same `llm_config` the variable reaches at stages 7 and
+        # 9 above; stage 6 builds its own vision config inside `caption.run` (`caption.py:820`).
         config=llm_config,
     )
     for extra in (repair.REPAIRED_NOTE, repair.REPORT_NAME, repair.PROVENANCE_NAME):

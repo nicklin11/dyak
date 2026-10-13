@@ -9860,8 +9860,10 @@ check(
 # and stages 7, 9 and 10's `endpoint` (#77, #257). Stage 10 sends no prompt, so it records no
 # digest beside it; the check further down states that rather than leaving it to the prose.
 # `.get` chains, not `["endpoint"]["seed"]`: when the #257 teeth removed the endpoint block the
-# suite died of `KeyError: 'endpoint'` instead of reporting a FAIL, and a check that aborts the run
-# reports nothing about the other nine hundred. The file's contract is accumulate, print, exit 1.
+# suite died of `KeyError: 'endpoint'` after printing 922 of its 968 checks, so a check that aborts
+# reports nothing about the 46 checks after it. (t188 measured the same 922 of a 965-check suite;
+# the three-check difference is the #257 checks further down.) The file's contract is accumulate,
+# print, exit 1.
 _seed_config = dyle.Config("http://x", "m")
 
 
@@ -10056,7 +10058,7 @@ check(
 _pipeline_source = pathlib.Path(dyp.__file__).read_text(encoding="utf-8")
 _repair_call = _pipeline_source.split("rreport = repair.run(")[1].split("\n    )")[0]
 check(
-    "#257: the pipeline hands stage 10 the same llm_config it hands stages 6, 7 and 9",
+    "#257: the pipeline hands stage 10 the same llm_config it hands stages 7 and 9",
     "config=llm_config" in _repair_call,
     repr([ln.strip() for ln in _repair_call.splitlines() if ln.strip()]),
 )
