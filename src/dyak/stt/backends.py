@@ -12,8 +12,8 @@ Keeping the interface at the byte level means a backend cannot quietly reshape t
 the way in. Normalisation happens once, in one place, and is testable on its own.
 
 Both remaining backends are HTTP endpoints. There is no subprocess backend: the one there was
-— shipboard — added nothing this code did not already do (`core.parse` unwraps
-`segments` either way) and imposed a 300 s ceiling it could not lift. See issue #49, which
+added nothing this code did not already do (`core.parse` unwraps `segments` either way) and
+imposed a 300 s ceiling it could not lift. See issue #49, which
 also corrects an earlier claim that the two payloads were byte-identical. They are not:
 whisper.cpp disagrees with **itself** run to run.
 
@@ -85,13 +85,12 @@ class TranscriptionBackend(Protocol):
         ...
 
 
-#: The #95 remediation tail, shared by both `auto` failures. One string, so the raw-port
-#: trap is named identically whether nothing is configured or the configured endpoint is
-#: down -- the operator reaches `doctor` through either door and needs the same reason.
-_PROXY_TRAP = (
-    "the supported target is the shipboard proxy on http://100.64.0.1:10301, which "
-    "refreshes the idle marker, unlike a raw container port such as 127.0.0.1:10302, "
-    "reclaimed after 300 s by whisper-idle-stop.timer"
+#: The remediation for every "no usable STT endpoint" failure (#259): one sentence, in one
+#: place, so the two `auto` failures and every whisper.cpp failure cannot drift apart. It names
+#: the variables to set and nothing about this host -- 100 chars.
+ENDPOINT_REMEDIATION = (
+    "set DYAK_WHISPERCPP_URL (or whispercpp_url) to a whisper.cpp /inference endpoint, "
+    "or DYAK_OPENAI_URL"
 )
 
 
@@ -138,22 +137,14 @@ def resolve(name: str | None = None) -> TranscriptionBackend:
                 code=2,
                 message="the STT endpoint is not configured: no whisper.cpp or "
                 "OpenAI-compatible URL is set in any layer",
-                remediation=(
-                    "set DYAK_WHISPERCPP_URL (or whispercpp_url in the settings file) to a "
-                    f"whisper.cpp /inference endpoint -- {_PROXY_TRAP} -- or set "
-                    "DYAK_OPENAI_URL for an OpenAI-compatible endpoint"
-                ),
+                remediation=ENDPOINT_REMEDIATION,
             )
         raise runner.DependencyError(
             name="stt",
             code=2,
             message="no transcription backend is reachable; set DYAK_STT to one of "
             "whispercpp, openai",
-            remediation=(
-                "start whisper.cpp and set DYAK_WHISPERCPP_URL (or whispercpp_url in the "
-                f"settings file) -- {_PROXY_TRAP} -- or point DYAK_OPENAI_URL at an "
-                "OpenAI-compatible endpoint"
-            ),
+            remediation=f"start whisper.cpp; {ENDPOINT_REMEDIATION}",
         )
 
     table: dict[str, type] = {

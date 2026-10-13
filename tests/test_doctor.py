@@ -201,12 +201,14 @@ check("the failing check is named", "stt" in msg, msg)
 check("the unreachable target is named", "127.0.0.1" in out.getvalue(), out.getvalue())
 check("the remediation names the env var", "DYAK_WHISPERCPP_URL" in msg, msg)
 check("shipboard is no longer the reason", "pipx install shipboard" not in msg, msg)
-# #95: the failure path must name the trap the default used to walk into -- the raw
-# container port is not the supported target, the proxy is, and the raw one is reclaimed
-# by the idle timer. Without this the operator gets a URL and no reason.
+# #259: the failure path names the variables to set. The raw-port-versus-proxy history and
+# the idle timer are in ADR-0001 now, not in the line an operator reads mid-failure.
 check(
-    "the STT remediation names the proxy and the 300 s reclaim (#95)",
-    "100.64.0.1:10301" in msg and "300 s" in msg and "whisper-idle-stop" in msg,
+    "the STT remediation names the variables to set (#259)",
+    "DYAK_WHISPERCPP_URL" in msg
+    and "DYAK_OPENAI_URL" in msg
+    and "10301" not in msg
+    and "whisper-idle-stop" not in msg,
     msg,
 )
 check(
@@ -807,12 +809,11 @@ with urlopen_stub(fake_stt_urlopen):
     )
     check(
         # The `auto` path reaches this failure too, and it is the path a default install
-        # takes, so the proxy/300 s trap must be named here and not only on the
-        # explicit-backend path.
-        "the auto STT refusal names the proxy and the 300 s reclaim (#95)",
+        # takes, so #259's wording is pinned here and not only on the explicit-backend path.
+        "the auto STT refusal names the variables to set (#259)",
         stt_check is not None
-        and "100.64.0.1:10301" in (stt_check.remediation or "")
-        and "300 s" in (stt_check.remediation or ""),
+        and "DYAK_WHISPERCPP_URL" in (stt_check.remediation or "")
+        and "10301" not in (stt_check.remediation or ""),
         getattr(stt_check, "remediation", ""),
     )
 

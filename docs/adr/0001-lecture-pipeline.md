@@ -1158,3 +1158,12 @@ distinction and the 300 s reclaim.
 `WHISPER_REQUEST_TIMEOUT` (client-side) and the timer itself are out of scope: the timer
 lives in shipboard. This amendment is about what *dyak* defaults to and what *dyak* tells the
 operator. Tracked as #95; the measured history is #62.
+
+## 2026-10-13 — D2 amended: the failure path names variables, not this host (#259)
+
+The 2026-10-12 amendment above records that the shipped strings carried the raw-port-vs-proxy
+distinction and the 300 s reclaim. That was true of the strings at the time; it is not true of
+the code now. The strings name the variables to set and the endpoint kind, and the
+raw-port-versus-proxy history lives in this record only. The decision is unchanged — there is
+still no built-in endpoint, an unset URL is *not configured* and distinct from *configured and
+unreachable* — and nothing about endpoint resolution moves.
