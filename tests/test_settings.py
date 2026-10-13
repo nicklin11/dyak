@@ -979,6 +979,51 @@ check(
     f"{dystt.redact_endpoint!r} vs {dyll.redact_endpoint!r}",
 )
 
+
+# --- #301: the mask does not depend on the key being spelled `endpoint` --------
+# #284 keyed the redaction on `parameters["endpoint"]` and skipped silently when that key was
+# absent, so a backend that named its URL something else wrote it raw with nothing failing. Both
+# backends today use `endpoint`, which is why the limit was unreached rather than wrong -- and
+# why it stayed invisible: it was written down in #290's merged body, which no future author
+# opening `stt/__init__.py` ever reads. The mask walks the record's values now, not one key name.
+class _OddlyNamedEngine:
+    """A third backend that names its URL something else: the shape #301 is about."""
+
+    def parameters(self, *, client_timeout: float) -> dict:
+        return {
+            "endpoint_url": "http://svc:not-a-real-odd-password@h:8390/v1?api_key=not-a-real-odd-key",
+            "backend": "oddly-named",
+            "detail": "qwen3.6-35b, api-version=2026-01-01",
+            "nested": {"url": "http://svc:not-a-real-nested-password@h:8390/v1"},
+            "chunking": {"chunks": 1, "overlap_seconds": 0.5},
+        }
+
+
+_odd_record = dystt._recorded_parameters(_OddlyNamedEngine(), 5.0)
+check(
+    "#301: a URL under a differently-named key is masked, not recorded raw",
+    "not-a-real-odd-password" not in json.dumps(_odd_record)
+    and "not-a-real-odd-key" not in json.dumps(_odd_record),
+    json.dumps(_odd_record),
+)
+check(
+    "#301: masked the same way the keyed form is, name and all",
+    _odd_record["endpoint_url"] == "http://***@h:8390/v1?api_key=***",
+    _odd_record["endpoint_url"],
+)
+check(
+    "#301: a nested URL is covered too, not only the top level",
+    _odd_record["nested"]["url"] == "http://***@h:8390/v1",
+    str(_odd_record["nested"]),
+)
+check(
+    "#301: no unrelated value is masked or rewritten",
+    _odd_record["backend"] == "oddly-named"
+    and _odd_record["detail"] == "qwen3.6-35b, api-version=2026-01-01"
+    and _odd_record["chunking"] == {"chunks": 1, "overlap_seconds": 0.5},
+    json.dumps(_odd_record),
+)
+
 # --- report -------------------------------------------------------------------
 _env.restore(SAVED_ENV)
 if failures:
