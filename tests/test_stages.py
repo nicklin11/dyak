@@ -5929,6 +5929,75 @@ check(
 )
 check("but its presence is recorded", cfg.redacted()["api_key"] is True, str(cfg.redacted()))
 
+# #273: the key was never the only credential a config can carry, and this is why the two checks
+# above passed while the leak was live -- `cfg.endpoint` is `http://h/v1`, with no userinfo to
+# leak. `redacted()` promised "Config safe to write into a bundle" and wrote `endpoint` verbatim,
+# so an endpoint URL carrying `user:password@` put the password into every artefact that records
+# this dict (synth, audit, repair as `endpoint`; caption inside `model`). The value below is
+# invented, and no real credential appears anywhere in this file.
+cfg_userinfo = dyle.Config(
+    endpoint="http://svc:not-a-real-password@h:8317/v1", model="m", api_key="secret"
+)
+check(
+    "#273: the endpoint's userinfo is not in the redacted form either",
+    "not-a-real-password" not in json.dumps(cfg_userinfo.redacted()),
+    cfg_userinfo.redacted(),
+)
+check(
+    "#273: and the rest of the endpoint survives, so two runs stay comparable",
+    cfg_userinfo.redacted()["endpoint"] == "http://***@h:8317/v1",
+    cfg_userinfo.redacted()["endpoint"],
+)
+
+# #279: the same promise, one step further out. A query parameter is provenance
+# (`?api-version=2026-01-01`) until its name says it is a credential, and nothing in a URL marks
+# which is which -- so the rule is a heuristic over the name, and its named price is pinned in the
+# third check below: `?monkey=1` is masked because `monkey` contains `key`. That direction is the
+# cheap one: the NAME survives either way, so two runs stay comparable, while the other direction
+# writes a live key into a bundle. The values are invented, like the ones above.
+_query_cfg = dyle.Config(
+    endpoint="http://h:8317/v1?api_key=not-a-real-query-secret&api-version=2026-01-01",
+    model="m",
+    api_key="secret",
+)
+check(
+    "#279: a credential-named query parameter keeps its name and loses its value",
+    _query_cfg.redacted()["endpoint"] == "http://h:8317/v1?api_key=***&api-version=2026-01-01",
+    _query_cfg.redacted()["endpoint"],
+)
+_plain_query_cfg = dyle.Config(
+    endpoint="http://h:8317/v1?api-version=2026-01-01&model=gpt", model="m", api_key="secret"
+)
+check(
+    "#279: an ordinary query survives byte for byte, which is what the rule must not cost",
+    _plain_query_cfg.redacted()["endpoint"] == "http://h:8317/v1?api-version=2026-01-01&model=gpt",
+    _plain_query_cfg.redacted()["endpoint"],
+)
+_monkey_cfg = dyle.Config(endpoint="http://h:8317/v1?monkey=1", model="m", api_key="secret")
+check(
+    "#279: the heuristic's named price, written down rather than discovered later: `?monkey=1`",
+    _monkey_cfg.redacted()["endpoint"] == "http://h:8317/v1?monkey=***",
+    _monkey_cfg.redacted()["endpoint"],
+)
+# The other route out of the process: the four `EndpointError` messages quote the URL, and their
+# text reaches logs and stage provenance's `error` field. They print the redacted form, while the
+# request itself keeps the raw one -- redacting that would break authentication rather than a
+# record.
+_llm_source = pathlib.Path(dyle.__file__).read_text(encoding="utf-8")
+check(
+    "#279: the error messages quote the redacted URL, and the request still gets the raw one",
+    _llm_source.count("redact_endpoint(config.url)") == 4
+    and "        config.url,\n" in _llm_source
+    and "{config.url}" not in _llm_source,
+    repr(
+        {
+            "redact_endpoint(config.url)": _llm_source.count("redact_endpoint(config.url)"),
+            "raw request line": "        config.url,\n" in _llm_source,
+            "raw f-string uses": _llm_source.count("{config.url}"),
+        }
+    ),
+)
+
 # The artefacts.
 dest = tmp / "synth-out"
 sn = dysy.run(scaps, stxt, src_path, dest, config=None, stream=io.StringIO())

@@ -67,6 +67,7 @@ import hashlib
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from collections.abc import Callable
@@ -136,6 +137,93 @@ class EndpointError(RuntimeError):
         self.connection = connection
 
 
+#: What stands in for a credential in the redacted form: the userinfo of an endpoint URL (#273) and
+#: the value of a query or fragment parameter whose name looks like a credential (#279). A constant
+#: and not an empty string, so two runs that differ only in whether credentials were configured stay
+#: distinguishable in a bundle -- which is the whole point of recording an endpoint -- while no part
+#: of the credential survives. The password this replaces is not a configuration detail worth
+#: comparing: the live request does not use a URL userinfo either. `chat()` authenticates with
+#: `Authorization: Bearer <api_key>` below, and `urllib` writes a `user:password@` netloc into the
+#: `Host` header as-is, so an endpoint with userinfo is a credential that leaks and does nothing.
+#: Named for the credential rather than the userinfo since #279, when the query string turned out to
+#: be the same gap under a different name; it was `REDACTED_USERINFO` before.
+REDACTED_CREDENTIAL = "***"
+
+#: Parameter names whose *value* is masked in the redacted form (#279), matched as substrings of the
+#: lowercased name so that `api_key`, `X-Amz-Signature` and `x-goog-api-key` are covered without
+#: listing every spelling. A closed list, because no URL marks which of its parameters is a
+#: credential and guessing from the value's shape is not possible -- a secret has no shape. This is
+#: a heuristic and claims no completeness. Its two errors are asymmetric, and the asymmetry is the
+#: justification: a false positive (`?monkey=1`) masks a value whose NAME survives, so two runs stay
+#: comparable, which is what `redact_endpoint` exists to protect, while a false negative writes a
+#: live key into a bundle that gets archived. The price is named rather than hidden: `?monkey=1`
+#: loses its value. The stated misses are a name containing none of these words, a secret in the
+#: path, and a secret in the host. The mechanism that reaches no artefact is `DYAK_LLM_API_KEY`:
+#: it goes into the `Authorization` header and is recorded only as a boolean.
+CREDENTIAL_NAMES = (
+    "key",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "sig",
+    "signature",
+    "auth",
+    "credential",
+    "bearer",
+)
+
+
+def _redact_params(raw: str) -> str:
+    """`k=v&k2=v2` with the value of every credential-named pair replaced (#279).
+
+    Names, order and pair count are kept exactly: an ordinary query (`?api-version=2026-01-01`) is
+    provenance and survives byte for byte, and a masked one still reads as the same parameter asking
+    for the same thing. A pair with no `=` has no value to mask and is returned as it came.
+    """
+    pairs = []
+    for pair in raw.split("&"):
+        name, sep, _value = pair.partition("=")
+        if sep and any(word in name.lower() for word in CREDENTIAL_NAMES):
+            pairs.append(f"{name}={REDACTED_CREDENTIAL}")
+        else:
+            pairs.append(pair)
+    return "&".join(pairs)
+
+
+def redact_endpoint(endpoint: str) -> str:
+    """An endpoint URL with its credentials replaced by `***` (#273, #279).
+
+    `Config.redacted()` promises a config safe to write into a bundle, and the key was never the
+    only credential a config can carry: `endpoint` went into the record verbatim, so an endpoint
+    like `http://user:password@host:8317/v1` wrote its password into every artefact holding that
+    dict -- `endpoint` in `synth`, `audit` and `repair` provenance, inside `model` in `caption`'s.
+    Redacting here rather than at those four call sites covers all of them and any consumer added
+    later, and leaves `Config.endpoint` itself alone: the string that goes over the network is not
+    the string that goes into a bundle.
+
+    Two steps, one for each way an endpoint URL can carry a credential: the userinfo becomes
+    `***`, and then every query and fragment parameter whose name is in `CREDENTIAL_NAMES` has its
+    value masked, names and order untouched. Scheme, host, port, path, and the names, order and
+    non-credential values of the query and fragment all survive. They are what names an endpoint and
+    what makes two runs comparable -- and what the second step is deliberately conservative about,
+    since a query is provenance until it is a credential. See `CREDENTIAL_NAMES` for what the rule
+    cannot see; this is a heuristic and no completeness is claimed for it.
+    """
+    parts = urllib.parse.urlsplit(endpoint)
+    netloc = parts.netloc
+    if "@" in netloc:
+        netloc = f"{REDACTED_CREDENTIAL}@{netloc.rpartition('@')[2]}"
+    return urllib.parse.urlunsplit(
+        parts._replace(
+            netloc=netloc,
+            query=_redact_params(parts.query),
+            fragment=_redact_params(parts.fragment),
+        )
+    )
+
+
 @dataclass(frozen=True)
 class Config:
     endpoint: str
@@ -166,7 +254,10 @@ class Config:
     def redacted(self) -> dict:
         """Config safe to write into a bundle. The key never is."""
         return {
-            "endpoint": self.endpoint,
+            # `redact_endpoint`, not `self.endpoint` (#273): the docstring above is about the whole
+            # dict, and the key was never the only credential a config can carry -- a URL with
+            # userinfo put its password in here verbatim while `api_key` was correctly a boolean.
+            "endpoint": redact_endpoint(self.endpoint),
             "model": self.model,
             "api_key": bool(self.api_key),
             "temperature": self.temperature,
@@ -354,7 +445,12 @@ def chat(
             return _to_reply(data, config.model, time.monotonic() - began, attempt)
         except urllib.error.HTTPError as exc:
             detail = _body(exc)
-            last = EndpointError(f"HTTP {exc.code} from {config.url}: {detail}")
+            # `redact_endpoint` here and in the three messages below, not `config.url` (#279):
+            # these strings leave the process -- into logs, and into the `error` field stage
+            # provenance records -- and an endpoint URL can carry a credential in its userinfo or
+            # its query string. The request built above keeps the raw `config.url`, because that
+            # string goes to the endpoint and authentication may live in it.
+            last = EndpointError(f"HTTP {exc.code} from {redact_endpoint(config.url)}: {detail}")
             if exc.code not in RETRY_STATUS:
                 raise last from exc
             if attempt < RETRY_MAX:
@@ -364,7 +460,9 @@ def chat(
         except urllib.error.URLError as exc:
             # Connection refused, DNS failure, timeout. All transient as far as this code can
             # tell, and all indistinguishable to it -- so they are retried and then reported.
-            last = EndpointError(f"{config.url} unreachable: {exc.reason}", connection=True)
+            last = EndpointError(
+                f"{redact_endpoint(config.url)} unreachable: {exc.reason}", connection=True
+            )
             if attempt < RETRY_MAX:
                 time.sleep(RETRY_SLEEP * attempt)
         except TimeoutError as exc:
@@ -377,14 +475,15 @@ def chat(
             # is installed and hanging is exactly what exit 3 means, so the contract the README
             # states was broken by the one failure mode nobody writes a mock for.
             last = EndpointError(
-                f"{config.url} timed out after {config.timeout:g}s: {exc}", connection=True
+                f"{redact_endpoint(config.url)} timed out after {config.timeout:g}s: {exc}",
+                connection=True,
             )
             if attempt < RETRY_MAX:
                 time.sleep(RETRY_SLEEP * attempt)
         except json.JSONDecodeError as exc:
             # A body that is not JSON is a proxy or an error page, not a refusal. Retrying
             # cannot help and retrying a 500-shaped HTML page three times is worse.
-            raise EndpointError(f"{config.url} returned non-JSON: {exc}") from exc
+            raise EndpointError(f"{redact_endpoint(config.url)} returned non-JSON: {exc}") from exc
     raise last if last else EndpointError("no attempt was made")
 
 
