@@ -38,6 +38,7 @@ from pathlib import Path
 
 from . import audit as audit_mod
 from . import lint as lint_mod
+from . import llm
 
 REPORT_NAME = "repair.json"
 PROVENANCE_NAME = "repair-provenance.json"
@@ -243,6 +244,7 @@ def run(
     glossary_path: Path | None = None,
     lint_report_path: Path | None = None,
     stream=None,
+    config: llm.Config | None = None,
 ) -> Report:
     out = stream if stream is not None else sys.stdout
     destination.mkdir(parents=True, exist_ok=True)
@@ -289,7 +291,7 @@ def run(
     (destination / REPORT_NAME).write_text(
         json.dumps(report.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    (destination / PROVENANCE_NAME).write_text(provenance(report) + "\n", encoding="utf-8")
+    (destination / PROVENANCE_NAME).write_text(provenance(report, config) + "\n", encoding="utf-8")
 
     for change in report.changes[:8]:
         out.write(f"           fixed {change.rule} line {change.line}\n")
@@ -299,11 +301,20 @@ def run(
     return report
 
 
-def provenance(report: Report) -> str:
+def provenance(report: Report, config: llm.Config | None = None) -> str:
     return json.dumps(
         {
             "stage": 10,
             "tool": "dyak-repair-v1",
+            # The #77 decision names four stage provenances, and this is the fourth: `endpoint`
+            # is `Config.redacted()`, which carries the seed, so `repair-provenance.json` says
+            # which sample the run was asked for like synth, audit and caption do. There is no
+            # `prompt_sha256` here and that is deliberate (#257): this stage sends no prompt --
+            # it repairs mechanically and declines with a reason -- so a digest of a prompt
+            # would have nothing to cover. `config` is optional because a run without a model
+            # has no sample to describe, which `requires_model: False` below says from the
+            # other side; nothing in the repair decision depends on the endpoint.
+            "endpoint": config.redacted() if config else None,
             "requires_model": False,
             "output": REPAIRED_NOTE,
             "original_kept": True,
