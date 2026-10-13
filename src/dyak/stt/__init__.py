@@ -30,6 +30,7 @@ from pathlib import Path
 
 from .. import exitcodes as ec
 from .. import runner
+from ..llm import redact_endpoint
 from .backends import ENV_BACKEND, BackendInfo, TranscriptionBackend, resolve
 from .core import (
     PROVENANCE_NAME,
@@ -72,6 +73,31 @@ __all__ = [
 def backend(name: str | None = None) -> TranscriptionBackend:
     """The backend this run will use. Called by `doctor` and by the pipeline."""
     return resolve(name)
+
+
+def _recorded_parameters(engine: TranscriptionBackend, timeout: float) -> dict:
+    """What the engine was asked for, safe to write into a bundle (#284).
+
+    The engine's `parameters()` is the request description and stays that: `whispercpp._fields`
+    is factored out of `_multipart` so the two cannot disagree, and both backends label the
+    dict "what this backend sends" (`whispercpp.py:225`, `openai_compat.py:313`). Its `endpoint`
+    is therefore a URL the operator configured verbatim -- which is the defect #284 names: a
+    userinfo password or a query credential in that URL reached `stt-provenance.json`
+    (`openai_compat.py:326`, `whispercpp.py:233` before this) exactly as the LLM endpoint
+    reached four provenance files before #273.
+
+    Redacted here, once, where the record is built, rather than in either backend: the same
+    shape as `llm.Config.redacted()` -- the value that goes on the wire is not the value that
+    goes into a bundle -- and one redactor, `redact_endpoint`, for both layers (#273/#279) so
+    the closed credential-name list, the mask and the misses are the same in stage 3 as in
+    stages 6, 7, 9 and 10. The misses are the same too: a name containing none of those words,
+    a secret in the path, a secret in the host. The request keeps `self.base_url` verbatim
+    (`whispercpp.py:173`, `openai_compat.py:274`); only the record is masked.
+    """
+    parameters = engine.parameters(client_timeout=timeout)
+    if "endpoint" in parameters:
+        parameters["endpoint"] = redact_endpoint(parameters["endpoint"])
+    return parameters
 
 
 def transcribe(
@@ -125,7 +151,7 @@ def transcribe(
         backend=engine.name,
         # Asked of the engine, not reconstructed here: a provenance document that re-derives
         # the parameters reports what the code would say today rather than what was sent.
-        parameters=engine.parameters(client_timeout=timeout),
+        parameters=_recorded_parameters(engine, timeout),
     )
     # ADR-0001 D3, and the reason the interface exists: segments without word timings are not the
     # payload this stage exists to produce.
