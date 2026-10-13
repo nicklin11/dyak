@@ -840,6 +840,25 @@ check(
 )
 
 _env.restore(SAVED_ENV)
+
+# The work directory is removed on both exits, not only on the success path. Nothing reads it
+# after the run: the `DYAK_*` variables that pointed into it (`:357-359`) are restored above, no
+# check prints its path, and the failure line at `:864` lists check *names*. A directory kept for
+# inspection would therefore have no reader -- which is the difference from `tests/test_e2e.py`,
+# where a failing run keeps the bundle whose path it printed at `:676-678`. What it costs to keep
+# it anyway is 32 KiB of tmpfs blocks per run (`du -sk`; 2374 B apparent, measured on this host),
+# once per full-suite run, which is the accumulation #294 is about.
+#
+# `shutil.rmtree` and not `tempfile.TemporaryDirectory`: `_tmp` is created at `:350` and read
+# through `os.environ` by checks hundreds of lines below, so its lifetime is the module's rather
+# than a `with` block's. A removal that fails is reported instead of swallowed -- "could not be
+# removed" is the phrase `src/dyak/workspace.py:70` and `tests/test_stages.py:383` use for the same
+# situation, and silence would be the leak with a false report on top.
+try:
+    shutil.rmtree(_tmp)
+except OSError as exc:
+    print(f"\nserve suite work directory could not be removed: {_tmp} ({exc})", file=OUT)
+
 print(file=OUT)
 if failures:
     print(f"FAILED: {len(failures)} -> {failures}", file=OUT)
