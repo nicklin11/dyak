@@ -725,12 +725,18 @@ check(
     f"{_layers['vault']} {_layers['llm_endpoint']} {_layers['llm_model']} {_layers['terms_dir']}",
 )
 
-# The three credential keys are the whole secret set: a key added later must not become
-# printable because nobody remembered to add it here.
+# The three credential keys are the whole secret set. The literal pin names them; the naming
+# assertion is the part that keeps a *later* credential from becoming printable -- every honoured
+# key ending in `_key` must be in SECRET_KEYS, so adding `new_api_key` to the surface fails here
+# instead of printing its value. A credential named outside that convention (`*_token`) would
+# still slip through: the convention is the property this can check, and the alternative was a
+# comment claiming a guard the assertion did not provide.
 check(
-    "the listing redacts exactly the three credential keys",
-    settings.SECRET_KEYS == {"llm_key", "vlm_key", "openai_key"},
-    repr(sorted(settings.SECRET_KEYS)),
+    "the listing redacts exactly the three credential keys, and every `*_key` key is one of them",
+    settings.SECRET_KEYS == {"llm_key", "vlm_key", "openai_key"}
+    and {k for k in settings.HONOURED_SETTINGS if k.endswith("_key")} == settings.SECRET_KEYS,
+    f"secrets={sorted(settings.SECRET_KEYS)} "
+    f"key_named={sorted(k for k in settings.HONOURED_SETTINGS if k.endswith('_key'))}",
 )
 
 use_file("")
