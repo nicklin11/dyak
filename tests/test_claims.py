@@ -87,6 +87,20 @@ check(
     f"IMPLEMENTED={gst.IMPLEMENTED}, pipeline reports {len(reported)}",
 )
 
+# `REMAINING_NOTE` outlived its own obituary: `1123489` turned the run's "stages 0-N completed;
+# <name>" line into the constant `PROCESS_INCOMPLETE`, and `21af2fc` -- the commit that built
+# stage 12 -- deleted that constant and rewrote the name's value, which left it defined, exported
+# from `pipeline` and read by nothing (#215). With `IMPLEMENTED = 12` and no gap above, the state
+# it described cannot occur: a "not built yet" line today is `_pending` for a *subcommand*
+# (`cli.py:136-142`), not a stage. The name is gone; this is what catches its return, because a
+# re-added constant that nothing prints is exactly the orphan #215 was.
+STAGES = (REPO / "src" / "dyak" / "stages.py").read_text(encoding="utf-8")
+check(
+    "no orphaned remaining-stages constant in stages.py or pipeline.py",
+    "REMAINING_NOTE" not in STAGES and "REMAINING_NOTE" not in PIPELINE,
+    "a name nothing prints is back; either print it at the run's end line or delete it (#215)",
+)
+
 # The README status table, *if it exists*, must have one row per stage plus doctor, and no
 # stage number may appear twice. A duplicate is how "6" ended up on two rows.
 #

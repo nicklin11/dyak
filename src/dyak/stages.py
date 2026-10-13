@@ -23,8 +23,6 @@ IMPLEMENTED = 12
 #: software exists.
 FIRST_STAGE = 1
 
-REMAINING_NOTE = "every stage in ADR-0001 § The pipeline is built"
-
 
 def progress_line(stream, unit: str, done: int, total: int) -> None:
     """One continuation line: `unit done/total`, written before that unit's blocking call.
