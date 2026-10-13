@@ -13,9 +13,16 @@ never warned about (`audit.py:189`).
 The four guards in `repair.DRIFT_GUARDS` are the decidable consequences of that ambiguity,
 and this file pins each one against the sentence it came from. The note is user data and
 cannot be a fixture, so the sentences below are the measured fragments -- the ones quoted in
-#287 and in the decision -- driven through the real `repair.repair` with the real glossary
-rows (`aliases:`/`forms:` bullets lowercased, the canonical the note's heading), no model and
-no settings.
+#287 and in the decision -- driven through the real `repair.repair`, no model and no settings.
+
+Every glossary row below is written in the derived glossary's format -- the lowercased
+`aliases:`/`forms:` bullet on the left, the note's heading on the right -- but only some of them
+are rows of that derived set. The derived ones are `прямые методы`, `прямые`, `прямых методов`,
+`функционала`, `функционал`, `градиент`, `градиента`, `ilqf` and `пантрягина` -> `Принцип
+максимума Понтрягина`; the rest are marked hand-built where they are defined. The synthetic
+`Пантрягин` -> `Понтрягин (П.С. Понтрягин)` pair is hand-built: the derived set's Понтрягин row
+is the `пантрягина` one above. The `С++17`/`c++17` family is hand-built too, exactly as the
+issue builds it.
 
 `tests/test_stages.py` still owns the #277 boundary; this file owns the corpus shape, which is
 why it is separate (`tests/test_claims.py` requires it to be wired into ci.yml).
@@ -59,7 +66,8 @@ def warned(text: str, entries: tuple[tuple[str, str], ...]) -> list[int]:
 
 
 # The real note's sentences, as #287 and the decision quote them: 299, 107 and 454 are the
-# three the issue measured, and the rows are the ones the derived glossary holds.
+# three the issue measured. Those three rows are in the derived set (a lowercased `mscs/_terms`
+# bullet each, the note's heading as canonical, no hand-editing).
 NOTE_299 = "Исходная непрерывная постановка, от которой стартуют все прямые методы:"
 NOTE_107 = (
     "Смысловые части функционала (по объяснению лектора): какая-то из частей может отсутствовать."
@@ -123,7 +131,8 @@ check(
 )
 
 # G3 -- duplication, the report's headline shape, needs no morphology and so binds where G2
-# cannot reach: a capitalised or Latin variant is still a word the canonical repeats.
+# cannot reach: a capitalised or Latin variant is still a word the canonical repeats. The row is
+# hand-built -- `С++17` is the issue's own example and is not in the derived set.
 check(
     "G3 declines a replacement that would repeat the neighbouring word (#287)",
     repaired("Стандарт С++17 и стандарт С++20\n", (("С++17", "стандарт C++17"),))[0]
@@ -133,6 +142,7 @@ check(
 
 # G4 -- the canonical merely wraps what is written, so substituting adds a word rather than
 # repairing one. Note the limit this guard leaves: the Cyrillic `С` spelling is *not* folded.
+# The rows here and in the check below are the same hand-built `С++17`/`c++17` family.
 check(
     "G4 declines a canonical that merely wraps the match (#287)",
     repaired("компилятор c++17 собирает проект\n", (("c++17", "стандарт c++17"),))[0]
@@ -143,7 +153,8 @@ check(
     "and the mixed-script spelling still passes G4, as the documented limit says (#287)",
     repaired("компилятор С++17 собирает проект\n", (("С++17", "стандарт C++17"),))[0]
     == "компилятор стандарт C++17 собирает проект\n",
-    "norm('С++17') with a Cyrillic С is 'с17', not a substring of 'стандартc17'",
+    "repair._fold_shape (repair.py:141): 'С++17' with a Cyrillic С -> 'с17', "
+    "not a substring of 'стандартc17'",
 )
 
 # The record must name the first ACCEPTED occurrence: before the guards, 3 of the 8 records on
@@ -151,6 +162,9 @@ check(
 # audit. Here the first occurrence is declined and the second accepted, so a search-based
 # record would name the declined one and come back empty.
 pair = "Считаем пантрягин, потом Пантрягин и ilqf.\n"
+# `ilqf -> iLQR` is a derived row; `пантрягин -> Понтрягин` is hand-built (the derived set has the
+# genitive `пантрягина`, not this nominative variant), which is what makes the first occurrence
+# declined and the second accepted.
 pair_rows = (("пантрягин", "Понтрягин"), ("ilqf", "iLQR"))
 fixed, changes = repaired(pair, pair_rows)
 check(
@@ -160,6 +174,8 @@ check(
     and all(c.before != c.after for c in changes),
     f"fixed={fixed.strip()!r} changes={[(c.line, c.before, c.after) for c in changes]}",
 )
+# The canonical is the derived row's; the variant is the nominative spelling, which the derived
+# set does not carry, so the row as written is hand-built.
 check(
     "a declined occurrence produces no change record at all (#287)",
     repaired("Считаем пантрягин и всё.\n", (("пантрягин", "Принцип максимума Понтрягина"),))[1]
@@ -167,8 +183,9 @@ check(
     "a lowercase Cyrillic form is declined, so nothing was substituted and nothing recorded",
 )
 
-# The class the rule exists for must still fire on the real rows: a mangled term whose form is
-# not a correct Russian word (capitalised / Latin) and whose canonical is absent from the line.
+# The class the rule exists for must still fire: a mangled term whose form is not a correct
+# Russian word (capitalised / Latin) and whose canonical is absent from the line. `ilqf -> iLQR`
+# is a derived row; the synthetic `Пантрягин -> Понтрягин (П.С. Понтрягин)` pair is hand-built.
 check(
     "the drift the rule exists for still fires: Пантрягин and ilqf (#287)",
     repaired(
@@ -220,6 +237,7 @@ check(
 # The case-only difference is now declined as well: `check_term_drift` is silent about it
 # (`audit.py:189` -- the canonical is on the line, case-insensitively), so the writer applying
 # the same precondition cannot be bolder than the report. Pinned, not left to be rediscovered.
+# The row is hand-built: the derived set has no `норма` entry (this is `test_stages.py`'s pair).
 check(
     "a case-only difference is declined by G1, exactly as the audit's silence says (#287)",
     repaired("Здесь норма в начале строки.\n", (("норма", "НОРМА"),))
