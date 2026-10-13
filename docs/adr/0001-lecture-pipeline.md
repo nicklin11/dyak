@@ -359,9 +359,9 @@ time it was raised. A failing branch does not cancel its sibling, which is what 
 "an artefact that is not published dies with the work dir" true per branch: with the STT
 endpoint down, the bundle still holds the frames and their gate, and stage 6 is never entered.
 
-**Measured, 2026-10-12, on `1_lecture_OCS.mp4`** (4520 s, AV1 1080p — the run the issue quotes),
-two arms back to back on one host with the same endpoints and the same source, each stopped once
-stage 6 had published because stages 7-12 are unchanged:
+**Measured, 2026-10-12, on `1_lecture_OCS.mp4`** (4520 s, AV1 1080p), two arms back to back on
+one host with the same endpoints and the same source, each stopped once stage 6 had published
+because stages 7-12 are unchanged:
 
 | stage | parallel | `DYAK_SERIAL=1` |
 |---|---:|---:|
@@ -378,8 +378,16 @@ hidden. The branches share the CPU while they overlap, which is why the saving i
 than the shorter branch's whole duration. Of the 128 files the two arms published, 123 are
 byte-identical. The five that differ are the two clock files, `transcript.json` (which records
 the per-run work-dir path in `wav`), and `captions.json`/`caption-provenance.json` — the vision
-model's own non-determinism, not the fork: the stored pre-change run of the same source differs
-from either arm in exactly those fields, with the same frame order and the same gate verdicts.
+model's own non-determinism, not the fork: the pre-change run of the same source differs from
+either arm in exactly those fields (225 differing leaves, same frame order, same gate verdicts),
+and that run is the bundle beside the lecture,
+`/home/existingloner/Videos/lectures/Оптимальные СУ/` — `timings.json` `dyak-timings-v1`, total
+1546.3 s; `run-state.json` run_id `2026-10-12T02:55:29+00:00-e47fbbda-1_lecture_OCS`,
+02:55:29 → 03:21:15, `completed`. `/tmp/dyak87-real` is a *different* pre-change run of the same
+source — glimpse-era (`glimpse-timings-v1`, `glimpse-stt-v1`) and cache-warm
+(`caption: {captioned: 0, reused: 57}`), differing from the arms in more places (463 leaves,
+including fields this code no longer writes the same way) — so it measures the two code eras
+rather than this fork.
 
 Measured with the endpoint refusing `POST /inference` (a stub that answers the stage-0 probe
 with 404, the "no /health to answer" case of `stt/whispercpp.py:129`, and refuses the
