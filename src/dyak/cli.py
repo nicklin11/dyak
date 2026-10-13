@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Callable, TextIO
 
 from . import audit as dya
 from . import deps as dyd
@@ -21,6 +22,7 @@ from . import repair as dyr
 from . import runner
 from . import synth as dysy
 from . import settings as dys
+from . import web as dyweb
 from .deps import PROCESS_REQUIRES, Check, run_all, worst_code
 from .workspace import WorkDir
 
@@ -140,7 +142,12 @@ def _pending(name: str) -> int:
     return ec.USAGE
 
 
-def _process(args: argparse.Namespace) -> int:
+def process(
+    args: argparse.Namespace,
+    *,
+    stream: TextIO | None = None,
+    on_result: Callable[[dyp.RunResult], None] | None = None,
+) -> int:
     """Stages 1-12: probe -> audio -> stt -> frames -> quality -> caption -> synth -> lint
     -> audit -> repair -> link -> report.
 
@@ -153,6 +160,19 @@ def _process(args: argparse.Namespace) -> int:
     Content verdicts take precedence over a late vault-export failure: 5 (audit errors) >
     4 (soft frames) > 6 (could not verify artefacts) > 1 (degraded note) > 3 (vault export
     failed) > 0. Every message is printed regardless of which code comes out.
+
+    Two keyword arguments exist for the web view (#242 M1), and neither changes the CLI's own
+    call, which passes neither:
+
+      * `stream` is forwarded to `pipeline.run(..., stream=stream)` unchanged. That parameter is
+        the sink every stage already writes its `[n/12]` lines to (`pipeline.py:503`), so a
+        caller that wants to show a run's own output passes a `write`/`flush` object and gets
+        exactly the lines the shell would have seen -- no second progress mechanism, and nothing
+        for the caller to parse. `None` leaves `pipeline.run`'s default, `sys.stdout`.
+      * `on_result` is called with the `RunResult` the moment the run returns, before the vault
+        export. The web view needs the note and the bundle path, and taking them from the run's
+        own result is the one way that cannot disagree with what the run wrote (#242 section 8);
+        reading them back out of the log would be parsing prose.
     """
     if not args.path:
         print("dyak: process needs a recording to work on.", file=sys.stderr)
@@ -202,6 +222,7 @@ def _process(args: argparse.Namespace) -> int:
             glossary_path=getattr(args, "glossary", None),
             terms_dir=getattr(args, "terms_dir", None),
             vault_path=getattr(args, "vault_path", None),
+            stream=stream,
         )
     except runner.DependencyError as exc:
         work.retain(exc.message)
@@ -221,6 +242,8 @@ def _process(args: argparse.Namespace) -> int:
         raise
     else:
         work.release()
+        if on_result is not None:
+            on_result(result)
 
     print()
     print(f"  source     {result.source}")
@@ -733,7 +756,62 @@ def build_parser() -> argparse.ArgumentParser:
             "unlinked and the stage says so."
         ),
     )
-    p_process.set_defaults(fn=_process)
+    p_process.set_defaults(fn=process)
+
+    # #242 M1: the local web view. Registered here rather than as a separate entry point so the
+    # page runs the *same* `process` this file does -- the same exit-code ladder, work-dir policy,
+    # bundle and vault export -- instead of a second implementation that drifts from the CLI.
+    p_serve = sub.add_parser(
+        "serve",
+        help="serve a local web page that processes one lecture",
+        description=(
+            "Serve a loopback-only page that lists the recordings under --root, runs one "
+            "lecture at a time through the same code `process` runs, and shows that run's own "
+            "output. The page URL carries a per-start token and every request must present it; "
+            "there is no anonymous endpoint. --bind is the opt-in for reaching the page from "
+            "another machine, and it prints what a peer can then do."
+        ),
+    )
+    p_serve.add_argument(
+        "--root",
+        metavar="DIR",
+        help=(
+            "directory whose recordings the page may list and process. A requested file must "
+            "resolve inside it, symlinks included (default: the current directory)"
+        ),
+    )
+    p_serve.add_argument(
+        "--port",
+        metavar="N",
+        type=int,
+        default=dyweb.DEFAULT_PORT,
+        help=f"TCP port to listen on (default: {dyweb.DEFAULT_PORT})",
+    )
+    p_serve.add_argument(
+        "--bind",
+        metavar="ADDR",
+        default=dyweb.LOOPBACK,
+        help=(
+            f"address to listen on (default: {dyweb.LOOPBACK}, loopback only). Any other "
+            "address, a tailnet address included, exposes the page to whatever can reach that "
+            "interface, so the token stays required and a warning is printed"
+        ),
+    )
+    p_serve.add_argument(
+        "--token",
+        metavar="TOKEN",
+        help=(
+            "pin the token instead of generating one per start, so the page URL can be "
+            "bookmarked. The token is a capability: it lets its holder process a file under "
+            "--root while the server runs"
+        ),
+    )
+    p_serve.add_argument(
+        "--open",
+        action="store_true",
+        help="open the page in this machine's browser once the server is listening",
+    )
+    p_serve.set_defaults(fn=dyweb.serve)
 
     p_audit = sub.add_parser(
         "audit",
