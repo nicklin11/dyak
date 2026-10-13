@@ -329,18 +329,86 @@ check(
 
 # The word-level half of the same section (#259). A word scan is right for *this* invariant
 # and wrong for the one above: the record that justifies the word lives in `docs/adr/`, so
-# what remains in `src/` must name the variables to set and nothing about this host.
+# what remains in the product must name the variables to set and nothing about this host.
+#
+# WHICH SURFACES, AND WHY THE PATTERN DIFFERS (#259, t228). The first version of this check
+# walked only `src/dyak`, so `docs/running.md` and `tests/` were pinned by nothing at all:
+# restoring the three lines #259 removed from `running.md` (`:24`, `:51`, `:191` at 069df57)
+# left the gate green -- 1373 PASS / 0 FAIL, measured. Two halves now, each with the pattern its
+# surface can carry, each naming file:line in its failure text:
+#   * CENSUS over `src/dyak` and `docs/running.md` -- `LORE_SURFACES` below is the whole file
+#     list. Neither surface keeps a legitimate occurrence, so any hit is the lore returning.
+#   * PHRASES over `tests/*.py` -- the glob in the list comprehension below is the whole file
+#     list. `tests/` does keep the bare terms: the absence assertions at
+#     `tests/test_doctor.py:210-211` and `:816`, the pre-#44 history at `:189`, `:203`, `:353`,
+#     `:396`, `:635`, `:641`, `:645`, and the arbitrary fixture URL at
+#     `tests/test_stages.py:3564`/`:3568`, which is a URL a stage line is rendered from and not
+#     one of the removed sentences -- so a census there would fail on a correct tree.
+#   * `docs/adr/` is the decision record, excluded BY PATH: neither file list can reach it, so
+#     the exclusion holds by construction rather than by a filter that could drift. It is
+#     load-bearing for the phrase set too: `whisper-idle-stop.timer` is base=7 -> head=1, the
+#     survivor being `docs/adr/0001-lecture-pipeline.md:1145` (the other head hit is this
+#     comment). `graphify-out/` is generated output that no list above scans: a map rebuilt from
+#     clean source is clean by construction.
 LORE = re.compile(r"shipboard|100\.64\.0\.1|10301|whisper-idle-stop", re.I)
+LORE_SURFACES = (
+    *sorted((REPO / "src" / "dyak").rglob("*.py")),
+    REPO / "docs" / "running.md",
+)
 word_offenders = [
     f"{p.relative_to(REPO).as_posix()}:{i}"
-    for p in sorted((REPO / "src" / "dyak").rglob("*.py"))
+    for p in LORE_SURFACES
     for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
     if LORE.search(line)
 ]
 check(
-    "no host-specific STT lore in shipped code (#259)",
+    "no host-specific STT lore in shipped code or the running doc (#259)",
     not word_offenders,
     "; ".join(word_offenders),
+)
+
+# The sentence-level half, for the surface that legitimately keeps the bare terms (#259, t228).
+# Four fragments, each quoted from the text #259 removed, each written here in two halves on
+# purpose: a pin whose source spells its own needle would be its first offender, and the
+# alternative -- excluding a line range or this whole file -- would blind the surface that
+# produced the defect. Base -> head counts, re-measured rather than copied, with where each one
+# lived at 069df57, so a reader can re-derive the list instead of trusting it:
+#   * 1 -> 0  the doctor comment's opening clause -- tests/test_doctor.py:248
+#   * 1 -> 0  its wrapped half, the one that named the proxy address -- tests/test_doctor.py:249
+#   * 4 -> 0  the reclaim clause -- src/dyak/deps.py:170, stt/backends.py:94, stt/whispercpp.py:57
+#             and docs/running.md:51
+#   * 1 -> 0  the env-table sentence that named the supported target -- src/dyak/stt/backends.py:92
+# The longer sentence the review first proposed -- the first of those plus `supported` -- is NOT
+# a valid pin: it is base=0 as well as head=0, because tests/test_doctor.py:248-249 wraps it
+# across two comment lines, so a pin on it could never fire. Matching is per line, with no
+# whitespace normalisation, because normalising would also match the rationale this fix keeps on
+# purpose: `wake-on-first-request` and `spent waiting for the wake` wrap the same way, at
+# `src/dyak/stt/whispercpp.py:113-116` and `tests/test_doctor.py:251-253`.
+#
+# LIMIT, stated as a limit: per-line fragments catch a VERBATIM re-introduction, not a re-wrapped
+# or re-worded one -- that is a human edit, and no formatter produces it. The pin stays closed
+# under the formatter `tools/check.sh` uses: ruff 0.15.20 formats this file to byte-identical
+# text (`format --check` exits 0), and a forced run over the 069df57 copies of
+# `src/dyak/stt/backends.py`, `src/dyak/stt/whispercpp.py` and `tests/test_claims.py` left every
+# comment line and every file unchanged -- it re-splits code lines, it does not reflow prose.
+# A deliberate re-wording therefore is not caught, which is the limit above; a term in the census
+# cannot even be split, so that half is immune to it.
+REMOVED_PHRASES = (
+    "the endpoint #95 " + "names as",
+    "supported -- the shipboard " + "proxy on 100.64.0.1:10301",
+    "reclaimed after " + "300 s by",
+    "the supported target is the " + "shipboard proxy",
+)
+phrase_offenders = [
+    f"{p.relative_to(REPO).as_posix()}:{i}"
+    for p in sorted((REPO / "tests").rglob("*.py"))
+    for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+    if any(phrase in line for phrase in REMOVED_PHRASES)
+]
+check(
+    "the sentences #259 removed stay removed in tests (#259)",
+    not phrase_offenders,
+    "; ".join(phrase_offenders),
 )
 
 # --- 6. paths named in messages exist ------------------------------------------
