@@ -777,26 +777,66 @@ check(
     f"in running.md, absent from code: {ghosts}",
 )
 
-# Every subcommand and flag registered in `cli.py` must be named in `running.md`,
-# and the other way around an unregistered name must not sneak into the table.
-registered: set[str] = set()
+# Every subcommand and flag registered in `cli.py` must be named in `running.md`, and a flag
+# the file names must be registered. A name is not documentation: #248, where the test was
+# `f not in RUNNING` -- a substring of the whole file -- so `dyak settings` passed on the
+# prose mentions of the settings layer while the command itself had no section, and
+# `term link`, `term index` and `term check` passed on the word "term".
+#
+# The documented form is the one the file uses: a heading `## `dyak X``, or a usage line
+# `dyak ... X` -- that is how `term`'s three children are documented, under their parent's
+# section. A mention inside a sentence does not count; writing one where a command belongs
+# is a deliberate act, which is the point of the check.
+registered_subs: set[str] = set()
+registered_flags: set[str] = set()
 for node in ast.walk(CLI_TREE):
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
         if node.func.attr == "add_parser" and node.args and isinstance(node.args[0], ast.Constant):
-            registered.add(node.args[0].value)
+            registered_subs.add(node.args[0].value)
         if (
             node.func.attr == "add_argument"
             and node.args
             and isinstance(node.args[0], ast.Constant)
         ):
             if str(node.args[0].value).startswith("--"):
-                registered.add(node.args[0].value)
+                registered_flags.add(node.args[0].value)
+registered = registered_subs | registered_flags
 
-absent_from_docs = sorted(f for f in registered if f not in RUNNING)
+# argparse registers `--help` on every parser without an `add_argument` call, so it is a flag
+# a reader may legitimately find in the file without it being registered here (#248).
+IMPLICIT_FLAGS = {"--help"}
+# Every `--flag` token the file names, so both directions read the file the same way.
+doc_flags = set(re.findall(r"--[a-z][a-z0-9-]*", RUNNING))
+
+
+def _named_as_command(name: str) -> bool:
+    """Is `name` used as a command in running.md, rather than appearing as a word?"""
+    return (
+        re.search(
+            rf"(?m)^(?:#+\s*)?`?dyak(?:[ \t]+[A-Za-z][\w-]*)*[ \t]+{re.escape(name)}\b",
+            RUNNING,
+        )
+        is not None
+    )
+
+
+undocumented = sorted(n for n in registered_subs if not _named_as_command(n))
 check(
-    "every cli.py subcommand and flag is documented in docs/running.md",
-    not absent_from_docs,
-    f"registered, not in running.md: {absent_from_docs}",
+    "every cli.py subcommand is named in docs/running.md as a command",
+    not undocumented,
+    f"registered, not named as a command in running.md: {undocumented}",
+)
+unnamed_flags = sorted(f for f in registered_flags if f not in doc_flags)
+check(
+    "every cli.py flag is named in docs/running.md",
+    not unnamed_flags,
+    f"registered, not in running.md: {unnamed_flags}",
+)
+ghost_flags = sorted(doc_flags - registered_flags - IMPLICIT_FLAGS)
+check(
+    "docs/running.md names no flag the cli does not register",
+    not ghost_flags,
+    f"in running.md, not registered in cli.py: {ghost_flags}",
 )
 check(
     "the registry the cli check runs against is populated",

@@ -125,6 +125,26 @@ Run it before a run, not after a failure. Both model roles are probed: the text 
 the vision endpoint stage 6 captions with when `DYAK_VLM_*` is set. An unset vision role is
 reported, not failed — stage 6 falls back to the text pair.
 
+## `dyak settings`
+
+```
+dyak settings [--vault-path DIR] [--workdir DIR] [--output-dir DIR] [--terms-dir DIR]
+```
+
+Prints every key the settings file honours, the value in effect, the layer that supplied it
+(`flag > env > file > default`) and the built-in default. API keys are redacted. A listing is
+not a failure: it exits 0.
+
+The flags resolve one key each, as if the run's own flag had been passed, so the value it shows
+is the one a run would get:
+
+| flag | resolves |
+|---|---|
+| `--vault-path DIR` | the `vault` key |
+| `--workdir DIR` | the `workdir` key |
+| `--output-dir DIR` | the `output_dir` key |
+| `--terms-dir DIR` | the `terms_dir` key |
+
 ## `dyak process`
 
 ```
