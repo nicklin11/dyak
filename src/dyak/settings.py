@@ -149,19 +149,35 @@ def _upload_default() -> str:
     return str(openai_compat.DEFAULT_MAX_UPLOAD_BYTES)
 
 
+def _concurrency_default() -> str:
+    """`llm.DEFAULT_CONCURRENCY`, for the reason `_vault_default` gives.
+
+    `llm.py:526` resolves this key with `default=str(DEFAULT_CONCURRENCY)`, so the listing reads
+    that constant rather than restating the number: the same value written twice is the drift
+    this table is checked against (#250).
+    """
+    from . import llm
+
+    return str(llm.DEFAULT_CONCURRENCY)
+
+
 #: The built-in default of every honoured key: the value the key has when no flag, no
 #: environment variable and no file entry supplies one. The values are callables because two
 #: of them are computed -- `vault` sits under the user's home and `workdir` is `$TMPDIR` -- and
-#: a listing must print the value a run would use, not the expression that produces it.
+#: because the ones that name a constant another module owns import it inside the call, which is
+#: the only way a module the owner imports can name it (`_vault_default`).
 #:
 #: Declared rather than derived. The defaults live at the `resolve()` call sites (`deps.py:225`,
 #: `workspace.py:48`, `pipeline.py:378`, `pipeline.py:718`, `stt/backends.py:129`,
-#: `stt/openai_compat.py:124`) and enumerating the surface must not run a pipeline, so this is a
-#: second statement of them; `tests/test_settings.py` re-reads those call sites and fails if an
-#: entry here disagrees with the default the code passes. That is what keeps the table a checked
-#: claim instead of a comfortable lie -- the drift `NUMERIC_SETTINGS` above exists to avoid.
+#: `stt/openai_compat.py:124`, `llm.py:526`) and enumerating the surface must not run a pipeline,
+#: so this is a second statement of them; `tests/test_settings.py` re-reads those call sites and
+#: fails if an entry here disagrees with the default the code passes, and fails when this table
+#: and `HONOURED_SETTINGS` are not the same set -- the drift that turned a clean merge into a
+#: `KeyError` on a first run (#250). That is what keeps the table a checked claim instead of a
+#: comfortable lie -- the drift `NUMERIC_SETTINGS` above exists to avoid.
 SETTING_DEFAULTS: dict[str, Callable[[], str | None]] = {
     settings_key(BBOX_SOURCE_ENV): lambda: "geometric",
+    settings_key(LLM_CONCURRENCY_ENV): _concurrency_default,
     settings_key(LLM_ENDPOINT_ENV): _no_default,
     settings_key(LLM_KEY_ENV): _no_default,
     settings_key(LLM_MODEL_ENV): _no_default,
@@ -550,6 +566,11 @@ def describe(flags: Mapping[str, str | None] | None = None) -> list[Setting]:
     resolved = [
         resolve(
             BBOX_SOURCE_ENV, flag=flags.get(BBOX_SOURCE_ENV), default=default_for(BBOX_SOURCE_ENV)
+        ),
+        resolve(
+            LLM_CONCURRENCY_ENV,
+            flag=flags.get(LLM_CONCURRENCY_ENV),
+            default=default_for(LLM_CONCURRENCY_ENV),
         ),
         resolve(
             LLM_ENDPOINT_ENV,

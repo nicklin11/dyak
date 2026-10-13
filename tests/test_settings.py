@@ -42,7 +42,7 @@ from dyak import pipeline as dyp  # noqa: E402
 from dyak import runner  # noqa: E402
 from dyak import settings  # noqa: E402
 from dyak import workspace as dyw  # noqa: E402
-from dyak.llm import Config  # noqa: E402
+from dyak.llm import DEFAULT_CONCURRENCY, Config  # noqa: E402
 from dyak.stt import backends as sttb  # noqa: E402
 from dyak.stt import openai_compat, whispercpp  # noqa: E402
 
@@ -554,6 +554,25 @@ check(
     f"read={_string_read!r} err={_string_err.getvalue()!r}",
 )
 
+# --- 6b. the declared table covers the honoured set (#250) ---------------------
+# `HONOURED_SETTINGS` is derived from this module's own constants, so it grows by itself, while
+# `SETTING_DEFAULTS` is hand-written. `settings_template` walks the honoured keys and looks each
+# one up, so a key in the first set and not the second is a `KeyError` on a *first run* -- which
+# is what a clean merge of #247 with #246 (DYAK_LLM_CONCURRENCY) produced, and what no check here
+# saw. The two sets have to be equal: a constant cannot arrive without a declared default, and a
+# default cannot outlive its key.
+#
+# Checked here, before the first-run write below, so a drift is reported by name instead of
+# aborting the suite with the very `KeyError` this check exists to explain.
+check(
+    "every honoured key is declared in SETTING_DEFAULTS, and nothing else is (#250)",
+    set(settings.SETTING_DEFAULTS) == settings.HONOURED_SETTINGS,
+    f"honoured but undeclared: "
+    f"{sorted(settings.HONOURED_SETTINGS - set(settings.SETTING_DEFAULTS))}; "
+    f"declared but not honoured: "
+    f"{sorted(set(settings.SETTING_DEFAULTS) - settings.HONOURED_SETTINGS)}",
+)
+
 # --- 6. a first run still writes the one key it has always written --------------
 use_file("")
 written = settings.write_settings(Path("/first/run/vault"))
@@ -574,13 +593,14 @@ check(
 PKG = REPO / "src" / "dyak"
 SETTINGS_TREE = ast.parse((PKG / "settings.py").read_text(encoding="utf-8"))
 
-#: The three defaults that are computed rather than literal, keyed by the expression the call
+#: The four defaults that are computed rather than literal, keyed by the expression the call
 #: site passes (`ast.unparse`). Anything else that is not a string literal is reported as
-#: unpinned, so a fourth computed default cannot be added without being read back here.
+#: unpinned, so a fifth computed default cannot be added without being read back here.
 COMPUTED_DEFAULTS: dict[str, Callable[[], str | None]] = {
     "str(DEFAULT_VAULT)": lambda: str(dyd.DEFAULT_VAULT),
     "tempfile.gettempdir()": tempfile.gettempdir,
     "str(DEFAULT_MAX_UPLOAD_BYTES)": lambda: str(openai_compat.DEFAULT_MAX_UPLOAD_BYTES),
+    "str(DEFAULT_CONCURRENCY)": lambda: str(DEFAULT_CONCURRENCY),
 }
 
 
