@@ -202,13 +202,19 @@ def check_delimiters(markdown: str, report: Report) -> None:
     # Reporting both when one line is already unterminated would count a single defect twice
     # and leave a reader with two numbers and no way to tell which to fix.
     stripped = text.replace("$$", "")
-    per_line = [number for number, line in lines if len(re.findall(r"(?<!\\)\$", line)) % 2]
-    if per_line:
+    # The PAIRS, not the numbers: `lines` is a fence-filtered list indexed by POSITION, while
+    # its numbers are DOCUMENT lines (_outside_code drops every fenced line). Re-indexing it
+    # with a document number was #265 -- on the recorded note (461 of 487 lines outside
+    # fences) a document line 432 finding quoted document line 458's text, and one at document
+    # line 465 raised IndexError out of `lint.run`, which `pipeline.py:893` calls unguarded.
+    odd = [(number, line) for number, line in lines if len(re.findall(r"(?<!\\)\$", line)) % 2]
+    if odd:
+        first_number, first_line = odd[0]
         report.add(
             "math/inline-unbalanced",
             ERROR,
-            per_line[0],
-            f"odd `$` on {len(per_line)} line(s), first: {lines[per_line[0] - 1][1].strip()[:70]}",
+            first_number,
+            f"odd `$` on {len(odd)} line(s), first: {first_line.strip()[:70]}",
         )
     elif stripped.count("$") % 2:
         report.add(
