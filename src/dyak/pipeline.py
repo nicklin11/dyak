@@ -251,8 +251,14 @@ def write_run_state(
     reports: list[StageReport],
     outcome: str,
     detail: str,
+    error: str | None = None,
 ) -> Path:
     """The run's identity and outcome, into the bundle. Best effort, like `write_timings`.
+
+    `detail` is the category a person or a script branches on (`completed` / `interrupted` /
+    `failed`, plus the exception's class) and `error` is the reason verbatim, so a bundle can
+    still say which file failed once the terminal scrollback and the work dir are gone (#271);
+    both are best effort.
 
     `stage_reached` is the stage that was *running* when the run ended, not the last one that
     finished: `reports` holds completed stages, so on an interrupt during stage 9 the last
@@ -271,6 +277,7 @@ def write_run_state(
                     "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
                     "outcome": outcome,
                     "detail": detail,
+                    "error": error,
                     "stages_completed": completed,
                     "stage_reached": min(
                         (completed[-1] + 1) if completed else 1, stages.IMPLEMENTED
@@ -504,7 +511,7 @@ def run(
     reports: list[StageReport] = []
     started_at = datetime.now(UTC).isoformat(timespec="seconds")
     run_id = run_id_of(source, started_at)
-    outcome, detail = "failed", "the run ended without recording an outcome"
+    outcome, detail, error = "failed", "the run ended without recording an outcome", None
     try:
         result = _stages(
             source,
@@ -522,14 +529,18 @@ def run(
     except KeyboardInterrupt as exc:
         # Ctrl-C is not a failure of the pipeline, and the exit code says so (130). The
         # bundle still has to say the run stopped, or the next reader cannot tell.
-        outcome, detail = "interrupted", type(exc).__name__
+        outcome, detail, error = "interrupted", type(exc).__name__, str(exc) or None
         raise
     except BaseException as exc:
         # Every other exception, recorded and re-raised unchanged: the caller owns exit codes.
-        outcome, detail = "failed", type(exc).__name__
+        # `detail` stays the category a script branches on; `error` is the reason verbatim, and
+        # `str(exc) or None` because an exception with no message -- the interrupt above, and
+        # any bare `raise X` -- would otherwise record `""`, which reads as a missing field
+        # rather than as "it did not say why" (#271).
+        outcome, detail, error = "failed", type(exc).__name__, str(exc) or None
         raise
     else:
-        outcome, detail = "completed", ""
+        outcome, detail, error = "completed", "", None
         return result
     finally:
         write_timings(bundle, reports)
@@ -541,6 +552,7 @@ def run(
             reports=reports,
             outcome=outcome,
             detail=detail,
+            error=error,
         )
 
 
