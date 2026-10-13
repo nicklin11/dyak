@@ -54,8 +54,10 @@ from . import exitcodes as ec
 #: the opt-in for anything else, and it is a decision the design names rather than a default.
 LOOPBACK = "127.0.0.1"
 
-#: Hosts that are this machine. `localhost` is here because a browser may render the loopback URL
-#: that way, and `[::1]` because a `Host` header for IPv6 arrives bracketed.
+#: Hosts that are this machine: the loopback address itself, `localhost` (a browser may render the
+#: loopback URL that way), the IPv6 loopback `::1`, and its IPv4-mapped form. `_host_ok` strips
+#: the brackets before comparing, so a `Host: [::1]:8765` header matches the `::1` member here --
+#: which is why the bracketed spelling is not a member of this set.
 LOOPBACK_HOSTS = frozenset({LOOPBACK, "localhost", "::1", "::ffff:127.0.0.1"})
 
 #: The design's port (`#242` section 3.1); any free port works, and `--port 0` asks the OS.
@@ -196,7 +198,8 @@ function watch() {
   stream = new EventSource('/api/events?token=' + encodeURIComponent(token));
   stream.addEventListener('log', (e) => {
     const log = document.getElementById('log');
-    log.textContent += e.data + '\\n';
+    const d = JSON.parse(e.data);
+    log.textContent += (d.text ?? '') + '\\n';
     log.scrollTop = log.scrollHeight;
   });
   stream.addEventListener('exit', (e) => finish(JSON.parse(e.data)));
@@ -226,6 +229,7 @@ async function start() {
     const data = await reply.json();
     document.getElementById('progress').hidden = false;
     document.getElementById('what').textContent = data.error;
+    if (data.name) { selected = data.name; watch(); }
     return;
   }
   if (!reply.ok) {
@@ -249,7 +253,16 @@ document.getElementById('copy').addEventListener('click', () => {
   await loadFiles();
   try {
     const data = await (await api('/api/result')).json();
-    if (data.code !== null && data.code !== undefined) finish(data);
+    if (data.running && data.name) {
+      // A reload while a run is in flight: the run belongs to the server, so the page attaches
+      // to it instead of showing an idle screen. `watch()` opens the stream at cursor 0, and
+      // the server replays the run's log, so the panel fills in from the beginning.
+      selected = data.name;
+      document.getElementById('start').textContent = 'Start «' + data.name + '»';
+      watch();
+    } else if (data.code !== null && data.code !== undefined) {
+      finish(data);
+    }
   } catch (err) { /* no run yet */ }
 })();
 </script>
@@ -291,7 +304,10 @@ def contained(root: Path, requested: str) -> Path | None:
             candidate = root / candidate
         candidate = candidate.resolve()
         root = root.resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
+        # ValueError is a NUL byte in the name: `Path.resolve()` raises it instead of opening
+        # anything. The name is untrusted input from a request, so it is a refusal like any other
+        # -- 400 with the reason, not a 500 and not a traceback in the server's log.
         return None
     if root not in candidate.parents:
         return None
@@ -602,11 +618,16 @@ class Handler(BaseHTTPRequestHandler):
         return files
 
     def _events(self) -> None:
-        """Server-sent events: the run's lines verbatim, and the server's own facts as events."""
+        """Server-sent events: the run's lines verbatim, and the server's own facts as events.
+
+        The stream carries the same headers as every other response -- `no-store`, `no-referrer`
+        and the policy -- rather than a subset of them: a claim that "every response carries
+        them" is only true if the one long-lived response does too, and the token is in this
+        stream's URL.
+        """
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Referrer-Policy", "no-referrer")
+        self._security_headers()
         self.end_headers()
         cursor = 0
         try:
@@ -642,13 +663,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._refuse(400, "name the file to process")
         busy = self.state.busy_with()
         if busy is not None:
-            return self._send_json({"error": f"already working on «{busy}»"}, status=409)
+            return self._send_json(
+                {"error": f"already working on «{busy}»", "name": busy}, status=409
+            )
         path = contained(self.state.root, name)
         if path is None:
             return self._refuse(400, f"{name} is not a file under the served folder")
         run = self.state.start(path.name, path)
         if run is None:
-            return self._send_json({"error": "already working on a lecture"}, status=409)
+            # Lost the race: a run started between the check above and this call. Name that run
+            # rather than saying "a lecture", so the page's message -- and the name it uses to
+            # attach to the run in flight -- is true on both 409 paths.
+            current = self.state.run
+            held = current.name if current is not None else path.name
+            return self._send_json(
+                {"error": f"already working on «{held}»", "name": held}, status=409
+            )
         no_llm = bool(request.get("no_llm"))
         self.state.log.event("run_start", name=run.name, no_llm=no_llm)
         threading.Thread(

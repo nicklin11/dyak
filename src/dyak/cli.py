@@ -794,7 +794,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             f"address to listen on (default: {dyweb.LOOPBACK}, loopback only). Any other "
             "address, a tailnet address included, exposes the page to whatever can reach that "
-            "interface, so the token stays required and a warning is printed"
+            "interface, so the token stays required and a warning is printed. IPv4 addresses "
+            "only: the server socket is AF_INET, so an IPv6 address here fails to bind"
         ),
     )
     p_serve.add_argument(

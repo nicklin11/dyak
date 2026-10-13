@@ -240,7 +240,7 @@ rendering yet.
 |---|---|
 | `--root DIR` | the folder the page may list and process (default: the current directory). A requested file must resolve inside it, symlinks included, so a link pointing out of the folder is refused rather than followed |
 | `--port N` | TCP port to listen on (default: `8765`). `--port 0` asks the OS for a free one |
-| `--bind ADDR` | the interface to listen on (default: `127.0.0.1`, loopback only). Any other address — a tailnet address included — exposes the page to whatever can reach that interface, and a warning is printed saying so |
+| `--bind ADDR` | the interface to listen on (default: `127.0.0.1`, loopback only). Any other address — a tailnet address included — exposes the page to whatever can reach that interface, and a warning is printed saying so. IPv4 only: the server socket is `AF_INET`, so an IPv6 address fails to bind and the subcommand exits 2 |
 | `--token TOKEN` | pin the token instead of generating one per start, so the page URL can be bookmarked |
 | `--open` | open the page in this machine's browser once the server is listening |
 
