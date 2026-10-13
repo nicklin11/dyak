@@ -7989,7 +7989,16 @@ def _cr_audit_run(note, txt, adir, *, glossary_path=None, config=None, stream=No
 
 
 def _cr_repair_run(
-    note, audit_path, rdir, *, glossary_path=None, lint_report_path=None, stream=None
+    note,
+    audit_path,
+    rdir,
+    *,
+    glossary_path=None,
+    lint_report_path=None,
+    stream=None,
+    # The real `repair.run` gained this keyword at #257 and the pipeline now passes it; a stub
+    # that does not accept it raises TypeError, which is what two #219 checks reported.
+    config=None,
 ):
     rdir = Path(rdir)
     rdir.mkdir(parents=True, exist_ok=True)
@@ -9847,24 +9856,35 @@ check(
     _sent_payload.get("seed") == dyle.SEED and _sent_payload.get("temperature") == 0.2,
     repr({k: _sent_payload.get(k) for k in ("seed", "temperature")}),
 )
-# The three stages whose provenance is built from `Config.redacted()` -- stage 6's `model` field
-# and stage 7's and stage 9's `endpoint`. Stage 10's repair provenance is handed no Config and
-# makes no model call, so it cannot carry the seed; the check must not claim otherwise, and #257
-# records what wiring it would take.
+# The four stages whose provenance is built from `Config.redacted()` -- stage 6's `model` field
+# and stages 7, 9 and 10's `endpoint` (#77, #257). Stage 10 sends no prompt, so it records no
+# digest beside it; the check further down states that rather than leaving it to the prose.
+# `.get` chains, not `["endpoint"]["seed"]`: when the #257 teeth removed the endpoint block the
+# suite died of `KeyError: 'endpoint'` instead of reporting a FAIL, and a check that aborts the run
+# reports nothing about the other nine hundred. The file's contract is accumulate, print, exit 1.
 _seed_config = dyle.Config("http://x", "m")
+
+
+def _recorded_seed(document: str, key: str):
+    """The seed a provenance document records under `key`, or None when the block is absent."""
+    return json.loads(document).get(key, {}).get("seed")
+
+
 check(
-    "#77: redacted() carries the seed, which synth, audit and caption provenance record",
+    "#77: redacted() carries the seed, which synth, audit, caption and repair provenance record",
     _seed_config.redacted().get("seed") == dyle.SEED
-    and json.loads(dysy.provenance(dysy.Note(markdown="x"), _seed_config))["endpoint"]["seed"]
+    and _recorded_seed(dysy.provenance(dysy.Note(markdown="x"), _seed_config), "endpoint")
     == dyle.SEED
-    and json.loads(dyau.provenance(dyau.Report(), _seed_config))["endpoint"]["seed"] == dyle.SEED
-    and json.loads(
+    and _recorded_seed(dyau.provenance(dyau.Report(), _seed_config), "endpoint") == dyle.SEED
+    and _recorded_seed(dyrep.provenance(dyrep.Report(), _seed_config), "endpoint") == dyle.SEED
+    and _recorded_seed(
         dycap.provenance(
             dycap.Settings(),
             _seed_config,
             dycap.CaptionOutcome(captioned=1, reused=0, failed=0, model="m", served_model=None),
-        )
-    )["model"]["seed"]
+        ),
+        "model",
+    )
     == dyle.SEED,
     repr(_seed_config.redacted()),
 )
@@ -9985,13 +10005,60 @@ check(
     len(_sampling_sites) == 4 and "every stage" not in _llm_source,
     repr(_sampling_sites),
 )
-# The other half of that sentence, and the gap #257 owns: stage 10 carries neither the seed nor a
-# digest, which the prose must not claim away. Pinned so that wiring it is a deliberate edit here.
-_repair_provenance = json.loads(dyrep.provenance(dyrep.Report()))
+# The fourth stage the #77 decision names, and the gap #257 closed: stage 10 sends no prompt, so it
+# records the endpoint and the seed and no digest. Pinned twice, because the function's return
+# value cannot tell whether `run()` handed the config on.
+_REPAIR_KEYS = {
+    "stage",
+    "tool",
+    "endpoint",
+    "requires_model",
+    "output",
+    "original_kept",
+    "repairable_rules",
+    "declined_reasons",
+    "idempotent",
+    "changes",
+}
+_repair_provenance = json.loads(dyrep.provenance(dyrep.Report(), _seed_config))
 check(
-    "#256: stage 10's provenance carries no endpoint, as the prose and #257 say",
-    "endpoint" not in _repair_provenance and "prompt_sha256" not in _repair_provenance,
-    repr(sorted(_repair_provenance)),
+    "#257: stage 10's provenance carries the endpoint and the seed, and no prompt digest",
+    _repair_provenance.get("endpoint", {}).get("seed") == dyle.SEED
+    and set(_repair_provenance) == _REPAIR_KEYS
+    and "prompt_sha256" not in _repair_provenance,
+    repr({k: _repair_provenance.get(k) for k in ("endpoint", "prompt_sha256")}),
+)
+with tempfile.TemporaryDirectory() as _repair_tmp:
+    _repair_dir = pathlib.Path(_repair_tmp)
+    _repair_note = _repair_dir / "note.md"
+    _repair_note.write_text("## Раздел 1\n\nтекст раздела\n", encoding="utf-8")
+    _repair_audit = _repair_dir / "audit.json"
+    _repair_audit.write_text(json.dumps({"findings": []}), encoding="utf-8")
+    dyrep.run(
+        _repair_note,
+        _repair_audit,
+        _repair_dir / "out",
+        stream=io.StringIO(),
+        config=_seed_config,
+    )
+    _repair_file = json.loads(
+        (_repair_dir / "out" / dyrep.PROVENANCE_NAME).read_text(encoding="utf-8")
+    )
+check(
+    "#257: the written repair-provenance.json carries the endpoint and the seed",
+    _repair_file.get("endpoint", {}).get("seed") == dyle.SEED and set(_repair_file) == _REPAIR_KEYS,
+    repr({k: _repair_file.get(k) for k in ("endpoint", "changes", "requires_model")}),
+)
+# The wiring itself, which the checks above cannot see: they call `repair.run` directly, so a
+# pipeline that dropped the keyword would still record the seed in their fixture. Scanned and
+# reported rather than run -- the end-to-end fixtures stub stage 10 out -- which is how this file
+# already pins the `llm.chat(` call sites (#256).
+_pipeline_source = pathlib.Path(dyp.__file__).read_text(encoding="utf-8")
+_repair_call = _pipeline_source.split("rreport = repair.run(")[1].split("\n    )")[0]
+check(
+    "#257: the pipeline hands stage 10 the same llm_config it hands stages 6, 7 and 9",
+    "config=llm_config" in _repair_call,
+    repr([ln.strip() for ln in _repair_call.splitlines() if ln.strip()]),
 )
 
 # #252: the transcript records the answer as well as the question. ADR-0004 D4 asks for the

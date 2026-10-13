@@ -922,6 +922,10 @@ def _stages(
         glossary_path=Path(glossary_path) if glossary_path else None,
         lint_report_path=artefacts[lint.REPORT_NAME],
         stream=out,
+        # The Config the run already holds (#257): stage 10 sends no prompt, but its provenance
+        # records the endpoint and the seed, so `repair-provenance.json` is the fourth stage
+        # provenance the #77 decision names. Same `llm_config` as stages 6, 7 and 9 above.
+        config=llm_config,
     )
     for extra in (repair.REPAIRED_NOTE, repair.REPORT_NAME, repair.PROVENANCE_NAME):
         artefacts[f"repair/{extra}"] = bundle.publish(f"repair/{extra}", rdir / extra)
