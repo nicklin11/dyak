@@ -34,6 +34,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 import urllib.error
+import urllib.parse
+import urllib.request
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -5996,6 +5998,82 @@ check(
             "raw f-string uses": _llm_source.count("{config.url}"),
         }
     ),
+)
+
+
+# #281: the same endpoint shape, one step earlier than #279. `Config.url` concatenated the
+# completion path, so on an endpoint that already carried a query -- the shape #279 records, and
+# the reason its masking is load-bearing rather than theoretical -- the segment landed in the last
+# parameter's value and the path stayed `/v1`: `POST /v1?api_key=<value>/chat/completions`, both
+# halves wrong, and the endpoint unusable. The four checks below pin the join, the endpoint shapes
+# it must not break, the two `deps.py` probes that had the same defect (they joined `/models` at
+# what were `:356` and `:455`), and the malformed input `Config.url` must keep surviving, because
+# the four `EndpointError` messages call it from an error path.
+_path_cfg = dyle.Config(
+    endpoint="http://h:8317/v1?api_key=not-a-real-query-secret&api-version=2026-01-01",
+    model="m",
+    api_key="secret",
+)
+_path_url = _path_cfg.url
+_path_parts = urllib.parse.urlsplit(_path_url)
+check(
+    "#281: the completion path lands in the path, and the query keeps its parameters",
+    _path_parts.path == "/v1/chat/completions"
+    and _path_parts.query == "api_key=not-a-real-query-secret&api-version=2026-01-01",
+    repr({"url": _path_url, "path": _path_parts.path, "query": _path_parts.query}),
+)
+check(
+    "#281: and that is what goes on the wire, not just what the string says",
+    urllib.request.Request(_path_url).selector
+    == "/v1/chat/completions?api_key=not-a-real-query-secret&api-version=2026-01-01",
+    repr(urllib.request.Request(_path_url).selector),
+)
+_shape_urls = [
+    ("http://h:8317", "http://h:8317/chat/completions"),
+    ("http://h:8317/v1", "http://h:8317/v1/chat/completions"),
+    ("http://h:8317/", "http://h:8317/chat/completions"),
+    (
+        "http://h:8317/v1?api_key=not-a-real-query-secret&api-version=2026-01-01",
+        "http://h:8317/v1/chat/completions?api_key=not-a-real-query-secret&api-version=2026-01-01",
+    ),
+    (
+        "http://h:8317/v1#access_token=not-a-real-fragment-secret",
+        "http://h:8317/v1/chat/completions#access_token=not-a-real-fragment-secret",
+    ),
+]
+_shape_got = [dyle.Config(endpoint=endpoint, model="m").url for endpoint, _ in _shape_urls]
+check(
+    "#281: every shape joins the same way, with no double slash and no lost query",
+    _shape_got == [want for _, want in _shape_urls]
+    and all("//" not in urllib.parse.urlsplit(one).path for one in _shape_got),
+    repr(list(zip((endpoint for endpoint, _ in _shape_urls), _shape_got))),
+)
+_deps_source = pathlib.Path(dyd.__file__).read_text(encoding="utf-8")
+check(
+    "#281: both /models probes share the helper, and neither concatenates an endpoint",
+    _deps_source.count("append_path(url,") == 4
+    and "url.rstrip" not in _deps_source
+    and "{url}/models" not in _deps_source,
+    repr(
+        {
+            "append_path(url,": _deps_source.count("append_path(url,"),
+            "old concat": _deps_source.count("{url}/models"),
+        }
+    ),
+)
+_odd_endpoints = ["h:8317/v1", "", "::::", "%zz", "//h/v1", "not a url"]
+check(
+    "#281: an endpoint with no scheme still yields the string it always did, and none raise",
+    [dyle.Config(endpoint=one, model="m").url for one in _odd_endpoints]
+    == [f"{one}/chat/completions" for one in _odd_endpoints],
+    repr([(one, dyle.Config(endpoint=one, model="m").url) for one in _odd_endpoints]),
+)
+check(
+    "#281: the wire keeps the raw endpoint and provenance keeps the masked one (#273/#279)",
+    "not-a-real-query-secret" in _path_cfg.url
+    and _path_cfg.redacted()["endpoint"] == "http://h:8317/v1?api_key=***&api-version=2026-01-01"
+    and "not-a-real-query-secret" not in json.dumps(_path_cfg.redacted()),
+    repr({"url": _path_cfg.url, "redacted": _path_cfg.redacted()["endpoint"]}),
 )
 
 # The artefacts.

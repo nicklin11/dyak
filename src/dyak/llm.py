@@ -224,6 +224,28 @@ def redact_endpoint(endpoint: str) -> str:
     )
 
 
+def append_path(url: str, segment: str) -> str:
+    """`url` with `segment` appended to its path, and its query and fragment left alone (#281).
+
+    The obvious `f"{url}{segment}"` appends to the whole string, so an endpoint that already
+    carries a query -- the shape #279 made safe to record, and the reason this matters, because
+    such an endpoint could not work until the segment landed in the path -- produced
+    `POST /v1?api_key=<value>&api-version=2026-01-01/chat/completions`: the path stayed `/v1` and
+    the segment became part of the last parameter's value, so both the path and the parameter were
+    wrong. Splitting the URL is what keeps the segment in the path, and stripping the trailing
+    slash from the path alone is what keeps a trailing slash from becoming a double slash
+    (`http://h:8317/` gains one segment, not two).
+
+    The same join is behind both `deps.py` probes, which is why this is a shared helper rather
+    than a property: they append a different segment (`/models`), and nothing else about them
+    differs. Malformed input is passed through rather than refused, exactly as the concatenation
+    was: `urlsplit` splits any string and raises on none, so an endpoint with no scheme still
+    yields a URL, and `Config.url` stays safe to call from an error path.
+    """
+    parts = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit(parts._replace(path=parts.path.rstrip("/") + segment))
+
+
 @dataclass(frozen=True)
 class Config:
     endpoint: str
@@ -249,7 +271,7 @@ class Config:
 
     @property
     def url(self) -> str:
-        return f"{self.endpoint}/chat/completions"
+        return append_path(self.endpoint, "/chat/completions")
 
     def redacted(self) -> dict:
         """Config safe to write into a bundle. The key never is."""

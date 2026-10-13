@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import exitcodes as ec
+from . import llm
 from . import runner, stt
 from .settings import (
     HONOURED_SETTINGS,
@@ -353,7 +354,7 @@ def check_llm() -> Check:
         )
     try:
         request = urllib.request.Request(
-            f"{url.rstrip('/')}/models", headers={"Accept": "application/json"}
+            llm.append_path(url, "/models"), headers={"Accept": "application/json"}
         )
         if api_key := resolve(LLM_KEY_ENV).value:
             request.add_header("Authorization", f"Bearer {api_key}")
@@ -363,7 +364,10 @@ def check_llm() -> Check:
         return Check(
             name="llm",
             ok=False,
-            detail=f"{url}/models returned HTTP {exc.code}",
+            # The URL the request actually went to, redacted the way `llm.py` redacts the
+            # same endpoint on its error paths (#273/#279): `url` is the raw env value, so a
+            # userinfo or query credential printed here would leave the process verbatim.
+            detail=f"{llm.redact_endpoint(llm.append_path(url, '/models'))} returned HTTP {exc.code}",
             remediation="check the endpoint path and the key",
             code=ec.DEPENDENCY_FAILED,
         )
@@ -452,7 +456,7 @@ def check_vlm() -> Check:
     key = resolve(VLM_KEY_ENV).value or resolve(LLM_KEY_ENV).value or ""
     try:
         request = urllib.request.Request(
-            f"{url.rstrip('/')}/models", headers={"Accept": "application/json"}
+            llm.append_path(url, "/models"), headers={"Accept": "application/json"}
         )
         if key:
             request.add_header("Authorization", f"Bearer {key}")
@@ -462,7 +466,10 @@ def check_vlm() -> Check:
         return Check(
             name="vlm",
             ok=False,
-            detail=f"{url}/models returned HTTP {exc.code}",
+            # The URL the request actually went to, redacted the way `llm.py` redacts the
+            # same endpoint on its error paths (#273/#279): `url` is the raw env value, so a
+            # userinfo or query credential printed here would leave the process verbatim.
+            detail=f"{llm.redact_endpoint(llm.append_path(url, '/models'))} returned HTTP {exc.code}",
             remediation="check the endpoint path and the key",
             code=ec.DEPENDENCY_FAILED,
         )
