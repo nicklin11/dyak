@@ -1032,9 +1032,9 @@ def provenance(report: Report, config: llm.Config | None = None) -> str:
             # this says which prompt asked; without both, two audits of one note are recorded
             # identically and the difference between them cannot be attributed to anything.
             # `config` is optional because a run without a model has no sample to describe --
-            # `requires_model: False` below is the same fact from the other side. Stage 10's
-            # `repair.provenance` still carries neither: it takes no `Config` and makes no model
-            # call, and #257 records what wiring it would take.
+            # `requires_model: False` below is the same fact from the other side. Stage 10 records
+            # the same endpoint and seed beside its own `tool` since #257, and no digest: it sends
+            # no prompt and requests no sample, so there is nothing for a digest to cover.
             "prompt_sha256": prompt_digest(),
             "endpoint": config.redacted() if config else None,
             "tier1": {
