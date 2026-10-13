@@ -31,7 +31,7 @@ from .settings import (
 from .settings import LLM_ENDPOINT_ENV as LLM_ENV
 from .settings import SETTINGS_KEY as SETTINGS_KEY
 from .settings import SETTINGS_PATH_ENV as SETTINGS_PATH_ENV
-from .settings import SETTINGS_TEMPLATE as SETTINGS_TEMPLATE
+from .settings import SETTINGS_HEADER as SETTINGS_HEADER
 from .settings import VAULT_ENV
 from .settings import VLM_ENDPOINT_ENV as VLM_ENV
 from .settings import VLM_KEY_ENV as VLM_KEY_ENV
@@ -294,7 +294,7 @@ def check_settings() -> Check:
         )
     honoured = sorted(k for k, v in data.items() if isinstance(v, str) and k in HONOURED_SETTINGS)
     ignored = sorted(k for k in data if k not in honoured)
-    detail = f"present — honoured: {', '.join(honoured) or 'none'}"
+    detail = f"present — honoured: {', '.join(honoured) or 'none'}; see `dyak settings`"
     if ignored:
         detail += f"; ignored: {', '.join(ignored)}"
     return Check(name="settings", ok=True, fatal=False, detail=detail, path=str(path))

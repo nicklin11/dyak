@@ -20,7 +20,7 @@ from . import pipeline as dyp
 from . import repair as dyr
 from . import runner
 from . import synth as dysy
-from .settings import SOURCE_DEFAULT
+from . import settings as dys
 from .deps import PROCESS_REQUIRES, Check, run_all, worst_code
 from .workspace import WorkDir
 
@@ -265,7 +265,7 @@ def _process(args: argparse.Namespace) -> int:
             unset_everywhere = (
                 not dyd.settings_path().is_file()
                 and dyd.resolve(dyd.VAULT_ENV, flag=getattr(args, "vault_path", None)).source
-                == SOURCE_DEFAULT
+                == dys.SOURCE_DEFAULT
             )
             written = None
             if unset_everywhere:
@@ -567,6 +567,24 @@ def _term_check(args: argparse.Namespace) -> int:
     return ec.OK
 
 
+def _settings(args: argparse.Namespace) -> int:
+    """Every honoured setting, with its layer and its default (#243). A listing, so exit 0.
+
+    The four flags are the ones that carry a value straight to a setting, so `dyak settings
+    --vault-path /tmp/v` answers "what would a run with this flag resolve `vault` to" without
+    starting one. Nothing here writes and nothing here can fail: `main` has already reported an
+    unhonoured key by the time this runs, and the exit-code table is about what a run did.
+    """
+    flags = {
+        dys.VAULT_ENV: args.vault_path,
+        dys.WORKDIR_ENV: args.workdir,
+        dys.TERMS_DIR_ENV: args.terms_dir,
+        dys.OUTPUT_DIR_ENV: args.output_dir,
+    }
+    print(dys.listing(flags))
+    return ec.OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="dyak",
@@ -586,6 +604,31 @@ def build_parser() -> argparse.ArgumentParser:
         "if one is absent or broken.",
     )
     p_doctor.set_defaults(fn=_doctor)
+
+    # A listing sits next to `doctor`: both answer "what is this host set up as" without
+    # starting a run, and the settings surface is the half `doctor` only summarised (#243).
+    p_settings = sub.add_parser(
+        "settings",
+        help="list every setting this tool honours",
+        description="Print every key the settings file honours, the value in effect, the layer "
+        "that supplied it (flag > env > file > default) and the built-in default. API keys are "
+        "redacted. A listing is not a failure: it exits 0.",
+    )
+    p_settings.add_argument(
+        "--vault-path", metavar="DIR", help="resolve the `vault` key as if this flag were passed"
+    )
+    p_settings.add_argument(
+        "--workdir", metavar="DIR", help="resolve the `workdir` key as if this flag were passed"
+    )
+    p_settings.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        help="resolve the `output_dir` key as if this flag were passed",
+    )
+    p_settings.add_argument(
+        "--terms-dir", metavar="DIR", help="resolve the `terms_dir` key as if this flag were passed"
+    )
+    p_settings.set_defaults(fn=_settings)
 
     p_process = sub.add_parser(
         "process",
