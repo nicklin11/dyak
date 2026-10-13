@@ -484,8 +484,10 @@ def _norm(text: str) -> str:
 
 
 #: What a citation may be wrapped in without changing what it quotes. The critic writes
-#: `[источник: «...»]` although the format line asks for a bare fragment, and on the
-#: 2026-10-12 run that alone discarded 17 of 45 findings (#240).
+#: `[источник: «...»]` although the format line asks for a bare fragment: on the decision's
+#: replay roll (45 findings) 17 were verbatim once quotes/brackets and edge punctuation were
+#: stripped, and 35 once a `…`/`...`/`;` join was allowed too (#240, comment 6137266759). That
+#: roll is not the artefact -- the artefact's own counts are in `_strip_cite_wrappers`.
 _CITE_WRAPPERS = "«»\"'“”„‟`()[]{}"
 #: Punctuation the critic may leave at either end of a citation, for the same reason: it is the
 #: critic's sentence, not the lecturer's.
@@ -504,10 +506,14 @@ MIN_FRAGMENT_CHARS = 20
 def _strip_cite_wrappers(text: str) -> str:
     """Drop the quoting a citation may be wrapped in, and the punctuation at its edges.
 
-    Measured on the 2026-10-12 run (#240, comment 6137266759): of 68 discards, 67 were this --
-    a citation that is in the transcript character for character once `«»`/quotes/brackets and
-    a stray trailing comma are removed. A quotation mark is not a difference in what was said,
-    and the guard was discarding findings over guillemets.
+    Measured on the 2026-10-12 run's own `audit.json` (#240, comment 6137266759): of its 68
+    discards, 67 were for the citation reason -- and of the 40 whose citation survives that
+    report's 300-character line cut, 24 are verbatim once `«»`/quotes/brackets and edge
+    punctuation are removed (33 once a `…`/`...`/`;` join is allowed and the fragment clears
+    `MIN_FRAGMENT_CHARS`, 3 genuinely absent). The 67 is a reason count, the 24 and 33 are that
+    measurement; the two are not the same number and neither is the other's evidence. A quotation
+    mark is not a difference in what was said, and the guard was discarding findings over
+    guillemets.
 
     The two strips alternate until the text stops changing, because the critic writes both
     orders: `"цитата",` needs the comma off before the quote is at the end, and `(цитата)`
