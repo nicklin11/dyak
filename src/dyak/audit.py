@@ -1039,11 +1039,27 @@ def provenance(report: Report, config: llm.Config | None = None) -> str:
             "endpoint": config.redacted() if config else None,
             "tier1": {
                 "requires_model": False,
+                # A literal, kept in sync by hand rather than derived from the code -- the
+                # `scope` prose below reads as a paragraph about these ids, and deriving them
+                # would mean this module parsing itself at import. What keeps it honest is the
+                # stage tests' comparison against the `report.add` call sites (#266): before
+                # that comparison this list said 4 rules while the stage had already written
+                # 35 `dimension/undeclared` findings on disk, under this very key.
+                #
+                # It is NOT `rules_run` below (the four checks that ran, which is what a
+                # summary line prints): one check can reach several of these ids, and
+                # `check_dimensions` alone emits three of the seven.
                 "rules": [
                     "term/drift",
                     "dimension/mismatch",
+                    "dimension/undeclared",
                     "number/unsourced",
                     "math/empty",
+                    # The two abstentions, which are results too: a check that did not run
+                    # says so (`:311` when the note declares no domains, `:389` when there is
+                    # no transcript) instead of leaving the absence to be read as clean.
+                    "audit/dimensions-skipped",
+                    "audit/numbers-skipped",
                 ],
                 "scope": (
                     "rank agreement in sums over declared shapes. NOT a proof checker: a "
