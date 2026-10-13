@@ -57,6 +57,7 @@ path.
 | `DYAK_LLM_ENDPOINT` | `llm.py`, `deps.py` | OpenAI-compatible base URL for synthesis (stage 7) and audit (stage 9) |
 | `DYAK_LLM_MODEL` | `llm.py`, `deps.py` | model id sent in the request |
 | `DYAK_LLM_KEY` | `llm.py` | optional; unset means no `Authorization` header |
+| `DYAK_LLM_CONCURRENCY` | `llm.py`, `audit.py`, `synth.py` | section requests stages 7 and 9 may have in flight at once; default `1`, and a value that is not a positive whole number is exit 1 naming the variable. Default is 1 because the endpoint this is built against is a local gateway: one model behind one URL serves concurrent requests by queueing them, so the knob buys wall clock only where the provider does (#153). Above 1 every section is sent, and stage 9's finding cap changes meaning — at 1 it stops requests, above 1 it becomes a report limit on the collected findings (`cap_scope`/`cap_dropped` in `audit.json`, and the count in the run line); the two readings do not produce the same audit. Measured on the tailnet gateway `http://100.64.0.2:8317/v1` (`opencode-go/glm-5.3-flash`) with stage 9's 8-section fixture at `limit=99`, so neither arm is capped: **8.2 s at 1, 3.6 s at 4** (medians of three runs, 2.3×), while the seconds the endpoint itself reported went from 8.0 to 10.2 — the gateway queues what it is sent, and the wall clock is what the run pays |
 | `DYAK_VLM_ENDPOINT` | `llm.py`, `deps.py` | stage 6 frame captioning; unset falls back to `DYAK_LLM_ENDPOINT` |
 | `DYAK_VLM_MODEL` | `llm.py`, `deps.py` | as above, falls back to `DYAK_LLM_MODEL` |
 | `DYAK_VLM_KEY` | `llm.py`, `deps.py` | as above, falls back to `DYAK_LLM_KEY` |
@@ -116,8 +117,12 @@ unit still advances it, so it can pass a stage's own "reviewed" figure — and i
 because no rate has been measured for the vision or text endpoint. Stages 2-5 are two branches —
 `audio`→`stt` and `frames`→`quality` — joined by stage 6 (#115), so their lines can arrive out
 of stage order and each of them names the branch that wrote it, `(A)` or `(B)`. `DYAK_SERIAL=1`
-puts the two branches back on one thread in stage order, and then there is no tag to print. This
-is a real run — 180 s of lecture 1, seven frames — with the stages that print detail trimmed:
+puts the two branches back on one thread in stage order, and then there is no tag to print. With
+`DYAK_LLM_CONCURRENCY > 1` stages 7 and 9 still print `sections k/N` in section order: the lines
+are written where the requests are dispatched, on the calling thread, so the counter cannot
+interleave — and with four calls in flight it runs several units ahead of the replies instead of
+one behind each of them (#153). This is a real run — 180 s of lecture 1, seven frames — with the
+stages that print detail trimmed:
 
 ```
   [1/12] probe       0.0s  video h264 1920x1080, audio aac 48000Hz 2ch, 180.0s
