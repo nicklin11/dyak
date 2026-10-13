@@ -300,11 +300,14 @@ check(
 )
 
 # --- 5. no shipboard ----------------------------------------------------------
-# #48 wrote `grep -rn shipboard src/` must be empty. Two invariants, and they are different:
-# nothing may import the removed backend (the graph below, which a word scan cannot see), and
-# after #259 nothing in shipped code may carry the host-specific wording either. #259 moved
-# the record that *why* the backend was dropped -- backends.py used to carry it -- into
-# ADR-0001, so the word is now empty in `src/` and the rule below is what keeps it that way.
+# #48 wrote `grep -rn shipboard src/` must be empty. It was not, and should not have been: the
+# removed backend's *why* lived in `stt/backends.py`. #259 retired the word, not that reason --
+# the reason is still there (`backends.py:14-16`, "See issue #49") -- and the description of what
+# the old wording named is ADR-0001's (`docs/adr/0001-lecture-pipeline.md:1060-1156`, already
+# there at this change's base; this PR appends an amendment, it does not move the record).
+# Two invariants, and they are different: nothing may import the removed backend (the graph
+# below, which a word scan cannot see), and nothing in shipped code may carry the host-specific
+# wording either (the rule after it).
 
 offenders: list[tuple[str, int]] = []
 for path in sorted((REPO / "src" / "dyak").rglob("*.py")):

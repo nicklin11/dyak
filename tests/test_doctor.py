@@ -201,8 +201,9 @@ check("the failing check is named", "stt" in msg, msg)
 check("the unreachable target is named", "127.0.0.1" in out.getvalue(), out.getvalue())
 check("the remediation names the env var", "DYAK_WHISPERCPP_URL" in msg, msg)
 check("shipboard is no longer the reason", "pipx install shipboard" not in msg, msg)
-# #259: the failure path names the variables to set. The raw-port-versus-proxy history and
-# the idle timer are in ADR-0001 now, not in the line an operator reads mid-failure.
+# #259: the failure path names the variables to set. The raw-port-versus-proxy history and the
+# idle timer are ADR-0001's (`docs/adr/0001-lecture-pipeline.md:1144-1156`, there at this
+# change's base), not the line an operator reads mid-failure.
 check(
     "the STT remediation names the variables to set (#259)",
     "DYAK_WHISPERCPP_URL" in msg
