@@ -22,6 +22,12 @@ self-referential). It is not a `DYAK_` prefix test: a bare prefix would make
 `llm_endpont = "..."` a silently accepted key and invert the point of #156, that inert keys
 and dropped values were invisible. A key is honoured only when a constant with that exact
 name exists, so a typo is still a typo (#52 owner decision 3).
+
+The honoured keys are also **enumerable**: `listing()` prints every one of them with the value
+in effect, the layer that supplied it and the built-in default it falls back to (#243), and the
+file `write_settings` creates on a first run names every key the file will be read for. A
+surface that exists only as the union of the call sites that read it is a surface a user cannot
+discover, and the only complete list used to be the `known keys:` line of a typo error.
 """
 
 from __future__ import annotations
@@ -29,7 +35,9 @@ from __future__ import annotations
 import difflib
 import os
 import sys
+import tempfile
 import tomllib
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,9 +70,17 @@ VLM_MODEL_ENV = "DYAK_VLM_MODEL"
 VLM_KEY_ENV = "DYAK_VLM_KEY"
 
 SETTINGS_KEY = "vault"
-#: Written by `write_settings`, read by the resolver. One key on the first run; the file
-#: carries every honoured key once a user edits it.
-SETTINGS_TEMPLATE = "# dyak settings. Written on first run; edit by hand.\n"
+#: The first paragraph of the file `write_settings` writes: what the file is, and how to read
+#: the key list under it. The key lines themselves are generated, one per honoured key (#243),
+#: so this is only the part that does not depend on which keys exist.
+SETTINGS_HEADER = (
+    "# dyak settings. Written on first run; edit by hand.\n"
+    "#\n"
+    "# Every key this file honours, with its built-in default. Uncomment a line to set it;\n"
+    "# `dyak settings` prints what is in effect now and which layer supplied each value.\n"
+    '# `""` is a key with no built-in default: it stays unset until a layer supplies one.\n'
+    "#\n"
+)
 
 
 def settings_key(env_name: str) -> str:
@@ -98,6 +114,95 @@ HONOURED_SETTINGS: frozenset[str] = frozenset(
 NUMERIC_SETTINGS: frozenset[str] = frozenset(
     {settings_key(OPENAI_MAX_UPLOAD_BYTES_ENV), settings_key(LLM_CONCURRENCY_ENV)}
 )
+
+# --- the built-in default of every key (#243) -----------------------------------------
+#: Keys whose value is a credential. The listing is the one place that prints values in bulk,
+#: so redaction is a property of the key rather than of the printer: an API key that reaches a
+#: terminal once has reached a log, a screenshot and a pasted bug report.
+SECRET_KEYS: frozenset[str] = frozenset(
+    settings_key(name) for name in (LLM_KEY_ENV, VLM_KEY_ENV, OPENAI_KEY_ENV)
+)
+
+
+def _no_default() -> None:
+    """A key with no built-in default: unset until a layer supplies a value (#95)."""
+    return None
+
+
+def _vault_default() -> str:
+    """`deps.DEFAULT_VAULT` (`~/Documents/obs_notes`), read inside the call.
+
+    A module-level `from . import deps` would be a cycle: `deps.py:23` imports this module
+    before it defines `DEFAULT_VAULT` (`deps.py:47`), so at import time the name does not
+    exist yet. Deferring the import to the call is what lets this table name a default the
+    other module owns instead of retyping the path.
+    """
+    from . import deps
+
+    return str(deps.DEFAULT_VAULT)
+
+
+def _upload_default() -> str:
+    """`stt.openai_compat.DEFAULT_MAX_UPLOAD_BYTES`, for the reason `_vault_default` gives."""
+    from .stt import openai_compat
+
+    return str(openai_compat.DEFAULT_MAX_UPLOAD_BYTES)
+
+
+def _concurrency_default() -> str:
+    """`llm.DEFAULT_CONCURRENCY`, for the reason `_vault_default` gives.
+
+    `llm.py:526` resolves this key with `default=str(DEFAULT_CONCURRENCY)`, so the listing reads
+    that constant rather than restating the number: the same value written twice is the drift
+    this table is checked against (#250).
+    """
+    from . import llm
+
+    return str(llm.DEFAULT_CONCURRENCY)
+
+
+#: The built-in default of every honoured key: the value the key has when no flag, no
+#: environment variable and no file entry supplies one. The values are callables because two
+#: of them are computed -- `vault` sits under the user's home and `workdir` is `$TMPDIR` -- and
+#: because the ones that name a constant another module owns import it inside the call, which is
+#: the only way a module the owner imports can name it (`_vault_default`).
+#:
+#: Declared rather than derived. The defaults live at the `resolve()` call sites (`deps.py:225`,
+#: `workspace.py:48`, `pipeline.py:378`, `pipeline.py:718`, `stt/backends.py:129`,
+#: `stt/openai_compat.py:124`, `llm.py:526`) and enumerating the surface must not run a pipeline,
+#: so this is a second statement of them; `tests/test_settings.py` re-reads those call sites and
+#: fails if an entry here disagrees with the default the code passes, and fails when this table
+#: and `HONOURED_SETTINGS` are not the same set -- the drift that turned a clean merge into a
+#: `KeyError` on a first run (#250). That is what keeps the table a checked claim instead of a
+#: comfortable lie -- the drift `NUMERIC_SETTINGS` above exists to avoid.
+SETTING_DEFAULTS: dict[str, Callable[[], str | None]] = {
+    settings_key(BBOX_SOURCE_ENV): lambda: "geometric",
+    settings_key(LLM_CONCURRENCY_ENV): _concurrency_default,
+    settings_key(LLM_ENDPOINT_ENV): _no_default,
+    settings_key(LLM_KEY_ENV): _no_default,
+    settings_key(LLM_MODEL_ENV): _no_default,
+    settings_key(OPENAI_KEY_ENV): _no_default,
+    settings_key(OPENAI_MAX_UPLOAD_BYTES_ENV): _upload_default,
+    settings_key(OPENAI_MODEL_ENV): lambda: "whisper-1",
+    settings_key(OPENAI_URL_ENV): _no_default,
+    settings_key(OUTPUT_DIR_ENV): _no_default,
+    settings_key(SERIAL_ENV): lambda: "0",
+    settings_key(STT_BACKEND_ENV): lambda: "auto",
+    settings_key(TERMS_DIR_ENV): _no_default,
+    settings_key(VAULT_ENV): _vault_default,
+    settings_key(VLM_ENDPOINT_ENV): _no_default,
+    settings_key(VLM_KEY_ENV): _no_default,
+    settings_key(VLM_MODEL_ENV): _no_default,
+    settings_key(WHISPERCPP_LANGUAGE_ENV): _no_default,
+    settings_key(WHISPERCPP_URL_ENV): _no_default,
+    settings_key(WORKDIR_ENV): tempfile.gettempdir,
+}
+
+
+def default_for(name: str) -> str | None:
+    """The built-in default of the setting `name` is the variable for, or `None` if it has none."""
+    return SETTING_DEFAULTS[settings_key(name)]()
+
 
 # --- the resolver --------------------------------------------------------------------
 #: `Resolved.source` values, named rather than inline so a caller compares against a symbol.
@@ -363,17 +468,196 @@ def _toml_string(value: str) -> str:
     return '"' + "".join(out) + '"'
 
 
+def _toml_default(key: str) -> str:
+    """A key's built-in default as a TOML value, for the commented lines of the first-run file.
+
+    `""` for a key with no default: an empty string is not a value in any layer (#52), so
+    uncommenting that line reproduces the behaviour it replaces. A numeric setting is written
+    bare, as `docs/running.md` documents for `openai_max_upload_bytes` (#192); everything else
+    is quoted and escaped, so a default that contains a quote still parses.
+    """
+    value = SETTING_DEFAULTS[key]()
+    if value is None:
+        return '""'
+    if key in NUMERIC_SETTINGS and value.isdigit():
+        return value
+    return _toml_string(value)
+
+
+def settings_template(vault: Path) -> str:
+    """The whole first-run file: every honoured key, in key order, plus the one live line.
+
+    #243: a first run wrote `vault` and a one-line comment, so the other eighteen keys were
+    invisible to anyone who had not read this module -- the owner's ask was for a file with
+    "all llm endpoints and all preferences", and there was no way to learn which keys those
+    are. Every key is now named, with its built-in default as the value. Only `vault` is
+    uncommented, because it is the one value a first run knows; the rest are comments, so the
+    file still reads back as exactly `{vault: ...}` until a user uncomments something.
+    """
+    lines = [SETTINGS_HEADER.rstrip("\n")]
+    for key in sorted(HONOURED_SETTINGS):
+        if key == SETTINGS_KEY:
+            lines.append(f"{key} = {_toml_string(str(vault))}")
+        else:
+            lines.append(f"# {key} = {_toml_default(key)}")
+    return "\n".join(lines) + "\n"
+
+
 def write_settings(vault: Path) -> Path:
     """Persist the vault, creating the file on first use. Returns the path written.
 
     Writing is the whole point of the first run: without it, "settable at setup" means the
     user has to guess that `DYAK_VAULT` exists, and a default nobody can discover is a
     default nobody will change. The value is escaped so any path round-trips through
-    `read_settings` unchanged.
+    `read_settings` unchanged. The file names every honoured key, not only this one (#243),
+    so the same first run also answers "what else can I set here".
     """
     path = settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        f"{SETTINGS_TEMPLATE}{SETTINGS_KEY} = {_toml_string(str(vault))}\n", encoding="utf-8"
-    )
+    path.write_text(settings_template(vault), encoding="utf-8")
     return path
+
+
+# --- the surface, enumerated (#243) ---------------------------------------------------
+@dataclass(frozen=True)
+class Setting:
+    """One honoured key as the listing shows it: value, supplying layer, built-in default."""
+
+    key: str
+    value: str | None
+    source: str
+    default: str | None
+
+    @property
+    def secret(self) -> bool:
+        """True when the value is a credential and must not be printed."""
+        return self.key in SECRET_KEYS
+
+    @property
+    def shown(self) -> str:
+        """The value as the listing prints it: never a secret, and explicit about unset.
+
+        `(unset)` and `(redacted)` are different facts -- no layer supplied a value, versus one
+        did and it is not being printed -- and a reader asking whether an endpoint is
+        configured must be able to tell them apart.
+        """
+        if self.value is None:
+            return "(unset)"
+        return "(redacted)" if self.secret else self.value
+
+
+def describe(flags: Mapping[str, str | None] | None = None) -> list[Setting]:
+    """Every honoured key, resolved now, with the layer that supplied it and its default.
+
+    `flags` maps an environment-variable name (`VAULT_ENV`) to the value an explicit CLI
+    argument carries, exactly as `resolve` takes one, so a caller can ask what a run with
+    `--vault-path /tmp/v` would see. `dyak settings` passes the four flags it accepts, so its
+    output answers for the command line it was given and nothing else.
+
+    The `resolve` calls are written out one per key rather than looped over
+    `HONOURED_SETTINGS`. `tests/test_deps.py` harvests `resolve(...)` call sites and fails on
+    one whose variable it cannot name -- that guard is what keeps "every honoured key has a
+    reader" a fact about the source -- and a loop would call `resolve(name)`, which is exactly
+    the shape it refuses. The verbosity is the price of the key set staying checkable.
+    """
+    flags = flags or {}
+    # Alphabetical by key, which is the order `settings_template` writes the file in: the
+    # listing and the file a reader edits name the surface in the same order.
+    resolved = [
+        resolve(
+            BBOX_SOURCE_ENV, flag=flags.get(BBOX_SOURCE_ENV), default=default_for(BBOX_SOURCE_ENV)
+        ),
+        resolve(
+            LLM_CONCURRENCY_ENV,
+            flag=flags.get(LLM_CONCURRENCY_ENV),
+            default=default_for(LLM_CONCURRENCY_ENV),
+        ),
+        resolve(
+            LLM_ENDPOINT_ENV,
+            flag=flags.get(LLM_ENDPOINT_ENV),
+            default=default_for(LLM_ENDPOINT_ENV),
+        ),
+        resolve(LLM_KEY_ENV, flag=flags.get(LLM_KEY_ENV), default=default_for(LLM_KEY_ENV)),
+        resolve(LLM_MODEL_ENV, flag=flags.get(LLM_MODEL_ENV), default=default_for(LLM_MODEL_ENV)),
+        resolve(
+            OPENAI_KEY_ENV, flag=flags.get(OPENAI_KEY_ENV), default=default_for(OPENAI_KEY_ENV)
+        ),
+        resolve(
+            OPENAI_MAX_UPLOAD_BYTES_ENV,
+            flag=flags.get(OPENAI_MAX_UPLOAD_BYTES_ENV),
+            default=default_for(OPENAI_MAX_UPLOAD_BYTES_ENV),
+        ),
+        resolve(
+            OPENAI_MODEL_ENV,
+            flag=flags.get(OPENAI_MODEL_ENV),
+            default=default_for(OPENAI_MODEL_ENV),
+        ),
+        resolve(
+            OPENAI_URL_ENV, flag=flags.get(OPENAI_URL_ENV), default=default_for(OPENAI_URL_ENV)
+        ),
+        resolve(
+            OUTPUT_DIR_ENV, flag=flags.get(OUTPUT_DIR_ENV), default=default_for(OUTPUT_DIR_ENV)
+        ),
+        resolve(SERIAL_ENV, flag=flags.get(SERIAL_ENV), default=default_for(SERIAL_ENV)),
+        resolve(
+            STT_BACKEND_ENV, flag=flags.get(STT_BACKEND_ENV), default=default_for(STT_BACKEND_ENV)
+        ),
+        resolve(TERMS_DIR_ENV, flag=flags.get(TERMS_DIR_ENV), default=default_for(TERMS_DIR_ENV)),
+        resolve(VAULT_ENV, flag=flags.get(VAULT_ENV), default=default_for(VAULT_ENV)),
+        resolve(
+            VLM_ENDPOINT_ENV,
+            flag=flags.get(VLM_ENDPOINT_ENV),
+            default=default_for(VLM_ENDPOINT_ENV),
+        ),
+        resolve(VLM_KEY_ENV, flag=flags.get(VLM_KEY_ENV), default=default_for(VLM_KEY_ENV)),
+        resolve(VLM_MODEL_ENV, flag=flags.get(VLM_MODEL_ENV), default=default_for(VLM_MODEL_ENV)),
+        resolve(
+            WHISPERCPP_LANGUAGE_ENV,
+            flag=flags.get(WHISPERCPP_LANGUAGE_ENV),
+            default=default_for(WHISPERCPP_LANGUAGE_ENV),
+        ),
+        resolve(
+            WHISPERCPP_URL_ENV,
+            flag=flags.get(WHISPERCPP_URL_ENV),
+            default=default_for(WHISPERCPP_URL_ENV),
+        ),
+        resolve(WORKDIR_ENV, flag=flags.get(WORKDIR_ENV), default=default_for(WORKDIR_ENV)),
+    ]
+    return [Setting(row.key, row.value, row.source, default_for(row.name)) for row in resolved]
+
+
+def listing(flags: Mapping[str, str | None] | None = None) -> str:
+    """The whole surface as text: one row per honoured key, then the file they come from.
+
+    `dyak settings` prints this and exits 0. A listing is not a finding: the exit-code table
+    (ADR-0001 D4) is about what a run did, and a command whose whole job is to answer a
+    question must not answer it with a failure code.
+    """
+    rows = describe(flags)
+    cells = [(row.key, row.shown, row.source, row.default or "(none)") for row in rows]
+    head = ("key", "value", "source", "default")
+    widths = [max(len(cell) for cell in column) for column in zip(head, *cells)]
+
+    def render(row: tuple[str, ...]) -> str:
+        return "  ".join(text.ljust(width) for text, width in zip(row, widths)).rstrip()
+
+    path = settings_path()
+    by_source = {
+        source: sum(1 for row in rows if row.source == source)
+        for source in (SOURCE_FLAG, SOURCE_ENV, SOURCE_FILE, SOURCE_DEFAULT)
+    }
+    summary = ", ".join(f"{count} from {source}" for source, count in by_source.items() if count)
+    return "\n".join(
+        [
+            "Every key dyak honours, and the layer that supplied its value.",
+            "Precedence: flag > env > file > default. `(unset)` is a key no layer supplies;",
+            "`(redacted)` is a credential, shown by name only.",
+            "",
+            render(head),
+            render(tuple("-" * width for width in widths)),
+            *(render(row) for row in cells),
+            "",
+            f"{len(rows)} keys: {summary}.",
+            f"settings file: {path} ({'present' if path.is_file() else 'absent'})",
+        ]
+    )

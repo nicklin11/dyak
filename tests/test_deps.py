@@ -374,7 +374,7 @@ check(
 )
 
 # --- 6. the settings file reports what it will not honour (#156) --------------
-# The file is hand-edited -- `SETTINGS_TEMPLATE` says "edit by hand" -- while `read_settings`
+# The file is hand-edited -- `SETTINGS_HEADER` says "edit by hand" -- while `read_settings`
 # used to return every string pair and only `vault` was ever consulted. A key that did
 # nothing, a value silently dropped for not being a string, and a typo'd key were all
 # invisible, and the consequence was a run exporting into the wrong vault. These pin the
