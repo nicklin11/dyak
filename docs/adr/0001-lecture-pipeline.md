@@ -336,6 +336,70 @@ one that is loud:
 An uncaught internal error — a bug in dyak — has no row on purpose: it
 propagates as a traceback. The work dir is retained and its path printed first.
 
+### Amendment 2026-10-12 — stages 2-5 run as two branches, joined by stage 6 (#115)
+
+The list above is an order of *stages*, and it was implemented as an order of *execution*:
+stage 3 had to return before stage 4 could start. Stages 2-3 (`audio`, `stt`) and stages 4-5
+(`frames`, `quality`) read nothing from each other — one decodes the audio track, the other the
+video track, and stage 5 gates the frames stage 4 extracted — so they now run as two branches,
+one thread each, and stage 6 is the join: `caption.run` is handed the transcript stage 3 wrote
+and the manifest stage 4 wrote, so it cannot start before both.
+
+The stage *numbers* are untouched, and so is their meaning: `[4/12] frames` still names stage 4
+of the twelve-stage pipeline. What changed is that the lines of stages 2-5 no longer arrive in
+ascending order, so each of them carries the branch that wrote it — `  [4/12] frames 311.3s …
+(B)` — including the indented continuation lines, which carry no stage prefix by design (#197).
+Without the tag, `[4/12]` printing before `[3/12]` would be indistinguishable from a bug in the
+numbering. `DYAK_SERIAL=1` puts the two branches back on a single thread in the list's order,
+which is both the control arm for measuring the fork and the escape hatch on a host where the
+branches contend for one resource.
+
+Failure policy: both branches run to completion, and the run then raises the first error by the
+time it was raised. A failing branch does not cancel its sibling, which is what keeps the rule
+"an artefact that is not published dies with the work dir" true per branch: with the STT
+endpoint down, the bundle still holds the frames and their gate, and stage 6 is never entered.
+
+**Measured, 2026-10-12, on `1_lecture_OCS.mp4`** (4520 s, AV1 1080p), two arms back to back on
+one host with the same endpoints and the same source, each stopped once stage 6 had published
+because stages 7-12 are unchanged:
+
+| stage | parallel | `DYAK_SERIAL=1` |
+|---|---:|---:|
+| 3 `stt` | 333.5 s | 314.9 s |
+| 4 `frames` | 339.2 s | 328.8 s |
+| 5 `quality` | 31.4 s | 32.7 s |
+| **stage 6 starts** | **373.7 s** | **680.8 s** |
+| 6 `caption` | 309.7 s | 294.9 s |
+| **stage 6 published** | **683.4 s** | **975.7 s** |
+
+307 s of the pre-caption half disappeared, 45% of it. The two branch intervals, read off the
+timestamped log, are 6.5 s → 340.1 s and 3.1 s → 373.7 s: the shorter branch is almost entirely
+hidden. The branches share the CPU while they overlap, which is why the saving is 307 s rather
+than the shorter branch's whole duration. Of the 128 files the two arms published, 123 are
+byte-identical. The five that differ are the two clock files, `transcript.json` (which records
+the per-run work-dir path in `wav`), and `captions.json`/`caption-provenance.json` — the vision
+model's own non-determinism, not the fork: the pre-change run of the same source differs from
+either arm in exactly those fields, with the same frame order and the same gate verdicts. Those
+counts are a recursive diff of the JSON, one per differing leaf path, one-sided keys and
+container/list-length mismatches counted once each: 225 over the whole `captions.json` (174 over
+the `alignments` array alone; 160 against the serial arm), and 463 for the glimpse run below
+(410 over `alignments`). That pre-change run is the bundle beside the lecture,
+`/home/existingloner/Videos/lectures/Оптимальные СУ/` — `timings.json` `dyak-timings-v1`, total
+1546.3 s; `run-state.json` run_id `2026-10-12T02:55:29+00:00-e47fbbda-1_lecture_OCS`,
+02:55:29 → 03:21:15, `completed`. `/tmp/dyak87-real` is a *different* pre-change run of the same
+source — glimpse-era (`glimpse-timings-v1`, `glimpse-stt-v1`) and cache-warm
+(`caption: {captioned: 0, reused: 57}`), differing from the arms in more places (463 leaves by
+that count, 410 over `alignments`, including fields this code no longer writes the same way) —
+so it measures the two code eras rather than this fork.
+
+Measured with the endpoint refusing `POST /inference` (a stub that answers the stage-0 probe
+with 404, the "no /health to answer" case of `stt/whispercpp.py:129`, and refuses the
+transcription): exit 3, `run-state.json` `failed` with `stages_completed` `[1, 2, 4, 5]`, and a
+bundle holding `manifest.tsv`, `quality.json`, `quality-provenance.json`, `detect.json` and
+`images/`, with no transcript and no stage 6. A genuinely dead endpoint never reaches the
+pipeline — `PROCESS_REQUIRES` includes `stt`, so stage 0 refuses the run — which is why the
+refusal is what is measured.
+
 ### Amendment 2026-10-12 — the required set, and a cross-artefact check (#87)
 
 Stage 12's per-file contract was presence-and-non-empty, and `REQUIRED` named eight root

@@ -95,6 +95,11 @@ price of admission.
 - Stage 3's estimate bracket appears before the request, the actual elapsed after it.
 - Adding a stage does not require editing any renderer.
 - The pre-existing stage lines (`  [3/12] stt 257.2s …`) are unchanged in content, only in how
-  they are produced.
+  they are produced. *Amended 2026-10-12 (#115): the pre-caption half now runs as two branches,
+  `audio`→`stt` and `frames`→`quality`, joined by stage 6, so stages 2-5 can finish out of stage
+  order and each of their lines carries the branch that wrote it — `  [4/12] frames 311.3s …
+  (B)`. The tag is the rendering's, appended to the line the stage already printed, not a field
+  of the event: it says which branch, and a `DYAK_SERIAL=1` rendering has one branch and nothing
+  to say. Until `--events` ships, this is the only place the branch is visible.*
 
 Implements ADR-0001 D7. Part of #3.
