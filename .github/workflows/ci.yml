@@ -97,6 +97,14 @@ jobs:
       - name: Repair drift suite (#287)
         run: python tests/test_repair_drift.py
 
+      # The record of what the rewrite did (#283): a term the repair applied is not also under
+      # `declined`, every rewritten line is recorded, and a term it declined keeps its entry.
+      # Its evidence is the written `repair.json`/`repair-provenance.json`, not an in-memory
+      # report, so it is separate from the stage suite -- and a suite nothing invokes cannot
+      # fail (#173), so it is wired here like every other one.
+      - name: Repair bookkeeping suite (#283)
+        run: python tests/test_repair_declined.py
+
       # The durable record a failed run leaves (#271): the reason reaches the bundle verbatim,
       # `detail` stays the category, and no traceback or host path travels with it.
       - name: Run-state suite (#271)
