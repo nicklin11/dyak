@@ -19,6 +19,7 @@ import ast
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import urllib.error
@@ -1026,6 +1027,30 @@ check(
 
 # --- report -------------------------------------------------------------------
 _env.restore(SAVED_ENV)
+
+# Both work directories are removed on both exits, not only on the success path. The shape is the
+# one PR #306 uses in `tests/test_serve.py` for the same defect: nothing reads `TMP` (`tests/test_settings.py:71`,
+# the base of `:242`, `:310`, `:319`, `:327`) or `_record_dir` (`:916`, read at `:917` and `:931`)
+# after the last check above, the `finally:` blocks in this file (`:405`, `:459`, `:935`) restore
+# `urlopen` and nothing else, no check prints either path, and the failure line below lists check
+# *names*. A directory kept for inspection would have no reader, and the pair costs 28 KiB of tmpfs
+# blocks per run (8 + 20, one fresh directory each, `du -sk`, measured on this host 2026-10-13),
+# once per full-gate run.
+#
+# `shutil.rmtree` and not `tempfile.TemporaryDirectory`: both are created at module scope and read
+# by checks below, so their lifetime is the module's rather than a `with` block's. A removal that
+# fails is reported instead of swallowed -- "could not be removed" is the phrase
+# `src/dyak/workspace.py:70` uses for the same situation, and silence would be the leak with a
+# false report on top.
+try:
+    shutil.rmtree(TMP)
+except OSError as exc:
+    print(f"\nsettings suite work directory could not be removed: {TMP} ({exc})")
+try:
+    shutil.rmtree(_record_dir)
+except OSError as exc:
+    print(f"\nstt-record directory could not be removed: {_record_dir} ({exc})")
+
 if failures:
     print(f"FAILED: {len(failures)} -> {failures}")
     raise SystemExit(1)

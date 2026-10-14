@@ -25,6 +25,7 @@ import ast
 import importlib
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1259,7 +1260,12 @@ check(
 # `~/.config/dyak/settings.toml` would otherwise supply half these values and the check would
 # pass against the wrong layer.
 DEFAULT_SITES = _default_arguments()
-os.environ[deps.SETTINGS_PATH_ENV] = str(Path(tempfile.mkdtemp()) / "absent.toml")
+# Named, unlike the inline `Path(tempfile.mkdtemp())` this replaced: the directory is only here to
+# give `SETTINGS_PATH_ENV` an absent path, and the suite's teardown at the end of the file removes
+# it -- an unnamed one would have stayed in `/tmp` for the lifetime of the host
+# (`tests/test_claims.py:1267` was one of #307's seven leaking call sites).
+_absent_settings = Path(tempfile.mkdtemp())
+os.environ[deps.SETTINGS_PATH_ENV] = str(_absent_settings / "absent.toml")
 settings_problems: list[str] = []
 for _var, _key in sorted((f"DYAK_{key.upper()}", key) for key in deps.HONOURED_SETTINGS):
     # The env name is built from the key by the inverse of `settings_key`, and that inverse is the
@@ -1685,6 +1691,28 @@ check(
 )
 
 _env.restore(SAVED_ENV)
+
+# The work directory is removed on both exits, not only on the success path. The shape is the one
+# PR #306 uses in `tests/test_serve.py` for the same defect: nothing reads `_absent_settings`
+# (`tests/test_claims.py:1267`) after the last check above, the environment variable that points
+# into it was restored on the line before, no check prints its path, and the failure line below
+# lists check *names*. A directory kept for inspection would have no reader, and it cost nothing
+# visible in the count I took (`du -sk` moved by 0 KiB for one fresh directory -- under a single
+# 4 KiB block, measured on this host 2026-10-13), which is exactly why the *count* is the unit
+# #307 uses and not the bytes: the directory is one more entry per full-gate run, and 1,166 of them
+# had accumulated under `/tmp/tmp*` when the issue was filed.
+#
+# `shutil.rmtree` and not `tempfile.TemporaryDirectory`: it is created at module scope and read by
+# checks hundreds of lines below, so its lifetime is the module's rather than a `with` block's. A
+# removal that fails is reported instead of swallowed -- "could not be removed" is the phrase
+# `src/dyak/workspace.py:70` uses for the same situation, and silence would be the leak with a
+# false report on top.
+try:
+    shutil.rmtree(_absent_settings)
+except OSError as exc:
+    print(
+        f"\nclaims suite absent-settings directory could not be removed: {_absent_settings} ({exc})"
+    )
 
 print()
 if failures:

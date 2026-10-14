@@ -18,6 +18,7 @@ verdict here depends on a live endpoint or on the ambient proxy environment.
 
 import io
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -785,7 +786,12 @@ os.environ.pop("DYAK_STT", None)
 os.environ["DYAK_WHISPERCPP_URL"] = "http://127.0.0.1:10302"
 os.environ["DYAK_OPENAI_URL"] = "http://127.0.0.1:10302"
 os.environ.pop(dyd.LLM_ENV, None)
-os.environ[dyd.VAULT_ENV] = str(Path(tempfile.mkdtemp()) / "no-vault")
+# Named, unlike the other environment variables around it: the directory is a scratch path for
+# `VAULT_ENV` and nothing reads it after this check, so the suite's teardown at the end of the
+# file removes it -- which an inline `Path(tempfile.mkdtemp())` would have left unfindable
+# (`tests/test_doctor.py:793` was one of #307's seven leaking call sites).
+_no_vault = Path(tempfile.mkdtemp())
+os.environ[dyd.VAULT_ENV] = str(_no_vault / "no-vault")
 
 stt_reachable = False
 with urlopen_stub(fake_stt_urlopen):
@@ -1040,6 +1046,28 @@ finally:
     dywsc.urllib.request.urlopen = _S308_REAL_URLOPEN
 
 _env.restore(SAVED_ENV)
+
+# Both work directories are removed on both exits, not only on the success path. The shape is the
+# one PR #306 uses in `tests/test_serve.py` for the same defect: nothing reads `tmp` (`tests/test_doctor.py:129`,
+# the base of `:130`, `:134`, `:410`, `:415`, `:425`, `:435`, `:737`) or `_no_vault` (`:793`) after
+# the last check above, the environment variables that point into them are restored on the line
+# above, no check prints either path, and the failure line below lists check *names*. A directory
+# kept for inspection would have no reader, and the pair costs 8 KiB of tmpfs blocks per run (one
+# fresh directory each, `du -sk`, measured on this host 2026-10-13), once per full-gate run.
+#
+# `shutil.rmtree` and not `tempfile.TemporaryDirectory`: both are created at module scope and read
+# by checks hundreds of lines below, so their lifetime is the module's rather than a `with` block's.
+# A removal that fails is reported instead of swallowed -- "could not be removed" is the phrase
+# `src/dyak/workspace.py:70` uses for the same situation, and silence would be the leak with a
+# false report on top.
+try:
+    shutil.rmtree(tmp)
+except OSError as exc:
+    print(f"\ndoctor suite work directory could not be removed: {tmp} ({exc})")
+try:
+    shutil.rmtree(_no_vault)
+except OSError as exc:
+    print(f"\ndoctor suite no-vault directory could not be removed: {_no_vault} ({exc})")
 
 print()
 if failures:

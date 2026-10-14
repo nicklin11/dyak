@@ -24,6 +24,7 @@ import ast
 import io
 import os
 import re
+import shutil
 import sys
 import tempfile
 import tomllib
@@ -490,6 +491,31 @@ check(
 os.environ.pop(dyd.SETTINGS_PATH_ENV, None)
 
 _env.restore(SAVED_ENV)
+
+# Both work directories are removed on both exits, not only on the success path. The shape is the
+# one PR #306 uses in `tests/test_serve.py` for the same defect: each of these two exists only to give
+# `SETTINGS_PATH_ENV` a path under `/tmp` (`tests/test_deps.py:384`, `:455`) and nothing reads them
+# after the last check above, the environment variable that points at the first is popped on the
+# line before, no check prints either path, and the failure line below lists check *names*. A
+# directory kept for inspection would have no reader, and the pair costs 4 KiB of tmpfs blocks per
+# run (one fresh directory each, `du -sk`, measured on this host 2026-10-13), once per full-gate run.
+#
+# `shutil.rmtree` and not `tempfile.TemporaryDirectory`: their lifetimes are the module's -- they
+# are created at module scope and read by checks below -- rather than a `with` block's. The
+# directories are reached through the files that name them, so no new name is introduced. A removal
+# that fails is reported instead of swallowed -- "could not be removed" is the phrase
+# `src/dyak/workspace.py:70` uses for the same situation, and silence would be the leak with a
+# false report on top.
+try:
+    shutil.rmtree(settings_file.parent)
+except OSError as exc:
+    print(f"\ndeps suite settings directory could not be removed: {settings_file.parent} ({exc})")
+try:
+    shutil.rmtree(absent_file.parent)
+except OSError as exc:
+    print(
+        f"\ndeps suite absent-settings directory could not be removed: {absent_file.parent} ({exc})"
+    )
 
 print()
 if failures:
