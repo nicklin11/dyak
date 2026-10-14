@@ -16,6 +16,7 @@ because that is where this pipeline's real failures live:
 The one real end-to-end run lives outside this file, in the acceptance notes.
 """
 
+import ast
 import base64
 import hashlib
 import io
@@ -6759,8 +6760,71 @@ check(
 )
 lprov = json.loads((ldest / dyln.PROVENANCE_NAME).read_text())
 check("provenance says no model is involved", lprov["requires_model"] is False, str(lprov))
-check("provenance names every rule it ran", len(lprov["rules"]) == 12, str(lprov["rules"]))
 check("provenance says what blocks the gate", lprov["blocking"] == "ERROR", str(lprov))
+
+
+# --- the declared rule lists against what the code can emit (#266) --------------------
+# Two hand-written lists publish which rules each stage can report: stage 8's `rules` above,
+# and stage 9's `tier1.rules`. Both had drifted, and the only check on either was a literal
+# compared to a count -- `len(lprov["rules"]) == 12` used to sit here, and it passed while
+# `lint.py` could emit 13. Stage 9's list said 4 rules while the recorded run's own `audit.json`
+# already held 35 `dimension/undeclared` findings -- written by `audit.py`, against the four-entry
+# list at `audit.py:1042` (base).
+#
+# The ids are therefore read off the `report.add(...)` call sites, which is what "can emit"
+# means, rather than from a second literal: two literals drift together and the comparison
+# passes while both are wrong. A `report.add` whose rule argument is not a literal would
+# shrink the set silently, so it is an assertion failure, not a skip -- the harvest is allowed
+# to be incomplete only loudly.
+def _emitted_rules(module) -> set[str]:
+    """Every rule id the module's `report.add` call sites pass, read from the AST.
+
+    The argument position is not hard-coded per module: it is the `add` parameter named
+    `rule` (`lint.py:92` takes it first, `audit.py:118` after the tier).
+    """
+    tree = ast.parse(pathlib.Path(module.__file__).read_text(encoding="utf-8"))
+    signatures = [
+        [a.arg for a in fn.args.args][1:]
+        for cls in ast.walk(tree)
+        if isinstance(cls, ast.ClassDef) and cls.name == "Report"
+        for fn in cls.body
+        if isinstance(fn, ast.FunctionDef) and fn.name == "add"
+    ]
+    index = signatures[0].index("rule")
+    out: set[str] = set()
+    for call in [n for n in ast.walk(tree) if isinstance(n, ast.Call)]:
+        func = call.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == "add"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "report"
+        ):
+            continue
+        argument = call.args[index]
+        assert isinstance(argument, ast.Constant) and isinstance(argument.value, str), (
+            f"{module.__name__}:{call.lineno} passes a non-literal rule id, so this "
+            f"comparison would silently not see it"
+        )
+        out.add(argument.value)
+    return out
+
+
+lint_emitted = _emitted_rules(dyln)
+audit_emitted = _emitted_rules(dyau)
+audit_declared = set(json.loads(dyau.provenance(dyau.Report()))["tier1"]["rules"])
+check(
+    "the declared lint rules name every id lint.py can emit, and nothing else (#266)",
+    set(lprov["rules"]) == lint_emitted,
+    f"emitted but undeclared: {sorted(lint_emitted - set(lprov['rules']))}; "
+    f"declared but unemittable: {sorted(set(lprov['rules']) - lint_emitted)}",
+)
+check(
+    "and audit's tier1.rules names every id audit.py can emit, and nothing else (#266)",
+    audit_declared == audit_emitted,
+    f"emitted but undeclared: {sorted(audit_emitted - audit_declared)}; "
+    f"declared but unemittable: {sorted(audit_declared - audit_emitted)}",
+)
 lrep = json.loads((ldest / dyln.REPORT_NAME).read_text())
 check(
     "the report separates errors from warnings",
