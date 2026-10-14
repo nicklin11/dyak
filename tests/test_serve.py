@@ -667,7 +667,7 @@ finally:
 # attaching when /api/result says a run is in flight -- only runs in a browser, and a source-level
 # string match would not pin it. `node` runs the page's own script against a stub document, fetch
 # and EventSource, so the behaviour is observed. Where node is absent the suite prints SKIP and
-# this half is unpinned there, the convention tests/test_e2e.py:688 uses for ffmpeg; the CI image
+# this half is unpinned there, the convention tests/test_e2e.py uses for ffmpeg (`SKIP`); the CI image
 # provides node, so CI does run it (see the PR body for the run that shows the PASS lines).
 _SCRIPT = re.search(r"<script>(.*?)</script>", web.PAGE, re.S)
 PAGE_JS = _SCRIPT.group(1) if _SCRIPT else ""
