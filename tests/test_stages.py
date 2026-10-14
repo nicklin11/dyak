@@ -11176,6 +11176,159 @@ with tempfile.TemporaryDirectory() as _r253_td:
 
 _env.restore(SAVED_ENV)
 
+# --- #314: the two STT backends' URL joins --------------------------------------------
+#
+# Both backends appended their segment to the whole string (`f"{self.base_url}/inference"`), so
+# an endpoint carrying a query took the segment into the last parameter's value and the request
+# went to the endpoint's own path: `POST /v1?api_key=<value>&api-version=2026-01-01/inference`
+# parsed as path `/v1` with `api-version=2026-01-01/inference`. That is #281's mechanism, in the
+# two files #281 never named (#314), and the fix is the helper that mechanism already has --
+# `llm.append_path` (`llm.py:227`, public, module level, no cycle: `stt/__init__.py` and
+# `stt/openai_compat.py` already import from `..llm`) -- rather than a second join beside it.
+#
+# Six sites, all six checked below: whispercpp's `GET /health`, its `POST /inference` and the
+# endpoint it records; openai_compat's `GET /v1/models`, its `POST /v1/audio/transcriptions` and
+# the endpoint it records. #314 lists four; the two it does not name are the whisper.cpp probe
+# and the openai record. The source check at the end fails if a seventh appears, or if any of
+# the six goes back to a concatenation.
+#
+# Invented URLs, and a stub `urlopen` replaced per call and restored in the `finally`: this
+# suite's own fake answers `/health` by suffix, and a query-bearing endpoint puts the query
+# after the path, so no check here may depend on either stub's matching rule (#184).
+_S314_BASE = "http://127.0.0.1:10302"
+_S314_Q = f"{_S314_BASE}?api_key=not-a-real-314-secret&api-version=2026-01-01"
+_S314_WAV = tmp / "t254-join.wav"
+_S314_WAV.write_bytes(b"RIFF" + b"\x00" * 64)
+_S314_CALLS: list[tuple[str, str]] = []
+_S314_SAVED_URLOPEN = urllib.request.urlopen
+
+
+class _S314Response:
+    def read(self, *args: object) -> bytes:
+        return b'{"text": "not a real transcript"}'
+
+    def __enter__(self) -> "_S314Response":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+def _s314_urlopen(request, timeout=None):
+    _S314_CALLS.append((request.get_method(), request.full_url))
+    return _S314Response()
+
+
+def _s314_wire(base: str) -> tuple[list[tuple[str, str]], str, str]:
+    """The two backends' four wire URLs and their two recorded endpoints, for one base URL."""
+    del _S314_CALLS[:]
+    urllib.request.urlopen = _s314_urlopen
+    try:
+        whisper = dysw.HttpWhisperCpp(base)
+        whisper.check()
+        whisper.run(_S314_WAV, timeout=30.0)
+        openai = dyso.OpenAICompat(base)
+        openai.check()
+        openai.run(_S314_WAV, timeout=30.0)
+    finally:
+        urllib.request.urlopen = _S314_SAVED_URLOPEN
+    return (
+        list(_S314_CALLS),
+        whisper.parameters(client_timeout=30.0)["endpoint"],
+        openai.parameters(client_timeout=30.0)["endpoint"],
+    )
+
+
+_s314_calls, _s314_w_endpoint, _s314_o_endpoint = _s314_wire(_S314_Q)
+_s314_q = "api_key=not-a-real-314-secret&api-version=2026-01-01"
+_s314_sites = [
+    ("whispercpp GET /health", _s314_calls[0], ("GET", f"{_S314_BASE}/health?{_s314_q}")),
+    ("whispercpp POST /inference", _s314_calls[1], ("POST", f"{_S314_BASE}/inference?{_s314_q}")),
+    ("openai GET /v1/models", _s314_calls[2], ("GET", f"{_S314_BASE}/v1/models?{_s314_q}")),
+    (
+        "openai POST /v1/audio/transcriptions",
+        _s314_calls[3],
+        ("POST", f"{_S314_BASE}/v1/audio/transcriptions?{_s314_q}"),
+    ),
+]
+for _s314_label, _s314_got, _s314_want in _s314_sites:
+    check(
+        f"#314: {_s314_label} puts the segment in the path and keeps the query in order",
+        _s314_got == _s314_want,
+        repr(_s314_got),
+    )
+
+check(
+    "#314: whispercpp's recorded endpoint is the request URL, not the query with the path in it",
+    _s314_w_endpoint == f"{_S314_BASE}/inference?{_s314_q}",
+    repr(_s314_w_endpoint),
+)
+check(
+    "#314: and openai's recorded endpoint is the same shape",
+    _s314_o_endpoint == f"{_S314_BASE}/v1/audio/transcriptions?{_s314_q}",
+    repr(_s314_o_endpoint),
+)
+
+# Both directions: no query must stay byte-identical to what the concatenation produced, so a
+# host that never sets a query endpoint cannot be changed by this fix. The expected strings are
+# the old expressions verbatim.
+_s314_plain = _s314_wire(_S314_BASE)
+check(
+    "#314: an endpoint with no query produces the byte-identical four URLs it did before",
+    _s314_plain[0]
+    == [
+        ("GET", f"{_S314_BASE}/health"),
+        ("POST", f"{_S314_BASE}/inference"),
+        ("GET", f"{_S314_BASE}/v1/models"),
+        ("POST", f"{_S314_BASE}/v1/audio/transcriptions"),
+    ],
+    repr(_s314_plain[0]),
+)
+check(
+    "#314: and its two recorded endpoints too",
+    _s314_plain[1:] == (f"{_S314_BASE}/inference", f"{_S314_BASE}/v1/audio/transcriptions"),
+    repr(_s314_plain[1:]),
+)
+check(
+    "#314: a trailing slash on a no-query endpoint is still the same string, not a double slash",
+    _s314_wire(f"{_S314_BASE}/") == _s314_plain,
+    repr(_s314_wire(f"{_S314_BASE}/")),
+)
+_s314_frag = _s314_wire(f"{_S314_BASE}?{_s314_q}#frag")
+check(
+    "#314: a fragment survives the join -- the segment does not land in it",
+    _s314_frag[0][:2]
+    == [
+        ("GET", f"{_S314_BASE}/health?{_s314_q}#frag"),
+        ("POST", f"{_S314_BASE}/inference?{_s314_q}#frag"),
+    ],
+    repr(_s314_frag[0]),
+)
+
+# The source half: three joins per backend, none of them a concatenation. A seventh appender or
+# a reverted site fails here even if some shape below happened to match by accident.
+# Comments are excluded: the comment above each first join quotes the old expression on
+# purpose, and a check that counted it would be reading this file's prose as code.
+_s314_sources = {
+    name: "\n".join(
+        line
+        for line in pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    for name, module in ((dysw.__name__, dysw), (dyso.__name__, dyso))
+}
+check(
+    "#314: both backends join with `append_path` three times each and never concatenate `base_url`",
+    all(source.count("append_path(") == 3 for source in _s314_sources.values())
+    and all('f"{self.base_url}' not in source for source in _s314_sources.values()),
+    repr(
+        {
+            name: (source.count("append_path("), 'f"{self.base_url}' in source)
+            for name, source in _s314_sources.items()
+        }
+    ),
+)
+
 # The work directory is removed on both exits, not only on the success path. The shape is the one
 # PR #306 uses in `tests/test_serve.py` for #294's leak, copied rather than reinvented: nothing reads
 # `tmp` after the run -- the `DYAK_*` variables that point into it (`tests/test_stages.py:226`,
