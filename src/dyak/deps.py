@@ -21,6 +21,7 @@ from pathlib import Path
 from . import exitcodes as ec
 from . import llm
 from . import runner, stt
+from .llm import redact_endpoint
 from .settings import (
     HONOURED_SETTINGS,
     LLM_KEY_ENV,
@@ -184,6 +185,11 @@ def check_stt() -> Check:
             remediation=exc.remediation,
         )
     info = engine.info()
+    # `info.target` is the record the two producers build (`stt/whispercpp.py:94`,
+    # `stt/openai_compat.py:150`) and #311 masks it where it is recorded; masking it again as it
+    # goes into `Check.detail` is the boundary `check_llm`/`check_vlm` use above, so this report
+    # cannot print a raw credential even if a producer stops masking (#308). The probe above ran
+    # against the unredacted `engine`, so the wire is unchanged.
     try:
         engine.check()
     except runner.DependencyError as exc:
@@ -191,10 +197,10 @@ def check_stt() -> Check:
             name="stt",
             ok=False,
             code=exc.code,
-            detail=f"{info.name} at {info.target} is not usable: {exc.message}",
+            detail=f"{info.name} at {redact_endpoint(info.target)} is not usable: {exc.message}",
             remediation=exc.remediation,
         )
-    detail = f"{info.name} at {info.target} reachable — {info.detail}"
+    detail = f"{info.name} at {redact_endpoint(info.target)} reachable — {info.detail}"
     if info.name in ("openai", "openai-compatible"):
         detail += "; NOTE: audio and transcripts leave this machine"
     else:
@@ -324,6 +330,13 @@ def check_llm() -> Check:
     given (#126), so a run never writes a template note by accident.
     """
     url = resolve(LLM_ENV).value or ""
+    # `url` stays raw: it is the request target two lines below, and the credential has to be on
+    # the wire. What is masked is every string handed to `Check` (#297), because `Check` is a
+    # record with two readers -- `cli.py:47-49` renders `detail` and `path` for `dyak doctor`,
+    # and `cli.py:130` prints `detail` again when a run refuses to start -- so masking in one
+    # printer would leave the other one printing the credential and would make the fix depend on
+    # every future consumer remembering. `redact_endpoint` (`llm.py:195`) is the single
+    # implementation the record sites already call (#273, #279, #284, #289, #292).
     if not url:
         return Check(
             name="llm",
@@ -383,7 +396,13 @@ def check_llm() -> Check:
             remediation="check the endpoint is running and reachable from this host",
             code=ec.DEPENDENCY_FAILED,
         )
-    return Check(name="llm", ok=True, detail="reachable", path=url, version=f"{model}, HTTP {code}")
+    return Check(
+        name="llm",
+        ok=True,
+        detail="reachable",
+        path=redact_endpoint(url),
+        version=f"{model}, HTTP {code}",
+    )
 
 
 def vlm_configured() -> bool:
@@ -416,6 +435,8 @@ def check_vlm() -> Check:
     """
     url = resolve(VLM_ENV).value or ""
     model = resolve(VLM_MODEL_ENV).value or ""
+    # Masked at the point the value is put into `Check`, for the reason `check_llm` gives above
+    # (#297): `url` itself stays raw because it is what the probe below requests.
     if not url and not model:
         fallback = resolve(LLM_ENV).value or ""
         if fallback:
@@ -423,8 +444,8 @@ def check_vlm() -> Check:
                 name="vlm",
                 ok=True,
                 fatal=False,
-                detail=f"not set — stage 6 falls back to {LLM_ENV} ({fallback})",
-                path=fallback,
+                detail=f"not set — stage 6 falls back to {LLM_ENV} ({redact_endpoint(fallback)})",
+                path=redact_endpoint(fallback),
                 version="fallback",
             )
         return Check(
@@ -494,7 +515,7 @@ def check_vlm() -> Check:
         name="vlm",
         ok=True,
         detail="reachable",
-        path=url,
+        path=redact_endpoint(url),
         version=f"{model}, HTTP {code}, {auth}",
     )
 
