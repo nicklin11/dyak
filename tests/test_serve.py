@@ -299,7 +299,7 @@ def healthy_checks(*, required=None):
 
 
 def stub_result(source, work, bundle):
-    """The shape `tests/test_stages.py:1319` builds: real Report objects, so the ladder is real."""
+    """The shape `fake_pipeline` in `tests/test_stages.py` builds: real Report objects, so the ladder is real."""
     note = work.path / "note.md"
     note.write_text("# note\n", encoding="utf-8")
     audio = work.path / "audio.wav"
