@@ -6540,8 +6540,9 @@ check("provenance says what blocks the gate", lprov["blocking"] == "ERROR", str(
 # Two hand-written lists publish which rules each stage can report: stage 8's `rules` above,
 # and stage 9's `tier1.rules`. Both had drifted, and the only check on either was a literal
 # compared to a count -- `len(lprov["rules"]) == 12` used to sit here, and it passed while
-# `lint.py` could emit 13. Stage 9's list said 4 rules while `audit.py` had already written 35
-# `dimension/undeclared` findings to disk under that very key.
+# `lint.py` could emit 13. Stage 9's list said 4 rules while the recorded run's own `audit.json`
+# already held 35 `dimension/undeclared` findings -- written by `audit.py`, against the four-entry
+# list at `audit.py:1042` (base).
 #
 # The ids are therefore read off the `report.add(...)` call sites, which is what "can emit"
 # means, rather than from a second literal: two literals drift together and the comparison
