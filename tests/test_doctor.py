@@ -905,6 +905,140 @@ check(
     err_buf.getvalue(),
 )
 
+# --- #308: the STT endpoint credential on a printed surface --------------------------
+#
+# The two STT producers record the endpoint themselves -- `BackendInfo.target` in
+# `stt/whispercpp.py:94` and `stt/openai_compat.py:150`, and each backend's own failure
+# messages -- and three readers print that record: `deps.py:193` and `:196` for `doctor`,
+# `pipeline.py:667` for the stage-3 line. So the mask belongs where the record is built,
+# the shape #297 used for `Check.detail`, and `deps.py` is deliberately not touched: the
+# checks below drive the real `check_stt()` and read what `doctor` would print.
+#
+# The URLs are invented. The probe is the suite's `fake_stt_urlopen` re-installed for this
+# block (`restore()` at :693 hands the real one back), so no verdict here depends on a live
+# endpoint -- that is #184's rule, and it is why the wire check is an assertion on the
+# recorded request rather than a read of the code.
+_S308_CRED = "http://svc:not-a-real-308-password@127.0.0.1:45745/v1?api_key=not-a-real-308-secret"
+_S308_MASKED = "http://***@127.0.0.1:45745/v1?api_key=***"
+_S308_PASSWORD = "not-a-real-308-password"
+_S308_SECRET = "not-a-real-308-secret"
+_S308_BACKENDS = (("whispercpp", dywsc.HttpWhisperCpp), ("openai", dyoc.OpenAICompat))
+_S308_REAL_URLOPEN = dywsc.urllib.request.urlopen
+dywsc.urllib.request.urlopen = fake_stt_urlopen
+try:
+    for _name, _cls in _S308_BACKENDS:
+        _target = _cls(_S308_CRED).info().target
+        check(
+            f"#308: {_name} masks the endpoint where its record is built, not where it is printed",
+            _target == _S308_MASKED
+            and _S308_PASSWORD not in _target
+            and _S308_SECRET not in _target,
+            repr(_target),
+        )
+
+    # A mask that blanks the endpoint is a different defect from a leak: scheme, host, port
+    # and path stay readable, and two endpoints stay distinguishable.
+    _s308_plain = dywsc.HttpWhisperCpp("http://192.0.2.10:8390/v1").info().target
+    _s308_other_host = dywsc.HttpWhisperCpp("http://192.0.2.11:8390/v1").info().target
+    check(
+        "#308: and the mask stays usable -- scheme, host, port and path, endpoints still distinct",
+        _s308_plain == "http://192.0.2.10:8390/v1"
+        and _s308_other_host != _s308_plain
+        and dywsc.HttpWhisperCpp("http://192.0.2.10:8391/v1").info().target != _s308_plain
+        and dyoc.OpenAICompat(_S308_CRED).info().target == _S308_MASKED,
+        f"{_s308_plain} vs {_s308_other_host}",
+    )
+
+    # The half that is easy to break while making the output look clean: the probe still
+    # sends the credential. Asserted on the request the stub recorded.
+    del stt_probe_calls[:]
+    for _name, _cls in _S308_BACKENDS:
+        _cls(_S308_CRED).check()
+    check(
+        "#308: the probe still sends the raw credential -- the wire keeps what the record masks",
+        len(stt_probe_calls) == 2
+        and all(_S308_PASSWORD in url and _S308_SECRET in url for url, _timeout in stt_probe_calls)
+        # Both halves in one assertion: the wire is raw AND the record the printers read is
+        # masked. Dropping either half would let this check pass while the other is broken.
+        and dyoc.OpenAICompat(_S308_CRED).info().target == _S308_MASKED,
+        repr([url for url, _timeout in stt_probe_calls]),
+    )
+
+    # Each backend's own "not reachable" message carries the endpoint too, and it becomes
+    # `Check.detail` -- this is the second occurrence #308 measured on one line.
+    stt_probe_error = urllib.error.URLError(OSError(111, "Connection refused"))
+    _s308_messages = []
+    for _name, _cls in _S308_BACKENDS:
+        try:
+            _cls(_S308_CRED).check()
+            _s308_messages.append((_name, "(no raise)"))
+        except dyd.runner.DependencyError as _exc:
+            _s308_messages.append((_name, _exc.message))
+    stt_probe_error = None
+    check(
+        "#308: neither backend's 'not reachable' message carries the credential",
+        all(
+            _S308_PASSWORD not in message
+            and _S308_SECRET not in message
+            and _S308_MASKED in message
+            for _name, message in _s308_messages
+        ),
+        repr(_s308_messages),
+    )
+
+    # And the refusal that names the variable to set, on the URL it just rejected.
+    _s308_refusals = []
+    for _name, _cls in _S308_BACKENDS:
+        try:
+            _cls("ftp://svc:not-a-real-308-password@192.0.2.10/v1").check()
+            _s308_refusals.append((_name, "(no raise)"))
+        except dyd.runner.DependencyError as _exc:
+            _s308_refusals.append((_name, _exc.message))
+    check(
+        "#308: the not-an-http(s) refusal is masked too, on both producers",
+        all(
+            _S308_PASSWORD not in message and "ftp://***@192.0.2.10/v1" in message
+            for _name, message in _s308_refusals
+        ),
+        repr(_s308_refusals),
+    )
+
+    # `check_stt` is the printer -- `deps.py:193` for the failure, `:196` for the success --
+    # and it is unmodified: both verdicts come out of the code `doctor` calls.
+    _s308_saved_backend = os.environ.get(gld_stt.ENV_BACKEND)
+    _s308_saved_url = os.environ.get(dyoc.OPENAI_URL_ENV)
+    os.environ[gld_stt.ENV_BACKEND] = "openai"
+    os.environ[dyoc.OPENAI_URL_ENV] = _S308_CRED
+    try:
+        _s308_ok = dyd.check_stt()
+        stt_probe_error = urllib.error.URLError(OSError(111, "Connection refused"))
+        _s308_bad = dyd.check_stt()
+    finally:
+        stt_probe_error = None
+        if _s308_saved_backend is None:
+            os.environ.pop(gld_stt.ENV_BACKEND, None)
+        else:
+            os.environ[gld_stt.ENV_BACKEND] = _s308_saved_backend
+        if _s308_saved_url is None:
+            os.environ.pop(dyoc.OPENAI_URL_ENV, None)
+        else:
+            os.environ[dyoc.OPENAI_URL_ENV] = _s308_saved_url
+    check(
+        "#308: `doctor`'s stt line is masked on both verdicts -- success and failure",
+        _s308_ok.ok
+        and _s308_bad.ok is False
+        and all(
+            _S308_PASSWORD not in _check.detail
+            and _S308_SECRET not in _check.detail
+            and _S308_MASKED in _check.detail
+            for _check in (_s308_ok, _s308_bad)
+        ),
+        repr((_s308_ok.detail, _s308_bad.detail)),
+    )
+finally:
+    stt_probe_error = None
+    dywsc.urllib.request.urlopen = _S308_REAL_URLOPEN
+
 _env.restore(SAVED_ENV)
 
 print()
