@@ -956,9 +956,16 @@ check(
     "http://***@h:8390/v1" in _prov["parameters"]["endpoint"],
     _prov["parameters"]["endpoint"],
 )
+# The first clause used to read `_wire == f"{_stt_url}/inference"`, which stopped being the
+# request once #314 moved the join into `llm.append_path` (`stt/whispercpp.py:183`): the path is
+# `/v1/inference` and the query follows it. What this check is for is unchanged -- the *wire*
+# carries the raw credential and only the record is masked -- so the expectation is spelled out
+# instead of reconstructed from the old expression.
 check(
     "#284: the raw endpoint still goes on the wire -- the request is untouched",
-    _wire == f"{_stt_url}/inference"
+    _wire
+    == "http://svc:not-a-real-stt-password@h:8390/v1/inference"
+    "?api_key=not-a-real-stt-query-secret&api-version=2026-01-01"
     and "not-a-real-stt-password" in _wire
     and "not-a-real-stt-query-secret" in _wire,
     _wire,
