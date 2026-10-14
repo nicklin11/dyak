@@ -164,7 +164,7 @@ dyak process [path] [options]
 | `--force-export` | replace a vault note that was edited by hand after the last export. Default: refuse, and name the file (#118) |
 | `--no-llm` | run without an LLM endpoint: the note is the template skeleton, not a model's. Without this flag `process` refuses to start when `DYAK_LLM_ENDPOINT` is unset or unreachable (#126) |
 | `--keep-workdir` | keep the work dir even when the run succeeds |
-| `--glossary FILE` | ASR term glossary for stages 9 and 10, in the `\| variant \| canonical \| domain \| date \|` format. Without it the term-drift rule finds nothing and the audit says so |
+| `--glossary FILE` | ASR term glossary for stages 9 and 10, in the `\| variant \| canonical \| domain \| date \|` format. Without it the term-drift rule does not run, so a clean report does not mean the note's terms were checked: `audit-provenance.json` records `"glossary": null` when no path was supplied and the `{"path", "is_file", "entries", "error"}` state otherwise, `repair-provenance.json` records the same object, and the stage names the reason on its own line |
 | `--terms-dir DIR` | atomic term notes for stage 11. Default: `$DYAK_TERMS_DIR`, the `terms_dir` settings key, then `<vault-path>/mscs/_terms`. Without it the note is written unlinked and the stage says so |
 
 ### What the progress output looks like

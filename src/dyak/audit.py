@@ -183,8 +183,8 @@ def check_term_drift(
 ) -> None:
     """A glossary variant that survived into the note is a term the ASR mangled.
 
-    Reported, not corrected. The right fix is the last revision the lecturer actually said,
-    and the glossary holds what was confirmed, not what was guessed at synthesis time.
+    Reported, not corrected: the glossary holds what was confirmed, not what was guessed at
+    synthesis time. Counts the call, not a scan -- `tier1_rules_run` increments regardless (#267).
     """
     report.tier1_rules_run += 1
     for number, line in lines:
@@ -978,6 +978,80 @@ def audit(
     return report
 
 
+def load_glossary(glossary_path: Path | None) -> tuple[Glossary, dict | None]:
+    """The glossary, plus what a reader of the bundle needs to know about it (#267, #270).
+
+    `None` in the second slot means no path was supplied: `term/drift` cannot run, and a zero
+    for it is not a clean result. A supplied path yields four uniform keys -- the path the user
+    typed, the predicate this loader itself uses, what came back, and the reader's reason -- so
+    "not configured" and "supplied and unusable" stop producing identical numbers. That
+    identity is the defect both issues name: `docs/running.md:167` promised the audit "says so"
+    about a missing glossary, and the artefacts carried no such field, so the two states were
+    byte-identical.
+
+    `error` is `str(exc)` verbatim -- the reader's reason rather than a paraphrase, the
+    convention `report.py:502-513` uses for an unusable quality gate. `UnicodeDecodeError` is a
+    `ValueError`, not an `OSError`, and a binary or Latin-1 glossary reaches the same
+    `read_text` frame as a `chmod 000` one does (#270).
+
+    The glossary is an *optional* input: the note is finished at stage 7, so a path that cannot
+    be read is recorded and named, never raised -- the settlement `report.py:418-423` and
+    `link.py:345-348` already use, against the required-artefact case that gets a code
+    (`exitcodes.py:32-37`, exit 6).
+    """
+    if glossary_path is None:
+        return Glossary(), None
+    facts: dict = {
+        "path": str(glossary_path),
+        "is_file": glossary_path.is_file(),
+        "entries": 0,
+        "error": None,
+    }
+    if not facts["is_file"]:
+        return Glossary(), facts
+    try:
+        text = glossary_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        facts["error"] = str(exc)
+        return Glossary(), facts
+    glossary = Glossary.parse(text)
+    facts["entries"] = len(glossary.entries)
+    return glossary, facts
+
+
+def glossary_note(facts: dict | None) -> str | None:
+    """The stage line for `load_glossary`'s facts: one sentence, or `None` when the glossary
+    was read and had entries (#267, #270).
+
+    Two surfaces carry the same fact on purpose: this line is what the person running the
+    stage sees, and the provenance field is what the next reader of the bundle opens. There is
+    nothing to say when `term/drift` had a vocabulary to compare against; `entries == 0` is the
+    state in which the rule was called, read nothing and reported nothing, so a report that
+    looks clean is clean only for the three rules that could run.
+    """
+    if facts is None:
+        return (
+            "note: no glossary supplied -- term/drift did not run, so a clean report does "
+            "not mean the note's terms were checked"
+        )
+    if facts["entries"]:
+        return None
+    if facts["error"]:
+        return (
+            f"note: glossary {facts['path']!r} cannot be read ({facts['error']}); term/drift "
+            "did not run, so a clean report does not mean the note's terms were checked"
+        )
+    if not facts["is_file"]:
+        return (
+            f"note: glossary {facts['path']!r} is not a readable file; term/drift did not "
+            "run, so a clean report does not mean the note's terms were checked"
+        )
+    return (
+        f"note: glossary {facts['path']!r} has no usable entries; term/drift did not run, so "
+        "a clean report does not mean the note's terms were checked"
+    )
+
+
 def run(
     note: Path,
     transcript_txt: Path,
@@ -990,11 +1064,7 @@ def run(
     destination.mkdir(parents=True, exist_ok=True)
     markdown = note.read_text(encoding="utf-8") if note.is_file() else ""
     transcript = transcript_txt.read_text(encoding="utf-8") if transcript_txt.is_file() else ""
-    glossary = (
-        Glossary.parse(glossary_path.read_text(encoding="utf-8"))
-        if glossary_path and glossary_path.is_file()
-        else Glossary()
-    )
+    glossary, glossary_facts = load_glossary(glossary_path)
     trace = llm.Transcript()
     report = audit(
         markdown, transcript, glossary, config=config, llm_transcript=trace, stream=stream
@@ -1002,9 +1072,15 @@ def run(
     (destination / REPORT_NAME).write_text(
         json.dumps(report.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    (destination / PROVENANCE_NAME).write_text(provenance(report, config) + "\n", encoding="utf-8")
+    (destination / PROVENANCE_NAME).write_text(
+        provenance(report, config, glossary=glossary_facts) + "\n", encoding="utf-8"
+    )
     if trace.calls:
         trace.write(destination / LLM_TRANSCRIPT_NAME)
+    if stream is not None:
+        line = glossary_note(glossary_facts)
+        if line is not None:
+            stream.write(f"           {line}\n")
     return report
 
 
@@ -1028,7 +1104,9 @@ def prompt_digest() -> str:
     ).hexdigest()
 
 
-def provenance(report: Report, config: llm.Config | None = None) -> str:
+def provenance(
+    report: Report, config: llm.Config | None = None, glossary: dict | None = None
+) -> str:
     return json.dumps(
         {
             "stage": 9,
@@ -1072,6 +1150,17 @@ def provenance(report: Report, config: llm.Config | None = None) -> str:
                     "problem are all outside it."
                 ),
                 "rules_run": report.tier1_rules_run,
+                #: `None` when no glossary was supplied, and otherwise the four-key state the
+                #: loader established: `path` as typed, `is_file` the predicate it used,
+                #: `entries` what came back and `error` the reader's reason verbatim. Before
+                #: this key, "you did not configure a glossary" and "the glossary you named
+                #: could not be read" produced byte-identical provenance files (#267, #270),
+                #: and `term/drift` is counted in `rules_run` above either way -- its zero is
+                #: uninformative rather than clean. It cannot live in `audit.json`: that
+                #: report's `ok` is a claim about the *note* (`:122-124`), and a
+                #: configuration fact must not turn a note with nothing wrong in it into a
+                #: finding `repair` would then treat as repairable.
+                "glossary": glossary,
                 # The word "rules" was doing two jobs in this block (#304): the list above and
                 # the counter beside it. A bundle reader has these two JSON files and no source,
                 # so the distinction has to be *in* the file -- the comment #303 leaves above the

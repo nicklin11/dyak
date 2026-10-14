@@ -1027,6 +1027,30 @@ check(
     PROCESS_PARSER.format_help(),
 )
 
+# --- 8b2. the two copies of the --glossary sentence, and what each now says --------------
+# #267: both copies said "Without it the term-drift rule finds nothing and the audit says so".
+# The first half was true and the second was not -- `audit-provenance.json` carried no field
+# naming the glossary, so a run with one and a run without one wrote byte-identical files, and
+# the sentence promised a signal the code never produced. The fix records the state in
+# `audit-provenance.json`'s tier1 block and in `repair-provenance.json`, so the docs row must
+# name the artefact a reader would open. The CLI copy cannot name a file in one line, so it is
+# pinned on the claim it makes instead: the rule *does not run*, which is the half that was
+# false, and it must not still say the audit says so.
+GLOSSARY_HELP = next(a.help for a in PROCESS_PARSER._actions if a.dest == "glossary")
+check(
+    "--glossary's help says the rule does not run, not that a zero was reported",
+    "does not run" in GLOSSARY_HELP and "finds nothing" not in GLOSSARY_HELP,
+    GLOSSARY_HELP,
+)
+_glossary_row = next(
+    (line for line in RUNNING.splitlines() if line.startswith("| `--glossary FILE`")), ""
+)
+check(
+    "the --glossary row of running.md names the artefact that records the state",
+    "audit-provenance" in _glossary_row and "finds nothing" not in _glossary_row,
+    _glossary_row,
+)
+
 # --- 8c. the --help exit-code sentence names every cause the ladder returns -------------
 # #238: the rendered `dyak --help` said "{4} if frames were soft" while `cli.py` returned 4 from
 # two places. The second cause landed with #223's guard (`cli.py:442`, guarded on `considered`),

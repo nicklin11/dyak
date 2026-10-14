@@ -743,8 +743,10 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help=(
             "ASR term glossary for stages 9 and 10, in the project's "
-            "`| variant | canonical | domain | date |` format. Without it the term-drift "
-            "rule finds nothing and the audit says so."
+            "`| variant | canonical | domain | date |` format. Without it, or with a path "
+            "that cannot be read, the term-drift rule does not run and a clean report does "
+            "not mean the note's terms were checked: the state is recorded in the stage "
+            "provenance and named on the stage's line."
         ),
     )
     p_process.add_argument(
