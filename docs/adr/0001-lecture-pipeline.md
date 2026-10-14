@@ -1051,7 +1051,7 @@ because the directory holds 18 files either way.
 
 The synthesis ran in template mode and the audit's tier 2 did not run, because
 `DYAK_LLM_ENDPOINT` is unset. **The 0 findings this run reports are not evidence about the
-audit.** Tier 1 ran four deterministic rules against a template note; the 21-finding baseline
+audit.** Tier 1 ran its four deterministic checks against a template note; the 21-finding baseline
 was measured against a hand-written note. Comparing the two sets would compare a template
 against prose, which is not a regression check in any direction.
 

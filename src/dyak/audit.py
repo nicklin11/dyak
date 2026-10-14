@@ -127,8 +127,13 @@ class Report:
         errors = sum(1 for f in self.findings if f.severity == "ERROR")
         warns = sum(1 for f in self.findings if f.severity == "WARN")
         dropped = f", {len(self.dropped)} discarded" if self.dropped else ""
+        # "tier-1 checks", not "rules" (#304). The counter is how many of the four checks ran, and
+        # the word "rules" is the declared id list `audit-provenance.json:1049` writes -- a list
+        # that is not the same set of things: `check_dimensions` alone reports three of its ids.
+        # Stage 8 already prints the same quantity as "N checks" (`lint.py:111`), so a reader who
+        # has seen one line reads the other correctly.
         return (
-            f"{self.tier1_rules_run} rules, {errors} errors, {warns} warnings"
+            f"{self.tier1_rules_run} tier-1 checks, {errors} errors, {warns} warnings"
             f"{dropped}, tier 2 {self.tier2}"
         )
 
@@ -1051,6 +1056,20 @@ def provenance(report: Report, config: llm.Config | None = None) -> str:
                     "problem are all outside it."
                 ),
                 "rules_run": report.tier1_rules_run,
+                # The word "rules" was doing two jobs in this block (#304): the list above and
+                # the counter beside it. A bundle reader has these two JSON files and no source,
+                # so the distinction has to be *in* the file -- the comment #303 leaves above the
+                # list is not what a reader of a fresh bundle opens.
+                #
+                # Deliberately about the quantities, not about completeness: on main this list is
+                # still short of the ids the stage can write (#266 fixed that in #303), and a
+                # sentence claiming the list is every id would be false the moment it merged.
+                "counting": (
+                    "`rules` names ids; `rules_run` counts checks. The two are different "
+                    "quantities and neither is the length of the other: a single check can "
+                    "report several ids, and a check that finds nothing to check still counts "
+                    "in `rules_run` while reporting a `-skipped` marker for the absence."
+                ),
             },
             "tier2": {
                 "requires_model": True,
