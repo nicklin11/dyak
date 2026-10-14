@@ -16,6 +16,7 @@ because that is where this pipeline's real failures live:
 The one real end-to-end run lives outside this file, in the acceptance notes.
 """
 
+import ast
 import base64
 import hashlib
 import io
@@ -5982,9 +5983,11 @@ check(
     _monkey_cfg.redacted()["endpoint"],
 )
 # The other route out of the process: the four `EndpointError` messages quote the URL, and their
-# text reaches logs and stage provenance's `error` field. They print the redacted form, while the
-# request itself keeps the raw one -- redacting that would break authentication rather than a
-# record.
+# text reaches logs (`runner.py:101`, stderr) and `run-state.json`'s `error` field, which keeps
+# the reason verbatim (`pipeline.py:280`, #271/#286). Not a stage provenance `error`: no
+# provenance writer has that key -- the claim this comment used to make, corrected by #285. They
+# print the redacted form, while the request itself keeps the raw one -- redacting that would
+# break authentication rather than a record.
 _llm_source = pathlib.Path(dyle.__file__).read_text(encoding="utf-8")
 check(
     "#279: the error messages quote the redacted URL, and the request still gets the raw one",
@@ -6156,6 +6159,71 @@ check(
     and _path_cfg.redacted()["endpoint"] == "http://h:8317/v1?api_key=***&api-version=2026-01-01"
     and "not-a-real-query-secret" not in json.dumps(_path_cfg.redacted()),
     repr({"url": _path_cfg.url, "redacted": _path_cfg.redacted()["endpoint"]}),
+)
+
+# #285: the artefact those four strings reach is the bundle's run state, not a stage provenance.
+# Read from the writer rather than from the sentence: this is the call `pipeline.run` makes from
+# its `finally` (`pipeline.py:547-556`), with the verbatim reason it hands over at `:540`.
+_rs_cfg = dyle.Config(
+    endpoint="http://svc:not-a-real-password@h:8317/v1?api_key=not-a-real-query-secret",
+    model="m",
+    api_key="k",
+)
+_rs_reason = f"HTTP 500 from {dyle.redact_endpoint(_rs_cfg.url)}: nope"
+# Under the suite's own scratch, not a fresh `mkdtemp`: `tmp` is removed on both exits
+# (`tests/test_stages.py:224`, `:11126`, #307/#315), so a `dyak-run-state-*` directory here
+# would be the eighth leak of exactly the kind #315 closed -- one per run, never removed.
+_rs_dir = tmp / "run-state"
+_rs_dir.mkdir()
+_rs_src = _rs_dir / "lecture.mp4"
+_rs_src.write_bytes(b"x")
+(_rs_dir / "bundle").mkdir()
+try:
+    dyp.write_run_state(
+        dyb.Bundle.open(_rs_src, output_dir=str(_rs_dir / "bundle"), overwrite=False),
+        source=_rs_src,
+        run_id="r",
+        started_at="t",
+        reports=[],
+        outcome="failed",
+        detail="EndpointError",
+        error=_rs_reason,
+    )
+    _rs_state = json.loads((_rs_dir / "bundle" / dyp.RUN_STATE_NAME).read_text(encoding="utf-8"))
+except (OSError, TypeError, ValueError) as _rs_exc:
+    _rs_state = {"raised": repr(_rs_exc)}
+check(
+    "#285: the text the redacted messages build lands in run-state.json's `error`, verbatim",
+    _rs_state.get("error") == _rs_reason
+    and _rs_state.get("detail") == "EndpointError"
+    and "not-a-real-password" not in str(_rs_state.get("error"))
+    and "not-a-real-query-secret" not in str(_rs_state.get("error")),
+    repr({k: _rs_state.get(k) for k in ("error", "detail", "raised")}),
+)
+_pipeline_source = pathlib.Path(dyp.__file__).read_text(encoding="utf-8")
+check(
+    "#285: and pipeline hands that writer the exception's own message, so the string arrives there",
+    "str(exc) or None" in _pipeline_source
+    and "error=error," in _pipeline_source
+    and '"error": error,' in _pipeline_source,
+    repr(
+        {
+            "str(exc) or None": "str(exc) or None" in _pipeline_source,
+            "error=error,": "error=error," in _pipeline_source,
+            '"error": error,': '"error": error,' in _pipeline_source,
+        }
+    ),
+)
+_provenance_writers = (dysy, dyau, dyrep, dycap, dyln, dylk, dyro, dyprobe, dyq)
+_prov_sources = {
+    pathlib.Path(module.__file__).name: pathlib.Path(module.__file__).read_text(encoding="utf-8")
+    for module in _provenance_writers
+}
+check(
+    "#285: no stage-provenance document has an `error` field -- that key is run-state.json's",
+    all(hasattr(module, "PROVENANCE_NAME") for module in _provenance_writers)
+    and all('"error":' not in source for source in _prov_sources.values()),
+    repr({name: '"error":' in source for name, source in _prov_sources.items()}),
 )
 
 # The artefacts.
@@ -6692,8 +6760,71 @@ check(
 )
 lprov = json.loads((ldest / dyln.PROVENANCE_NAME).read_text())
 check("provenance says no model is involved", lprov["requires_model"] is False, str(lprov))
-check("provenance names every rule it ran", len(lprov["rules"]) == 12, str(lprov["rules"]))
 check("provenance says what blocks the gate", lprov["blocking"] == "ERROR", str(lprov))
+
+
+# --- the declared rule lists against what the code can emit (#266) --------------------
+# Two hand-written lists publish which rules each stage can report: stage 8's `rules` above,
+# and stage 9's `tier1.rules`. Both had drifted, and the only check on either was a literal
+# compared to a count -- `len(lprov["rules"]) == 12` used to sit here, and it passed while
+# `lint.py` could emit 13. Stage 9's list said 4 rules while the recorded run's own `audit.json`
+# already held 35 `dimension/undeclared` findings -- written by `audit.py`, against the four-entry
+# list at `audit.py:1042` (base).
+#
+# The ids are therefore read off the `report.add(...)` call sites, which is what "can emit"
+# means, rather than from a second literal: two literals drift together and the comparison
+# passes while both are wrong. A `report.add` whose rule argument is not a literal would
+# shrink the set silently, so it is an assertion failure, not a skip -- the harvest is allowed
+# to be incomplete only loudly.
+def _emitted_rules(module) -> set[str]:
+    """Every rule id the module's `report.add` call sites pass, read from the AST.
+
+    The argument position is not hard-coded per module: it is the `add` parameter named
+    `rule` (`lint.py:92` takes it first, `audit.py:118` after the tier).
+    """
+    tree = ast.parse(pathlib.Path(module.__file__).read_text(encoding="utf-8"))
+    signatures = [
+        [a.arg for a in fn.args.args][1:]
+        for cls in ast.walk(tree)
+        if isinstance(cls, ast.ClassDef) and cls.name == "Report"
+        for fn in cls.body
+        if isinstance(fn, ast.FunctionDef) and fn.name == "add"
+    ]
+    index = signatures[0].index("rule")
+    out: set[str] = set()
+    for call in [n for n in ast.walk(tree) if isinstance(n, ast.Call)]:
+        func = call.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == "add"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "report"
+        ):
+            continue
+        argument = call.args[index]
+        assert isinstance(argument, ast.Constant) and isinstance(argument.value, str), (
+            f"{module.__name__}:{call.lineno} passes a non-literal rule id, so this "
+            f"comparison would silently not see it"
+        )
+        out.add(argument.value)
+    return out
+
+
+lint_emitted = _emitted_rules(dyln)
+audit_emitted = _emitted_rules(dyau)
+audit_declared = set(json.loads(dyau.provenance(dyau.Report()))["tier1"]["rules"])
+check(
+    "the declared lint rules name every id lint.py can emit, and nothing else (#266)",
+    set(lprov["rules"]) == lint_emitted,
+    f"emitted but undeclared: {sorted(lint_emitted - set(lprov['rules']))}; "
+    f"declared but unemittable: {sorted(set(lprov['rules']) - lint_emitted)}",
+)
+check(
+    "and audit's tier1.rules names every id audit.py can emit, and nothing else (#266)",
+    audit_declared == audit_emitted,
+    f"emitted but undeclared: {sorted(audit_emitted - audit_declared)}; "
+    f"declared but unemittable: {sorted(audit_declared - audit_emitted)}",
+)
 lrep = json.loads((ldest / dyln.REPORT_NAME).read_text())
 check(
     "the report separates errors from warnings",
@@ -8345,7 +8476,7 @@ with tempfile.TemporaryDirectory() as _vc_td:
 # anything is written (`pipeline.py:409`), and nothing failed if that line went: the #121 test
 # above copies the caption cache before the clear, the stale-`audit.json` test below is
 # deliberately independent of it ("even with the clear deliberately skipped"), and
-# `tests/test_claims.py:839-845` is about the `RUN_ARTEFACTS` constant. So "a second run clears
+# `tests/test_claims.py:840-846` is about the `RUN_ARTEFACTS` constant. So "a second run clears
 # the root first" was a comment with no assertion behind it.
 #
 # The pin is the case the clear exists for. Run 1 with the LLM synthesizer publishes
@@ -10384,11 +10515,54 @@ with tempfile.TemporaryDirectory() as _audit_tmp:
     _audit_file = json.loads(
         (_audit_dir / "out" / dyau.PROVENANCE_NAME).read_text(encoding="utf-8")
     )
+    _audit_report = json.loads((_audit_dir / "out" / dyau.REPORT_NAME).read_text(encoding="utf-8"))
 check(
     "#256: the written audit-provenance.json carries the digest and the seed",
     _audit_file.get("prompt_sha256") == dyau.prompt_digest()
     and _audit_file.get("endpoint", {}).get("seed") == dyle.SEED,
     repr({k: _audit_file.get(k) for k in ("prompt_sha256", "endpoint")}),
+)
+# --- #304: the record says what each of its two tier-1 counts counts -----------------
+# The bundle above is a real one, so the mechanism can be measured rather than described:
+# `rules_run` is 4 because all four `check_*` functions are called (`audit.py:903-906`) and each
+# counts itself first (`:184`, `:308`, `:387`, `:418`) -- `check_dimensions` incremented at `:308`
+# and then found no declared shape, so it reported `audit/dimensions-skipped` (`:311-317`) instead
+# of going uncounted. That is what "declared but did not run" actually is: the list holds *ids*
+# (a skipped marker is one, emitted by a check that ran) and the counter holds *checks*, so the
+# two are different quantities whatever their numbers are. #266's incompleteness in that list is
+# #303's; this change is the record and the docs saying which is which.
+_tier1 = _audit_file["tier1"]
+check(
+    "#304: audit-provenance.json says what `rules` and `rules_run` each count",
+    isinstance(_tier1.get("counting"), str)
+    and "`rules` names ids" in _tier1["counting"]
+    and "`rules_run` counts checks" in _tier1["counting"],
+    repr(_tier1.get("counting")),
+)
+check(
+    "#304: the counter counts checks that ran, including the one that had nothing to check",
+    _tier1["rules_run"] == 4
+    and _audit_report["tier1_rules_run"] == 4
+    and "audit/dimensions-skipped" in [f["rule"] for f in _audit_report["findings"]],
+    f"rules_run={_tier1['rules_run']} report={_audit_report['tier1_rules_run']} "
+    f"findings={[f['rule'] for f in _audit_report['findings']]}",
+)
+check(
+    "#304: the summary line names the counter with a word the list does not use",
+    dyau.Report(tier1_rules_run=4).summary().startswith("4 tier-1 checks,"),
+    dyau.Report(tier1_rules_run=4).summary(),
+)
+_quality_doc = (REPO / "docs" / "quality.md").read_text(encoding="utf-8")
+check(
+    "#304: docs/quality.md's stage-9 sentence is true of this bundle, not of the record's shape",
+    "Four deterministic tier-1 checks" in _quality_doc
+    and "Four tier-1 rules" not in _quality_doc
+    # "Four ... checks" is the claim, and this bundle is the evidence for it: `rules_run` is 4
+    # and `tier1.rules` is a list of ids, one of which (`audit/dimensions-skipped`) this run
+    # reported from a check that had no shape to check. A sentence that said "four tier-1 rules"
+    # would be true of neither the list nor the counter -- they are different quantities.
+    and _tier1["rules_run"] == 4,
+    "docs/quality.md stage 9 vs this bundle",
 )
 _llm_source = pathlib.Path(dyle.__file__).read_text(encoding="utf-8")
 check(
@@ -11001,6 +11175,178 @@ with tempfile.TemporaryDirectory() as _r253_td:
 
 
 _env.restore(SAVED_ENV)
+
+# --- #314: the two STT backends' URL joins --------------------------------------------
+#
+# Both backends appended their segment to the whole string (`f"{self.base_url}/inference"`), so
+# an endpoint carrying a query took the segment into the last parameter's value and the request
+# went to the endpoint's own path: `POST /v1?api_key=<value>&api-version=2026-01-01/inference`
+# parsed as path `/v1` with `api-version=2026-01-01/inference`. That is #281's mechanism, in the
+# two files #281 never named (#314), and the fix is the helper that mechanism already has --
+# `llm.append_path` (`llm.py:227`, public, module level, no cycle: `stt/__init__.py` and
+# `stt/openai_compat.py` already import from `..llm`) -- rather than a second join beside it.
+#
+# Six sites, all six checked below: whispercpp's `GET /health`, its `POST /inference` and the
+# endpoint it records; openai_compat's `GET /v1/models`, its `POST /v1/audio/transcriptions` and
+# the endpoint it records. #314 lists four; the two it does not name are the whisper.cpp probe
+# and the openai record. The source check at the end fails if a seventh appears, or if any of
+# the six goes back to a concatenation.
+#
+# Invented URLs, and a stub `urlopen` replaced per call and restored in the `finally`: this
+# suite's own fake answers `/health` by suffix, and a query-bearing endpoint puts the query
+# after the path, so no check here may depend on either stub's matching rule (#184).
+_S314_BASE = "http://127.0.0.1:10302"
+_S314_Q = f"{_S314_BASE}?api_key=not-a-real-314-secret&api-version=2026-01-01"
+_S314_WAV = tmp / "t254-join.wav"
+_S314_WAV.write_bytes(b"RIFF" + b"\x00" * 64)
+_S314_CALLS: list[tuple[str, str]] = []
+_S314_SAVED_URLOPEN = urllib.request.urlopen
+
+
+class _S314Response:
+    def read(self, *args: object) -> bytes:
+        return b'{"text": "not a real transcript"}'
+
+    def __enter__(self) -> "_S314Response":
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+
+def _s314_urlopen(request, timeout=None):
+    _S314_CALLS.append((request.get_method(), request.full_url))
+    return _S314Response()
+
+
+def _s314_wire(base: str) -> tuple[list[tuple[str, str]], str, str]:
+    """The two backends' four wire URLs and their two recorded endpoints, for one base URL."""
+    del _S314_CALLS[:]
+    urllib.request.urlopen = _s314_urlopen
+    try:
+        whisper = dysw.HttpWhisperCpp(base)
+        whisper.check()
+        whisper.run(_S314_WAV, timeout=30.0)
+        openai = dyso.OpenAICompat(base)
+        openai.check()
+        openai.run(_S314_WAV, timeout=30.0)
+    finally:
+        urllib.request.urlopen = _S314_SAVED_URLOPEN
+    return (
+        list(_S314_CALLS),
+        whisper.parameters(client_timeout=30.0)["endpoint"],
+        openai.parameters(client_timeout=30.0)["endpoint"],
+    )
+
+
+_s314_calls, _s314_w_endpoint, _s314_o_endpoint = _s314_wire(_S314_Q)
+_s314_q = "api_key=not-a-real-314-secret&api-version=2026-01-01"
+_s314_sites = [
+    ("whispercpp GET /health", _s314_calls[0], ("GET", f"{_S314_BASE}/health?{_s314_q}")),
+    ("whispercpp POST /inference", _s314_calls[1], ("POST", f"{_S314_BASE}/inference?{_s314_q}")),
+    ("openai GET /v1/models", _s314_calls[2], ("GET", f"{_S314_BASE}/v1/models?{_s314_q}")),
+    (
+        "openai POST /v1/audio/transcriptions",
+        _s314_calls[3],
+        ("POST", f"{_S314_BASE}/v1/audio/transcriptions?{_s314_q}"),
+    ),
+]
+for _s314_label, _s314_got, _s314_want in _s314_sites:
+    check(
+        f"#314: {_s314_label} puts the segment in the path and keeps the query in order",
+        _s314_got == _s314_want,
+        repr(_s314_got),
+    )
+
+check(
+    "#314: whispercpp's recorded endpoint is the request URL, not the query with the path in it",
+    _s314_w_endpoint == f"{_S314_BASE}/inference?{_s314_q}",
+    repr(_s314_w_endpoint),
+)
+check(
+    "#314: and openai's recorded endpoint is the same shape",
+    _s314_o_endpoint == f"{_S314_BASE}/v1/audio/transcriptions?{_s314_q}",
+    repr(_s314_o_endpoint),
+)
+
+# Both directions: no query must stay byte-identical to what the concatenation produced, so a
+# host that never sets a query endpoint cannot be changed by this fix. The expected strings are
+# the old expressions verbatim.
+_s314_plain = _s314_wire(_S314_BASE)
+check(
+    "#314: an endpoint with no query produces the byte-identical four URLs it did before",
+    _s314_plain[0]
+    == [
+        ("GET", f"{_S314_BASE}/health"),
+        ("POST", f"{_S314_BASE}/inference"),
+        ("GET", f"{_S314_BASE}/v1/models"),
+        ("POST", f"{_S314_BASE}/v1/audio/transcriptions"),
+    ],
+    repr(_s314_plain[0]),
+)
+check(
+    "#314: and its two recorded endpoints too",
+    _s314_plain[1:] == (f"{_S314_BASE}/inference", f"{_S314_BASE}/v1/audio/transcriptions"),
+    repr(_s314_plain[1:]),
+)
+check(
+    "#314: a trailing slash on a no-query endpoint is still the same string, not a double slash",
+    _s314_wire(f"{_S314_BASE}/") == _s314_plain,
+    repr(_s314_wire(f"{_S314_BASE}/")),
+)
+_s314_frag = _s314_wire(f"{_S314_BASE}?{_s314_q}#frag")
+check(
+    "#314: a fragment survives the join -- the segment does not land in it",
+    _s314_frag[0][:2]
+    == [
+        ("GET", f"{_S314_BASE}/health?{_s314_q}#frag"),
+        ("POST", f"{_S314_BASE}/inference?{_s314_q}#frag"),
+    ],
+    repr(_s314_frag[0]),
+)
+
+# The source half: three joins per backend, none of them a concatenation. A seventh appender or
+# a reverted site fails here even if some shape below happened to match by accident.
+# Comments are excluded: the comment above each first join quotes the old expression on
+# purpose, and a check that counted it would be reading this file's prose as code.
+_s314_sources = {
+    name: "\n".join(
+        line
+        for line in pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    )
+    for name, module in ((dysw.__name__, dysw), (dyso.__name__, dyso))
+}
+check(
+    "#314: both backends join with `append_path` three times each and never concatenate `base_url`",
+    all(source.count("append_path(") == 3 for source in _s314_sources.values())
+    and all('f"{self.base_url}' not in source for source in _s314_sources.values()),
+    repr(
+        {
+            name: (source.count("append_path("), 'f"{self.base_url}' in source)
+            for name, source in _s314_sources.items()
+        }
+    ),
+)
+
+# The work directory is removed on both exits, not only on the success path. The shape is the one
+# PR #306 uses in `tests/test_serve.py` for #294's leak, copied rather than reinvented: nothing reads
+# `tmp` after the run -- the `DYAK_*` variables that point into it (`tests/test_stages.py:226`,
+# `:236`, `:243`) are restored on the line above, no check prints its path, and the failure line
+# below lists check *names*. A directory kept for inspection would have no reader, and it costs
+# 96 KiB of tmpfs blocks per run (one fresh `dyak-test-*`, `du -sk`, measured on this host
+# 2026-10-13), once per full-gate run: 246 accumulated directories were sitting there when #307
+# was filed, and that accumulation is the whole defect.
+#
+# `shutil.rmtree` and not `tempfile.TemporaryDirectory`: `tmp` is created at
+# `tests/test_stages.py:224` and read by checks thousands of lines below, so its lifetime is the
+# module's rather than a `with` block's. A removal that fails is reported instead of swallowed --
+# "could not be removed" is the phrase `src/dyak/workspace.py:70` and `tests/test_stages.py:385`
+# use for the same situation, and silence would be the leak with a false report on top.
+try:
+    shutil.rmtree(tmp)
+except OSError as exc:
+    print(f"\nstage suite work directory could not be removed: {tmp} ({exc})")
 
 print()
 if failures:

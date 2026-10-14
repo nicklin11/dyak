@@ -104,6 +104,12 @@ jobs:
       # fail (#173), so it is wired here like every other one.
       - name: Repair bookkeeping suite (#283)
         run: python tests/test_repair_declined.py
+      # The STT endpoint's credential (#289): the four failure messages quote the redacted URL,
+      # the four request URLs keep the raw one, and the helper they go through
+      # (`redact_endpoint`) stays acyclic for `stt`. The masking itself is #308's, on main
+      # since `2dfac69`; this suite is the pin, and no workflow ran it before (#173).
+      - name: STT endpoint suite (#289)
+        run: python tests/test_stt_redaction.py
 
       # The durable record a failed run leaves (#271): the reason reaches the bundle verbatim,
       # `detail` stays the category, and no traceback or host path travels with it.

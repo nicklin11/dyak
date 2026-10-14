@@ -40,6 +40,7 @@ from pathlib import Path
 
 from .. import exitcodes as ec
 from .. import runner
+from ..llm import append_path, redact_endpoint
 from ..deps import PROBE_TIMEOUT
 from ..settings import WHISPERCPP_LANGUAGE_ENV as ENV_LANGUAGE
 from ..settings import WHISPERCPP_URL_ENV, resolve
@@ -85,7 +86,12 @@ class HttpWhisperCpp:
     def info(self) -> BackendInfo:
         return BackendInfo(
             name=self.name,
-            target=self.base_url or "(not configured)",
+            # `redact_endpoint` here, where the record is built, not at any printer (#308):
+            # `BackendInfo.target` is read by `doctor`'s two lines (`deps.py:193`, `:196`) and by
+            # the stage-3 line (`pipeline.py:667`), and masking at one of them would leave the
+            # next printer to be found by hand -- the shape #297 fixed for `Check.detail`. The
+            # raw URL stays in `self.base_url` for the probe and the wire.
+            target=redact_endpoint(self.base_url) or "(not configured)",
             detail="whisper.cpp native /inference",
             notes=("this build does not serve the OpenAI-compatible /v1/* routes",),
         )
@@ -105,11 +111,21 @@ class HttpWhisperCpp:
             raise runner.DependencyError(
                 name=self.name,
                 code=ec.USAGE,
-                message=f"DYAK_WHISPERCPP_URL is not an http(s) URL: {self.base_url!r}",
+                # Masked at the message, for the same reason as `target` above (#308): this
+                # string becomes `Check.detail`, which `doctor` prints.
+                message=(
+                    f"DYAK_WHISPERCPP_URL is not an http(s) URL: {redact_endpoint(self.base_url)!r}"
+                ),
                 remediation=ENDPOINT_REMEDIATION,
             )
         try:
-            request = urllib.request.Request(f"{self.base_url}/health", method="GET")
+            # `append_path`, not `f"{self.base_url}/health"`: an endpoint carrying a query
+            # string took the segment into the last parameter's value, so the probe went to
+            # the endpoint's own path with a corrupted parameter (#314 -- the same mechanism
+            # as #281, in the two files #281 never named). Splitting the URL keeps the segment
+            # in the path; `self.base_url` stays the raw string for this request and for
+            # `redact_endpoint` above. The same join is used at the POST and at the record.
+            request = urllib.request.Request(append_path(self.base_url, "/health"), method="GET")
             # The stage-0 probe budget, not a bare literal (#189). A whisper.cpp container is
             # often wake-on-first-request, so the first `GET /health` against a cold one is
             # spent waiting for the wake: a 5.0 s literal here reported a working endpoint as
@@ -139,7 +155,9 @@ class HttpWhisperCpp:
             raise runner.DependencyError(
                 name=self.name,
                 code=ec.DEPENDENCY_FAILED,
-                message=f"whisper.cpp is not reachable at {self.base_url}: {_reason(exc)}",
+                message=(
+                    f"whisper.cpp is not reachable at {redact_endpoint(self.base_url)}: {_reason(exc)}"
+                ),
                 remediation=ENDPOINT_REMEDIATION,
             ) from exc
 
@@ -162,7 +180,7 @@ class HttpWhisperCpp:
         boundary = f"dyak-{uuid.uuid4().hex}"
         body = self._multipart(boundary, Path(wav), timeout)
         request = urllib.request.Request(
-            f"{self.base_url}/inference",
+            append_path(self.base_url, "/inference"),
             data=body,
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             method="POST",
@@ -222,7 +240,7 @@ class HttpWhisperCpp:
         audio, which is the situation these parameters exist to make diagnosable.
         """
         return {
-            "endpoint": f"{self.base_url}/inference",
+            "endpoint": append_path(self.base_url, "/inference"),
             "backend": self.name,
             "detail": "whisper.cpp native /inference",
             "fields": dict(self._fields(client_timeout)),

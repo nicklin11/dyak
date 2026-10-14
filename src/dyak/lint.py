@@ -482,8 +482,19 @@ def provenance(report: Report) -> str:
             "stage": 8,
             "tool": "dyak-lint-v1",
             "requires_model": False,
+            # A literal, kept in sync by hand rather than derived from the code. The ordering
+            # and the prose around it are what a reader uses, and deriving it would mean this
+            # module parsing itself at import. What keeps it honest is the stage tests'
+            # comparison against the `report.add` call sites (#266): before that comparison
+            # this list said 12 rules while `:164` could emit `structure/unknown-section` --
+            # an ERROR, firing since the rule existed, and undocumented.
+            #
+            # `structure/unknown-section` sits next to `structure/missing-section` because the
+            # same branch emits both: a section heading that is absent, and one that is present
+            # and is not one of the eight the synthesizer skill defines.
             "rules": [
                 "structure/missing-section",
+                "structure/unknown-section",
                 "structure/renamed-section",
                 "structure/order",
                 "structure/duplicate-heading",

@@ -19,6 +19,7 @@ import ast
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
 import urllib.error
@@ -955,9 +956,16 @@ check(
     "http://***@h:8390/v1" in _prov["parameters"]["endpoint"],
     _prov["parameters"]["endpoint"],
 )
+# The first clause used to read `_wire == f"{_stt_url}/inference"`, which stopped being the
+# request once #314 moved the join into `llm.append_path` (`stt/whispercpp.py:183`): the path is
+# `/v1/inference` and the query follows it. What this check is for is unchanged -- the *wire*
+# carries the raw credential and only the record is masked -- so the expectation is spelled out
+# instead of reconstructed from the old expression.
 check(
     "#284: the raw endpoint still goes on the wire -- the request is untouched",
-    _wire == f"{_stt_url}/inference"
+    _wire
+    == "http://svc:not-a-real-stt-password@h:8390/v1/inference"
+    "?api_key=not-a-real-stt-query-secret&api-version=2026-01-01"
     and "not-a-real-stt-password" in _wire
     and "not-a-real-stt-query-secret" in _wire,
     _wire,
@@ -1026,6 +1034,30 @@ check(
 
 # --- report -------------------------------------------------------------------
 _env.restore(SAVED_ENV)
+
+# Both work directories are removed on both exits, not only on the success path. The shape is the
+# one PR #306 uses in `tests/test_serve.py` for the same defect: nothing reads `TMP` (`tests/test_settings.py:71`,
+# the base of `:242`, `:310`, `:319`, `:327`) or `_record_dir` (`:916`, read at `:917` and `:931`)
+# after the last check above, the `finally:` blocks in this file (`:405`, `:459`, `:935`) restore
+# `urlopen` and nothing else, no check prints either path, and the failure line below lists check
+# *names*. A directory kept for inspection would have no reader, and the pair costs 28 KiB of tmpfs
+# blocks per run (8 + 20, one fresh directory each, `du -sk`, measured on this host 2026-10-13),
+# once per full-gate run.
+#
+# `shutil.rmtree` and not `tempfile.TemporaryDirectory`: both are created at module scope and read
+# by checks below, so their lifetime is the module's rather than a `with` block's. A removal that
+# fails is reported instead of swallowed -- "could not be removed" is the phrase
+# `src/dyak/workspace.py:70` uses for the same situation, and silence would be the leak with a
+# false report on top.
+try:
+    shutil.rmtree(TMP)
+except OSError as exc:
+    print(f"\nsettings suite work directory could not be removed: {TMP} ({exc})")
+try:
+    shutil.rmtree(_record_dir)
+except OSError as exc:
+    print(f"\nstt-record directory could not be removed: {_record_dir} ({exc})")
+
 if failures:
     print(f"FAILED: {len(failures)} -> {failures}")
     raise SystemExit(1)

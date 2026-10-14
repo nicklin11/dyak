@@ -55,6 +55,7 @@ from pathlib import Path
 from .. import exitcodes as ec
 from .. import runner
 from ..deps import PROBE_TIMEOUT
+from ..llm import append_path, redact_endpoint
 from ..settings import OPENAI_KEY_ENV as ENV_KEY
 from ..settings import OPENAI_MAX_UPLOAD_BYTES_ENV as ENV_MAX_UPLOAD
 from ..settings import OPENAI_MODEL_ENV as ENV_MODEL
@@ -141,7 +142,12 @@ class OpenAICompat:
     def info(self) -> BackendInfo:
         return BackendInfo(
             name=self.name,
-            target=self.base_url or "(not configured)",
+            # `redact_endpoint` here, where the record is built, not at any printer (#308):
+            # `BackendInfo.target` is read by `doctor`'s two lines (`deps.py:193`, `:196`) and by
+            # the stage-3 line (`pipeline.py:667`), and masking at one of them would leave the
+            # next printer to be found by hand -- the shape #297 fixed for `Check.detail`. The
+            # raw URL stays in `self.base_url` for the probe and the wire.
+            target=redact_endpoint(self.base_url) or "(not configured)",
             detail=f"OpenAI-compatible /v1/audio/transcriptions, model={self.model}",
             notes=(
                 "no API key configured" if not self.key else "API key present",
@@ -161,13 +167,22 @@ class OpenAICompat:
             raise runner.DependencyError(
                 name=self.name,
                 code=ec.USAGE,
-                message=f"DYAK_OPENAI_URL is not an http(s) URL: {self.base_url!r}",
+                # Masked at the message, for the same reason as `target` above (#308): this
+                # string becomes `Check.detail`, which `doctor` prints.
+                message=(
+                    f"DYAK_OPENAI_URL is not an http(s) URL: {redact_endpoint(self.base_url)!r}"
+                ),
                 remediation=REMEDIATION,
             )
         headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
         try:
             request = urllib.request.Request(
-                f"{self.base_url}/v1/models", headers=headers, method="GET"
+                # `append_path` for the same reason as its whisper.cpp sibling (#314, #281):
+                # with a query-bearing endpoint the concatenation put the segment inside the
+                # last parameter's value and the probe went to the endpoint's own path.
+                append_path(self.base_url, "/v1/models"),
+                headers=headers,
+                method="GET",
             )
             # The stage-0 probe budget, not a bare literal (#189): `deps.py:48`'s
             # `PROBE_TIMEOUT` is what `check_llm`/`check_vlm` spend, and a hosted endpoint
@@ -192,7 +207,9 @@ class OpenAICompat:
             raise runner.DependencyError(
                 name=self.name,
                 code=ec.DEPENDENCY_FAILED,
-                message=f"the endpoint is not reachable at {self.base_url}: {_reason(exc)}",
+                message=(
+                    f"the endpoint is not reachable at {redact_endpoint(self.base_url)}: {_reason(exc)}"
+                ),
                 remediation=REMEDIATION,
             ) from exc
 
@@ -271,7 +288,7 @@ class OpenAICompat:
         if self.key:
             headers["Authorization"] = f"Bearer {self.key}"
         request = urllib.request.Request(
-            f"{self.base_url}/v1/audio/transcriptions",
+            append_path(self.base_url, "/v1/audio/transcriptions"),
             data=body,
             headers=headers,
             method="POST",
@@ -323,7 +340,7 @@ class OpenAICompat:
         geometry the run used.
         """
         return {
-            "endpoint": f"{self.base_url}/v1/audio/transcriptions",
+            "endpoint": append_path(self.base_url, "/v1/audio/transcriptions"),
             "backend": self.name,
             "detail": f"OpenAI-compatible /v1/audio/transcriptions, model={self.model}",
             "fields": dict(self._fields()),
