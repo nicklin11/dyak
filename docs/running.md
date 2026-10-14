@@ -164,7 +164,7 @@ dyak process [path] [options]
 | `--force-export` | replace a vault note that was edited by hand after the last export. Default: refuse, and name the file (#118) |
 | `--no-llm` | run without an LLM endpoint: the note is the template skeleton, not a model's. Without this flag `process` refuses to start when `DYAK_LLM_ENDPOINT` is unset or unreachable (#126) |
 | `--keep-workdir` | keep the work dir even when the run succeeds |
-| `--glossary FILE` | ASR term glossary for stages 9 and 10, in the `\| variant \| canonical \| domain \| date \|` format. A variant must be a form the ASR produced, not a word of the language: one that is a lowercase Cyrillic word or phrase, an inflected form of the canonical, a phrase the canonical wraps, or a word the canonical would repeat is reported but never substituted. Without it the term-drift rule finds nothing and the audit says so |
+| `--glossary FILE` | ASR term glossary for stages 9 and 10, in the `\| variant \| canonical \| domain \| date \|` format. A variant must be a form the ASR produced, not a word of the language: one that is a lowercase Cyrillic word or phrase, an inflected form of the canonical, a phrase the canonical wraps, or a word the canonical would repeat is never substituted; the audit reports it as term/drift unless the canonical is already on the line, and a line that already carries the canonical is not reported either. Without it the term-drift rule finds nothing and the audit says so |
 | `--terms-dir DIR` | atomic term notes for stage 11. Default: `$DYAK_TERMS_DIR`, the `terms_dir` settings key, then `<vault-path>/mscs/_terms`. Without it the note is written unlinked and the stage says so |
 
 ### What the progress output looks like

@@ -746,9 +746,10 @@ def build_parser() -> argparse.ArgumentParser:
             "`| variant | canonical | domain | date |` format. A variant must be a form "
             "the ASR produced, not a word of the language: one that is a lowercase "
             "Cyrillic word or phrase, an inflected form of the canonical, a phrase the "
-            "canonical wraps, or a word the canonical would repeat is reported but never "
-            "substituted. Without it the term-drift rule finds nothing and the audit says "
-            "so."
+            "canonical wraps, or a word the canonical would repeat is never substituted; "
+            "the audit reports it as term/drift unless the canonical is already on the "
+            "line, and a line that already carries the canonical is not reported either. "
+            "Without it the term-drift rule finds nothing and the audit says so."
         ),
     )
     p_process.add_argument(
