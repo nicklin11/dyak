@@ -35,7 +35,6 @@ from ..llm import redact_endpoint
 from .backends import ENV_BACKEND, BackendInfo, TranscriptionBackend, resolve
 from .core import (
     PROVENANCE_NAME,
-    REMEDIATION,
     RATE_RANGE,
     TIMEOUT_MARGIN,
     TIMEOUT_PER_REALTIME,
@@ -53,7 +52,6 @@ __all__ = [
     "BackendInfo",
     "ENV_BACKEND",
     "PROVENANCE_NAME",
-    "REMEDIATION",
     "RATE_RANGE",
     "Segment",
     "TIMEOUT_MARGIN",

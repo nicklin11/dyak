@@ -43,7 +43,6 @@ from .. import exitcodes as ec
 from .. import runner
 
 PROVENANCE_NAME = "stt-provenance.json"
-REMEDIATION = "start whisper.cpp and set DYAK_WHISPERCPP_URL, or set DYAK_STT to an endpoint"
 
 # Measured on this host, CPU whisper.cpp. The 257.2 s figure was long recorded as
 # the 4520 s lecture's; ADR-0001's 2026-10-04 amendment shows it came from the
