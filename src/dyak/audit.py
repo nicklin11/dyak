@@ -99,6 +99,17 @@ class Finding:
         }
 
 
+#: The tier-2 finding ids, declared (#305). Tier 1's ids travel through `report.add`, whose
+#: call sites the stage tests harvest against `tier1.rules` (#266); these three do not go
+#: through it -- `parse_critic_findings` builds `critic/finding` itself because it carries
+#: the citation and confidence fields `add` has no room for, and the abstention and the
+#: unavailable endpoint are the critic's own states, appended straight onto the findings
+#: list. A list the code does not walk cannot be derived, so like `tier1.rules` it is a
+#: literal kept by hand -- and what keeps it honest is the stage tests' #305 comparison
+#: against the `Finding(tier="tier2", ...)` call sites, the tier-2 half of #266's class.
+TIER2_RULES = ("critic/finding", "critic/abstained", "critic/unavailable")
+
+
 @dataclass
 class Report:
     findings: list[Finding] = field(default_factory=list)

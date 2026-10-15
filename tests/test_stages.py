@@ -6810,6 +6810,43 @@ def _emitted_rules(module) -> set[str]:
     return out
 
 
+def _emitted_tier2_rules(module) -> set[str]:
+    """Every tier-2 id the module's `Finding(tier="tier2", ...)` call sites pass.
+
+    #305: the tier-2 ids bypass `report.add`, so the #303 harvest (`_emitted_rules`)
+    cannot see them -- they are constructed directly as `Finding(tier="tier2", ...)`.
+    The tier is either the first positional argument or the `tier=` keyword
+    (`audit.py:636` is the keyword form, `:735/:820/:866` the positional), and the rule
+    is the second positional argument or the `rule=` keyword, so both are read here. The
+    assert applies #303's non-literal convention to tier 2: a rule that is not a literal
+    would shrink the set silently. The `report.add` body's own `Finding` is built from
+    that method's (non-literal) parameters and is the tier-1 path #303 already harvests,
+    so it is excluded, not asserted.
+    """
+    tree = ast.parse(pathlib.Path(module.__file__).read_text(encoding="utf-8"))
+    out: set[str] = set()
+    for call in [n for n in ast.walk(tree) if isinstance(n, ast.Call)]:
+        func = call.func
+        if not (isinstance(func, ast.Name) and func.id == "Finding"):
+            continue
+        tier = next(
+            (kw.value for kw in call.keywords if kw.arg == "tier"),
+            call.args[0] if call.args else None,
+        )
+        if not (isinstance(tier, ast.Constant) and tier.value == "tier2"):
+            continue
+        rule = next(
+            (kw.value for kw in call.keywords if kw.arg == "rule"),
+            call.args[1] if len(call.args) > 1 else None,
+        )
+        assert isinstance(rule, ast.Constant) and isinstance(rule.value, str), (
+            f"{module.__name__}:{call.lineno} passes a non-literal tier-2 id, so the "
+            f"comparison would silently not see it"
+        )
+        out.add(rule.value)
+    return out
+
+
 lint_emitted = _emitted_rules(dyln)
 audit_emitted = _emitted_rules(dyau)
 audit_declared = set(json.loads(dyau.provenance(dyau.Report()))["tier1"]["rules"])
@@ -6824,6 +6861,14 @@ check(
     audit_declared == audit_emitted,
     f"emitted but undeclared: {sorted(audit_emitted - audit_declared)}; "
     f"declared but unemittable: {sorted(audit_declared - audit_emitted)}",
+)
+check(
+    "audit's declared tier2 ids name every id the direct Finding calls emit, and nothing else (#305)",
+    set(dyau.TIER2_RULES) == _emitted_tier2_rules(dyau),
+    f"declared but unemittable: "
+    f"{sorted(set(dyau.TIER2_RULES) - _emitted_tier2_rules(dyau))}; "
+    f"emitted but undeclared: "
+    f"{sorted(_emitted_tier2_rules(dyau) - set(dyau.TIER2_RULES))}",
 )
 lrep = json.loads((ldest / dyln.REPORT_NAME).read_text())
 check(
