@@ -49,6 +49,8 @@ import _env  # noqa: E402
 SAVED_ENV = _env.isolate()
 
 from dyak import runner  # noqa: E402
+from dyak.llm import append_path  # noqa: E402
+from dyak.stt.openai_compat import _route  # noqa: E402
 from dyak.stt import openai_compat as dyoc  # noqa: E402
 from dyak.stt import whispercpp as dyw  # noqa: E402
 
@@ -188,6 +190,78 @@ check(
     "#289: and the Authorization header still carries its key",
     _openai_request["headers"].get("Authorization") == f"Bearer {HEADER_KEY}",
     str(_openai_request["headers"]),
+)
+
+
+# --- #322: both endpoint shapes probe and transcribe the same target ---------------------
+# The fix is that the backend appends `/v1` only when the base lacks it, so a user carrying the
+# LLM endpoint's documented `/v1` shape across to the STT setting gets the same probe and the
+# same POST path, not `/v1/v1/models` / `/v1/v1/audio/transcriptions`. Measured rather than
+# asserted by hand: the probe URL is captured from the wire (the `_request` helper above), and
+# the POST URL is captured the same way -- the request is real and its location is this issue.
+def _post_target(base_url: str) -> str:
+    """The `POST /v1/audio/transcriptions` URL the backend would open for `base_url`."""
+    seen: list[str] = []
+
+    class _Resp:
+        def read(self, size: int = -1) -> bytes:
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def _capture(request, *args, **kwargs):
+        seen.append(request.full_url)
+        return _Resp()
+
+    previous = urllib.request.urlopen
+    urllib.request.urlopen = _capture
+    try:
+        dyoc.OpenAICompat(base_url)._post("boundary", b"body", timeout=60)
+    except runner.DependencyError:
+        pass
+    finally:
+        urllib.request.urlopen = previous
+    return seen[0] if seen else "(no request)"
+
+
+check(
+    "#322: a base without /v1 and one already ending in /v1 probe the same target",
+    _request(dyoc.OpenAICompat, "http://h:8390")["url"]
+    == _request(dyoc.OpenAICompat, "http://h:8390/v1")["url"]
+    == "http://h:8390/v1/models",
+    f'plain={_request(dyoc.OpenAICompat, "http://h:8390")["url"]} '
+    f'v1={_request(dyoc.OpenAICompat, "http://h:8390/v1")["url"]}',
+)
+check(
+    "#322: and so do the two shapes' transcription target -- and the recorded endpoint too (#284)",
+    _post_target("http://h:8390")
+    == _post_target("http://h:8390/v1")
+    == "http://h:8390/v1/audio/transcriptions"
+    and dyoc.OpenAICompat("http://h:8390").parameters(client_timeout=60)["endpoint"]
+    == dyoc.OpenAICompat("http://h:8390/v1").parameters(client_timeout=60)["endpoint"]
+    == "http://h:8390/v1/audio/transcriptions",
+    f'plain={_post_target("http://h:8390")} v1={_post_target("http://h:8390/v1")}',
+)
+check(
+    "#322: neither shape ever produces a /v1/v1 target",
+    "/v1/v1" not in _post_target("http://h:8390")
+    and "/v1/v1" not in _post_target("http://h:8390/v1")
+    and "/v1/v1" not in _request(dyoc.OpenAICompat, "http://h:8390")["url"]
+    and "/v1/v1" not in _request(dyoc.OpenAICompat, "http://h:8390/v1")["url"],
+    f'probe={_request(dyoc.OpenAICompat, "http://h:8390")["url"]} '
+    f'post={_post_target("http://h:8390")}',
+)
+check(
+    "#322: the base's query and fragment still survive the route append, on both shapes (#314/#281)",
+    append_path("http://h:8390?api-version=2026-01-01#frag", _route("http://h:8390?api-version=2026-01-01#frag", "/models"))
+    == "http://h:8390/v1/models?api-version=2026-01-01#frag"
+    and append_path("http://h:8390/v1?api-version=2026-01-01#frag", _route("http://h:8390/v1?api-version=2026-01-01#frag", "/audio/transcriptions"))
+    == "http://h:8390/v1/audio/transcriptions?api-version=2026-01-01#frag",
+    "query and fragment land after the segment on both shapes",
 )
 
 
