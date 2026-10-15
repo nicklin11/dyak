@@ -225,17 +225,30 @@ def _message_sites(source: str) -> tuple[int, int]:
     return raw, redacted
 
 
-def _request_interpolations(source: str) -> int:
-    """`f"{self.base_url}/..."` inside a `urllib.request.Request(...)` call."""
-    found = 0
+def _request_interpolations(source: str) -> list[str]:
+    """The request URLs built from `self.base_url`, one entry per `Request(...)` site.
+
+    Two spellings count as raw: `f"{self.base_url}/..."`, and -- since #321 rewrote the
+    backends to append via `append_path` -- `append_path(self.base_url, ...)`. Following the
+    code, not the historical spelling, is the point: #327's symptom was exactly this detector
+    reading 0 because the f-string form was gone. `redact_endpoint(...)` at a request site
+    stays off the list: redacting the wire URL breaks auth, and any new site written that way
+    has to fail *this* check by name (the count falls below 4).
+    """
+    found: list[str] = []
     for node in ast.walk(ast.parse(source)):
         if not isinstance(node, ast.Call) or not node.args:
             continue
         if ast.unparse(node.func) != "urllib.request.Request":
             continue
         first = node.args[0]
-        if isinstance(first, ast.JoinedStr) and "self.base_url" in ast.unparse(first):
-            found += 1
+        text = ast.unparse(first)
+        if "self.base_url" not in text or "redact_endpoint" in text:
+            continue
+        if isinstance(first, ast.JoinedStr):
+            found.append(text)
+        elif isinstance(first, ast.Call) and ast.unparse(first.func) == "append_path":
+            found.append(text)
     return found
 
 
@@ -243,11 +256,12 @@ _src = _sources()
 _sites = {name: _message_sites(text) for name, text in _src.items()}
 _redacted = sum(redacted for _raw, redacted in _sites.values())
 _raw_messages = sum(raw for raw, _redacted in _sites.values())
-_raw_requests = sum(_request_interpolations(text) for text in _src.values())
+_request_sites = {name: _request_interpolations(text) for name, text in _src.items()}
+_raw_requests = sum(len(sites) for sites in _request_sites.values())
 check(
     "#289: all four messages go through the helper, and all four requests stay raw",
     _redacted == 4 and _raw_messages == 0 and _raw_requests == 4,
-    f"messages (raw, redacted)={_sites} raw requests={_raw_requests}",
+    f"messages (raw, redacted)={_sites} raw requests={_request_sites}",
 )
 
 
