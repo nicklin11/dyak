@@ -6214,16 +6214,48 @@ check(
         }
     ),
 )
-_provenance_writers = (dysy, dyau, dyrep, dycap, dyln, dylk, dyro, dyprobe, dyq)
-_prov_sources = {
-    pathlib.Path(module.__file__).name: pathlib.Path(module.__file__).read_text(encoding="utf-8")
-    for module in _provenance_writers
-}
+# #312: the writer list is harvested, not maintained. #285's pin named nine writers while the
+# tree has ten (`stt-provenance.json`: `src/dyak/stt/core.py`) -- a declared list that drifted
+# from what the code does, which is #266/#303's defect living inside the check. So the list is
+# *derived*, the way #303 harvested rule ids (`test_claims.py:_rule_ids`): every module-level
+# `PROVENANCE_NAME = "xxx-provenance.json"` assignment in `src/dyak/` is a writer, collected by
+# walking the AST. The substantive claim is still the #285 one (`"error":` is run-state.json's,
+# never a stage provenance). The completeness half below is what gives the harvest teeth: the
+# bundle's own `RUN_ARTEFACTS` already lists all ten `*-provenance.json` names a run publishes
+# (and test_claims section 9 holds that set to what the stages produce), so a writer that drops
+# out of the harvest fails here rather than quietly removing itself from the `"error":` scan.
+
+
+def _provenance_writers() -> dict[str, str]:
+    """`PROVENANCE_NAME` -> its module's source, for every provenance writer in `src/dyak/`."""
+    out: dict[str, str] = {}
+    for _path in sorted((REPO / "src" / "dyak").rglob("*.py")):
+        _tree = ast.parse(_path.read_text(encoding="utf-8"), filename=str(_path))
+        for _node in _tree.body:
+            if (
+                isinstance(_node, ast.Assign)
+                and any(
+                    isinstance(_t, ast.Name) and _t.id == "PROVENANCE_NAME" for _t in _node.targets
+                )
+                and isinstance(_node.value, ast.Constant)
+                and isinstance(_node.value.value, str)
+                and _node.value.value.endswith("-provenance.json")
+            ):
+                out[_node.value.value] = _path.read_text(encoding="utf-8")
+    return out
+
+
+_prov_sources = _provenance_writers()
+_bundle_prov_names = {name for name in dyb.RUN_ARTEFACTS if name.endswith("-provenance.json")}
 check(
     "#285: no stage-provenance document has an `error` field -- that key is run-state.json's",
-    all(hasattr(module, "PROVENANCE_NAME") for module in _provenance_writers)
-    and all('"error":' not in source for source in _prov_sources.values()),
+    all('"error":' not in source for source in _prov_sources.values()),
     repr({name: '"error":' in source for name, source in _prov_sources.items()}),
+)
+check(
+    "#312: the harvested writers are exactly the provenance names a run publishes",
+    set(_prov_sources) == _bundle_prov_names,
+    f"harvested {sorted(set(_prov_sources))} vs bundle {sorted(_bundle_prov_names)}",
 )
 
 # The artefacts.
