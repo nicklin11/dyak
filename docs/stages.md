@@ -16,16 +16,17 @@ It does **not** mean the stage has been seen to work on a real lecture. See
 
 **Stage fully working** — the stage ran on the 4520 s lecture and left its artefacts in a
 bundle, and the last column names where its provenance is. Every stage now records something,
-either a `*-provenance.json` or, for stage 4, `detect.json`. Stage 10 records none and makes no
-calls — it is deterministic, and a document asserting that would be an artefact about
-constants, not provenance.
+either a `*-provenance.json` or, for stage 4, `detect.json`. Stage 10 records
+`repair-provenance.json`, and makes no calls — it is deterministic, and a document of the calls
+would be an artefact about constants, not provenance. What the file does record is the tool,
+its rule set, what it changed, and since #257 the endpoint and the seed.
 
 | stage | provenance | what it answers |
 |---|---|---|
 | 1, 2 | `source-provenance.json` | what the input was, and which ffmpeg measured it |
 | 3 | `stt-provenance.json` | backend, endpoint, every request field, digests of both transcripts |
 | 4 | `detect.json` | the full filter chain, every setting, the ffmpeg version |
-| 5–12 | `*-provenance.json` | the tool, its rule set, and what it changed |
+| 5–12 | `*-provenance.json` | the tool, its rule set, and what it changed; stage 10's also carries the endpoint and the seed (#257) |
 | 6 | per-frame `caption_trace` in `captions.json` | which model captioned this frame, tokens, timing, called or cached |
 | 6 | `caption_status` per frame | `NO_NEW_INFORMATION` says the model declined; it is a success, not an error, and a high share means the screens went unread |
 | 7, 9 | `synth-`/`audit-llm-transcript.json` | every call: full messages, model, tokens, seconds, attempts, `finish_reason` |

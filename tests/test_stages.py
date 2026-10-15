@@ -6214,11 +6214,48 @@ check(
         }
     ),
 )
-_provenance_writers = (dysy, dyau, dyrep, dycap, dyln, dylk, dyro, dyprobe, dyq)
-_prov_sources = {
-    pathlib.Path(module.__file__).name: pathlib.Path(module.__file__).read_text(encoding="utf-8")
-    for module in _provenance_writers
-}
+# #312: the writer list is harvested, not maintained. #285's pin named nine writers while the
+# tree has ten (`stt-provenance.json`: `src/dyak/stt/core.py`) -- a declared list that drifted
+# from what the code does, which is #266/#303's defect living inside the check. So the list is
+# *derived*, the way #303 harvested rule ids (`test_claims.py:_rule_ids`): every module-level
+# `PROVENANCE_NAME = "xxx-provenance.json"` assignment in `src/dyak/` is a writer, collected by
+# walking the AST. The completeness half below is what gives the harvest teeth: the bundle's own
+# `RUN_ARTEFACTS` already lists all ten `*-provenance.json` names a run publishes (and
+# test_claims section 9 holds that set to what the stages produce), so a writer that drops out
+# of the harvest fails here rather than quietly removing itself from the `"error":` scan.
+# The substantive half is #285's, narrowed by #267/#270: it said "no stage-provenance document
+# has an `error` field", read as a substring of every writer's source, but the glossary's
+# recorded state is now the four keys `{"path", "is_file", "entries", "error"}` (the decision,
+# comment 6144994850), so the literal is legitimately in `audit.py` -- and the claim has to say
+# what it actually protects rather than be deleted: the *run-failure* reason is still
+# run-state.json's alone. The narrowed form is stronger than the substring was, because it names
+# the one place the literal may appear instead of banning it everywhere: the loader that reads
+# the glossary file, whose state is nested under `tier1.glossary` in the document (the check in
+# the stages-9 section asserts that shape against a real written `audit-provenance.json`, which
+# is where "the document has no top-level `error`" can be read off the artefact rather than off
+# the source).
+
+
+def _provenance_writers() -> dict[str, tuple[str, str]]:
+    """`PROVENANCE_NAME` -> (its module's file name, its source), for every provenance writer."""
+    out: dict[str, tuple[str, str]] = {}
+    for _path in sorted((REPO / "src" / "dyak").rglob("*.py")):
+        _tree = ast.parse(_path.read_text(encoding="utf-8"), filename=str(_path))
+        for _node in _tree.body:
+            if (
+                isinstance(_node, ast.Assign)
+                and any(
+                    isinstance(_t, ast.Name) and _t.id == "PROVENANCE_NAME" for _t in _node.targets
+                )
+                and isinstance(_node.value, ast.Constant)
+                and isinstance(_node.value.value, str)
+                and _node.value.value.endswith("-provenance.json")
+            ):
+                out[_node.value.value] = (
+                    _path.name,
+                    _path.read_text(encoding="utf-8"),
+                )
+    return out
 
 
 def _enclosing_def(source: str, number: int) -> str:
@@ -6229,31 +6266,28 @@ def _enclosing_def(source: str, number: int) -> str:
     return names[-1] if names else ""
 
 
+_prov_writers = _provenance_writers()
+_prov_sources = {name: source for name, (_file, source) in _prov_writers.items()}
+_bundle_prov_names = {name for name in dyb.RUN_ARTEFACTS if name.endswith("-provenance.json")}
 _prov_error_sites = {
-    name: [
+    _file: [
         _enclosing_def(source, number)
         for number, line in enumerate(source.splitlines(), 1)
         if '"error":' in line
     ]
-    for name, source in _prov_sources.items()
+    for _file, source in _prov_writers.values()
 }
-# #285 said this as "no stage-provenance document has an `error` field", read as a substring of
-# every writer's source. #267/#270 amend the glossary's recorded state to the four keys
-# `{"path", "is_file", "entries", "error"}` (the decision, comment 6144994850), so the literal is
-# now in `audit.py` -- and the claim has to say what it actually protects rather than be deleted:
-# the *run-failure* reason is still run-state.json's alone. The narrowed form is stronger than
-# the substring was, because it names the one place the literal may appear instead of banning it
-# everywhere: the loader that reads the glossary file, whose state is nested under
-# `tier1.glossary` in the document (the check in the stages-9 section asserts that shape against
-# a real written `audit-provenance.json`, which is where "the document has no top-level `error`"
-# can be read off the artefact rather than off the source).
 _prov_error_inside = {name: defs for name, defs in _prov_error_sites.items() if defs}
 check(
     "#285: the run-failure reason is still not a stage field -- the only `error` literal a "
     "writer's source carries is the glossary loader's per-file state",
-    all(hasattr(module, "PROVENANCE_NAME") for module in _provenance_writers)
-    and _prov_error_inside == {"audit.py": ["load_glossary"]},
+    _prov_error_inside == {"audit.py": ["load_glossary"]},
     repr(_prov_error_inside),
+)
+check(
+    "#312: the harvested writers are exactly the provenance names a run publishes",
+    set(_prov_sources) == _bundle_prov_names,
+    f"harvested {sorted(set(_prov_sources))} vs bundle {sorted(_bundle_prov_names)}",
 )
 
 # The artefacts.
@@ -6840,6 +6874,43 @@ def _emitted_rules(module) -> set[str]:
     return out
 
 
+def _emitted_tier2_rules(module) -> set[str]:
+    """Every tier-2 id the module's `Finding(tier="tier2", ...)` call sites pass.
+
+    #305: the tier-2 ids bypass `report.add`, so the #303 harvest (`_emitted_rules`)
+    cannot see them -- they are constructed directly as `Finding(tier="tier2", ...)`.
+    The tier is either the first positional argument or the `tier=` keyword
+    (`audit.py:636` is the keyword form, `:735/:820/:866` the positional), and the rule
+    is the second positional argument or the `rule=` keyword, so both are read here. The
+    assert applies #303's non-literal convention to tier 2: a rule that is not a literal
+    would shrink the set silently. The `report.add` body's own `Finding` is built from
+    that method's (non-literal) parameters and is the tier-1 path #303 already harvests,
+    so it is excluded, not asserted.
+    """
+    tree = ast.parse(pathlib.Path(module.__file__).read_text(encoding="utf-8"))
+    out: set[str] = set()
+    for call in [n for n in ast.walk(tree) if isinstance(n, ast.Call)]:
+        func = call.func
+        if not (isinstance(func, ast.Name) and func.id == "Finding"):
+            continue
+        tier = next(
+            (kw.value for kw in call.keywords if kw.arg == "tier"),
+            call.args[0] if call.args else None,
+        )
+        if not (isinstance(tier, ast.Constant) and tier.value == "tier2"):
+            continue
+        rule = next(
+            (kw.value for kw in call.keywords if kw.arg == "rule"),
+            call.args[1] if len(call.args) > 1 else None,
+        )
+        assert isinstance(rule, ast.Constant) and isinstance(rule.value, str), (
+            f"{module.__name__}:{call.lineno} passes a non-literal tier-2 id, so the "
+            f"comparison would silently not see it"
+        )
+        out.add(rule.value)
+    return out
+
+
 lint_emitted = _emitted_rules(dyln)
 audit_emitted = _emitted_rules(dyau)
 audit_declared = set(json.loads(dyau.provenance(dyau.Report()))["tier1"]["rules"])
@@ -6854,6 +6925,14 @@ check(
     audit_declared == audit_emitted,
     f"emitted but undeclared: {sorted(audit_emitted - audit_declared)}; "
     f"declared but unemittable: {sorted(audit_declared - audit_emitted)}",
+)
+check(
+    "audit's declared tier2 ids name every id the direct Finding calls emit, and nothing else (#305)",
+    set(dyau.TIER2_RULES) == _emitted_tier2_rules(dyau),
+    f"declared but unemittable: "
+    f"{sorted(set(dyau.TIER2_RULES) - _emitted_tier2_rules(dyau))}; "
+    f"emitted but undeclared: "
+    f"{sorted(_emitted_tier2_rules(dyau) - set(dyau.TIER2_RULES))}",
 )
 lrep = json.loads((ldest / dyln.REPORT_NAME).read_text())
 check(
