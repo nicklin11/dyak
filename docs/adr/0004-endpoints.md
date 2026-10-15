@@ -33,6 +33,15 @@ environment variable lowercased (`llm_endpoint`, `vlm_model`). Credentials come 
 environment only, so the file is safe to keep in a dotfiles repository and the vault sync
 cannot leak a credential.
 
+An endpoint is a **plain location**, never a place to carry a credential: neither a
+`user:password@` userinfo nor a `?key=` query authenticates anything — the auth channel is
+the `api_key` variable, sent as `Authorization: Bearer <key>` (`DYAK_LLM_KEY` /
+`DYAK_OPENAI_KEY`). `urllib` does nothing with `user:password@`, and a query key is part of
+the location, so on the wire it is not redacted and can leak into an error string; keep
+credentials out of the endpoint string entirely (#279). In the recorded form
+`Config.redacted()` masks the userinfo and a credential-named query value so the bundle stays
+safe (#273, #280).
+
 ### D2 — `dyak config set|get|list`, validating as it writes
 
 **Not implemented.** Hand-editing the file is the supported path today. The subcommand is
