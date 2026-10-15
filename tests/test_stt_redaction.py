@@ -233,8 +233,8 @@ check(
     _request(dyoc.OpenAICompat, "http://h:8390")["url"]
     == _request(dyoc.OpenAICompat, "http://h:8390/v1")["url"]
     == "http://h:8390/v1/models",
-    f'plain={_request(dyoc.OpenAICompat, "http://h:8390")["url"]} '
-    f'v1={_request(dyoc.OpenAICompat, "http://h:8390/v1")["url"]}',
+    f"plain={_request(dyoc.OpenAICompat, 'http://h:8390')['url']} "
+    f"v1={_request(dyoc.OpenAICompat, 'http://h:8390/v1')['url']}",
 )
 check(
     "#322: and so do the two shapes' transcription target -- and the recorded endpoint too (#284)",
@@ -244,7 +244,7 @@ check(
     and dyoc.OpenAICompat("http://h:8390").parameters(client_timeout=60)["endpoint"]
     == dyoc.OpenAICompat("http://h:8390/v1").parameters(client_timeout=60)["endpoint"]
     == "http://h:8390/v1/audio/transcriptions",
-    f'plain={_post_target("http://h:8390")} v1={_post_target("http://h:8390/v1")}',
+    f"plain={_post_target('http://h:8390')} v1={_post_target('http://h:8390/v1')}",
 )
 check(
     "#322: neither shape ever produces a /v1/v1 target",
@@ -252,14 +252,20 @@ check(
     and "/v1/v1" not in _post_target("http://h:8390/v1")
     and "/v1/v1" not in _request(dyoc.OpenAICompat, "http://h:8390")["url"]
     and "/v1/v1" not in _request(dyoc.OpenAICompat, "http://h:8390/v1")["url"],
-    f'probe={_request(dyoc.OpenAICompat, "http://h:8390")["url"]} '
-    f'post={_post_target("http://h:8390")}',
+    f"probe={_request(dyoc.OpenAICompat, 'http://h:8390')['url']} "
+    f"post={_post_target('http://h:8390')}",
 )
 check(
     "#322: the base's query and fragment still survive the route append, on both shapes (#314/#281)",
-    append_path("http://h:8390?api-version=2026-01-01#frag", _route("http://h:8390?api-version=2026-01-01#frag", "/models"))
+    append_path(
+        "http://h:8390?api-version=2026-01-01#frag",
+        _route("http://h:8390?api-version=2026-01-01#frag", "/models"),
+    )
     == "http://h:8390/v1/models?api-version=2026-01-01#frag"
-    and append_path("http://h:8390/v1?api-version=2026-01-01#frag", _route("http://h:8390/v1?api-version=2026-01-01#frag", "/audio/transcriptions"))
+    and append_path(
+        "http://h:8390/v1?api-version=2026-01-01#frag",
+        _route("http://h:8390/v1?api-version=2026-01-01#frag", "/audio/transcriptions"),
+    )
     == "http://h:8390/v1/audio/transcriptions?api-version=2026-01-01#frag",
     "query and fragment land after the segment on both shapes",
 )

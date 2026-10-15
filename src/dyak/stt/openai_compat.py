@@ -84,6 +84,7 @@ def _route(base_url: str, route: str) -> str:
         return route
     return f"/v1{route}"
 
+
 #: The documented hosted ceiling (OpenAI's 25 MB per audio upload), in bytes. A **setting**
 #: rather than a literal at the call site, because the limit belongs to the endpoint: another
 #: provider documents another number, and this repo cannot measure it.
