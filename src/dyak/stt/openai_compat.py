@@ -70,6 +70,21 @@ REMEDIATION = (
 
 CHUNK = 1 << 20
 
+
+def _route(base_url: str, route: str) -> str:
+    """`route` prefixed with `/v1` unless the base already ends in `/v1` (#322).
+
+    `route` is the part after the version (`/models`, `/audio/transcriptions`); a base that
+    already ends in `/v1` (the shape `DYAK_LLM_ENDPOINT` is documented with) gains only
+    `route`, so the probe and the POST land on the same path for both shapes, never
+    `/v1/v1/...`. The join is the caller's, so `append_path` semantics still govern (#314/#281):
+    the query and fragment survive untouched.
+    """
+    if urllib.parse.urlsplit(base_url).path.endswith("/v1"):
+        return route
+    return f"/v1{route}"
+
+
 #: The documented hosted ceiling (OpenAI's 25 MB per audio upload), in bytes. A **setting**
 #: rather than a literal at the call site, because the limit belongs to the endpoint: another
 #: provider documents another number, and this repo cannot measure it.
@@ -179,8 +194,10 @@ class OpenAICompat:
             request = urllib.request.Request(
                 # `append_path` for the same reason as its whisper.cpp sibling (#314, #281):
                 # with a query-bearing endpoint the concatenation put the segment inside the
-                # last parameter's value and the probe went to the endpoint's own path.
-                append_path(self.base_url, "/v1/models"),
+                # last parameter's value and the probe went to the endpoint's own path. `_route`
+                # adds `/v1` only when the base lacks it (#322), so `http://h:8390` and
+                # `http://h:8390/v1` probe the same `GET /v1/models`.
+                append_path(self.base_url, _route(self.base_url, "/models")),
                 headers=headers,
                 method="GET",
             )
@@ -288,7 +305,7 @@ class OpenAICompat:
         if self.key:
             headers["Authorization"] = f"Bearer {self.key}"
         request = urllib.request.Request(
-            append_path(self.base_url, "/v1/audio/transcriptions"),
+            append_path(self.base_url, _route(self.base_url, "/audio/transcriptions")),
             data=body,
             headers=headers,
             method="POST",
@@ -340,7 +357,7 @@ class OpenAICompat:
         geometry the run used.
         """
         return {
-            "endpoint": append_path(self.base_url, "/v1/audio/transcriptions"),
+            "endpoint": append_path(self.base_url, _route(self.base_url, "/audio/transcriptions")),
             "backend": self.name,
             "detail": f"OpenAI-compatible /v1/audio/transcriptions, model={self.model}",
             "fields": dict(self._fields()),
