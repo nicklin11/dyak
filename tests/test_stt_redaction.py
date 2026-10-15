@@ -49,7 +49,7 @@ import _env  # noqa: E402
 SAVED_ENV = _env.isolate()
 
 from dyak import runner  # noqa: E402
-from dyak.llm import append_path  # noqa: E402
+from dyak.llm import append_path, redact_endpoint  # noqa: E402
 from dyak.stt.openai_compat import _route  # noqa: E402
 from dyak.stt import openai_compat as dyoc  # noqa: E402
 from dyak.stt import whispercpp as dyw  # noqa: E402
@@ -169,6 +169,35 @@ check(
     and f"api-version={VERSION}" in _openai_message
     and "api-version=2025-12-31" in _other_message,
     f"{_openai_message!r} vs {_other_message!r}",
+)
+# --- #323: the two Check.target fields are masked too ---------------------------------------
+# The message sites are not the only place a stage quotes the endpoint in the record:
+# `BackendInfo.target` is read by `doctor`'s two lines (`deps.py:193`, `:196`) and by the
+# stage-3 line (`pipeline.py:667`), and both backends build it as `redact_endpoint(self.base_url)`.
+# Nothing pinned that: a revert to the raw `base_url` was invisible to every suite. Asserted
+# here, against the same invented URLs as the messages -- the detail quotes whatever would have
+# been printed, so a revert fails by name quoting the raw credential.
+_target_masked = {
+    name: cls(OPENAI_URL if name == "openai_compat" else WHISPER_URL).info().target
+    for name, cls in (("openai_compat", dyoc.OpenAICompat), ("whispercpp", dyw.HttpWhisperCpp))
+}
+check(
+    "#323: the OpenAI-compatible Check.target is the redacted endpoint, not the raw URL",
+    _target_masked["openai_compat"] == redact_endpoint(OPENAI_URL)
+    and PASSWORD not in _target_masked["openai_compat"]
+    and QUERY not in _target_masked["openai_compat"]
+    and "***@" in _target_masked["openai_compat"]
+    and "api_key=***" in _target_masked["openai_compat"],
+    _target_masked["openai_compat"],
+)
+check(
+    "#323: whisper.cpp's Check.target is the redacted endpoint, not the raw URL",
+    _target_masked["whispercpp"] == redact_endpoint(WHISPER_URL)
+    and PASSWORD not in _target_masked["whispercpp"]
+    and QUERY not in _target_masked["whispercpp"]
+    and "***@" in _target_masked["whispercpp"]
+    and "token=***" in _target_masked["whispercpp"],
+    _target_masked["whispercpp"],
 )
 
 
