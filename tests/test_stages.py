@@ -6235,8 +6235,7 @@ def _provenance_writers() -> dict[str, str]:
             if (
                 isinstance(_node, ast.Assign)
                 and any(
-                    isinstance(_t, ast.Name) and _t.id == "PROVENANCE_NAME"
-                    for _t in _node.targets
+                    isinstance(_t, ast.Name) and _t.id == "PROVENANCE_NAME" for _t in _node.targets
                 )
                 and isinstance(_node.value, ast.Constant)
                 and isinstance(_node.value.value, str)
