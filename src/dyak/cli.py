@@ -749,7 +749,9 @@ def build_parser() -> argparse.ArgumentParser:
             "canonical wraps, or a word the canonical would repeat is never substituted; "
             "the audit reports it as term/drift unless the canonical is already on the "
             "line, and a line that already carries the canonical is not reported either. "
-            "Without it the term-drift rule finds nothing and the audit says so."
+            "Without it, or with a path that cannot be read, the term-drift rule does "
+            "not run and a clean report does not mean the note's terms were checked: "
+            "the state is recorded in the stage provenance and named on the stage's line."
         ),
     )
     p_process.add_argument(

@@ -6219,16 +6219,26 @@ check(
 # from what the code does, which is #266/#303's defect living inside the check. So the list is
 # *derived*, the way #303 harvested rule ids (`test_claims.py:_rule_ids`): every module-level
 # `PROVENANCE_NAME = "xxx-provenance.json"` assignment in `src/dyak/` is a writer, collected by
-# walking the AST. The substantive claim is still the #285 one (`"error":` is run-state.json's,
-# never a stage provenance). The completeness half below is what gives the harvest teeth: the
-# bundle's own `RUN_ARTEFACTS` already lists all ten `*-provenance.json` names a run publishes
-# (and test_claims section 9 holds that set to what the stages produce), so a writer that drops
-# out of the harvest fails here rather than quietly removing itself from the `"error":` scan.
+# walking the AST. The completeness half below is what gives the harvest teeth: the bundle's own
+# `RUN_ARTEFACTS` already lists all ten `*-provenance.json` names a run publishes (and
+# test_claims section 9 holds that set to what the stages produce), so a writer that drops out
+# of the harvest fails here rather than quietly removing itself from the `"error":` scan.
+# The substantive half is #285's, narrowed by #267/#270: it said "no stage-provenance document
+# has an `error` field", read as a substring of every writer's source, but the glossary's
+# recorded state is now the four keys `{"path", "is_file", "entries", "error"}` (the decision,
+# comment 6144994850), so the literal is legitimately in `audit.py` -- and the claim has to say
+# what it actually protects rather than be deleted: the *run-failure* reason is still
+# run-state.json's alone. The narrowed form is stronger than the substring was, because it names
+# the one place the literal may appear instead of banning it everywhere: the loader that reads
+# the glossary file, whose state is nested under `tier1.glossary` in the document (the check in
+# the stages-9 section asserts that shape against a real written `audit-provenance.json`, which
+# is where "the document has no top-level `error`" can be read off the artefact rather than off
+# the source).
 
 
-def _provenance_writers() -> dict[str, str]:
-    """`PROVENANCE_NAME` -> its module's source, for every provenance writer in `src/dyak/`."""
-    out: dict[str, str] = {}
+def _provenance_writers() -> dict[str, tuple[str, str]]:
+    """`PROVENANCE_NAME` -> (its module's file name, its source), for every provenance writer."""
+    out: dict[str, tuple[str, str]] = {}
     for _path in sorted((REPO / "src" / "dyak").rglob("*.py")):
         _tree = ast.parse(_path.read_text(encoding="utf-8"), filename=str(_path))
         for _node in _tree.body:
@@ -6241,16 +6251,38 @@ def _provenance_writers() -> dict[str, str]:
                 and isinstance(_node.value.value, str)
                 and _node.value.value.endswith("-provenance.json")
             ):
-                out[_node.value.value] = _path.read_text(encoding="utf-8")
+                out[_node.value.value] = (
+                    _path.name,
+                    _path.read_text(encoding="utf-8"),
+                )
     return out
 
 
-_prov_sources = _provenance_writers()
+def _enclosing_def(source: str, number: int) -> str:
+    """The nearest `def` at column 0 above line `number`. Enough to say where a line lives."""
+    names = [
+        line.split("(")[0][4:] for line in source.splitlines()[:number] if line.startswith("def ")
+    ]
+    return names[-1] if names else ""
+
+
+_prov_writers = _provenance_writers()
+_prov_sources = {name: source for name, (_file, source) in _prov_writers.items()}
 _bundle_prov_names = {name for name in dyb.RUN_ARTEFACTS if name.endswith("-provenance.json")}
+_prov_error_sites = {
+    _file: [
+        _enclosing_def(source, number)
+        for number, line in enumerate(source.splitlines(), 1)
+        if '"error":' in line
+    ]
+    for _file, source in _prov_writers.values()
+}
+_prov_error_inside = {name: defs for name, defs in _prov_error_sites.items() if defs}
 check(
-    "#285: no stage-provenance document has an `error` field -- that key is run-state.json's",
-    all('"error":' not in source for source in _prov_sources.values()),
-    repr({name: '"error":' in source for name, source in _prov_sources.items()}),
+    "#285: the run-failure reason is still not a stage field -- the only `error` literal a "
+    "writer's source carries is the glossary loader's per-file state",
+    _prov_error_inside == {"audit.py": ["load_glossary"]},
+    repr(_prov_error_inside),
 )
 check(
     "#312: the harvested writers are exactly the provenance names a run publishes",
@@ -6957,6 +6989,298 @@ check(
     str(found(audit_note(*bodies), "term/drift")),
 )
 check("a short variant is not matched loosely", not dyau.Glossary(("abc", "X")).entries or True, "")
+
+# --- #267 / #270: the glossary state is recorded, and an unusable one is not a crash -----
+# Two stages read `--glossary`: `audit.py`'s loader (stage 9) and `repair.py`'s copy (stage 10).
+# At the base of this change the copy was the same expression, and every state but one was
+# recorded identically to "no glossary at all": a with-glossary and a no-glossary run produced
+# byte-identical `audit-provenance.json` files, which is #267's measurement and the reason the
+# `docs/running.md:167` sentence was false. The sixth state -- a path that exists and cannot be
+# opened -- raised straight out of both stages on the branch point (measured: `PermissionError`
+# out of the read at `audit.py:994` and `repair.py:419`), which is #270. `term/drift` is counted
+# in `tier1_rules_run` either way
+# (`audit.py:189`), so its zero is uninformative rather than clean, and nothing in either
+# artefact said which had happened.
+#
+# The states, each of which must give its own answer in the recorded object:
+#   1. no path supplied                        -> `None`, and the stage says so
+#   2. a path that names no file (typo)        -> is_file False, entries 0, error None
+#   3. a readable file with no usable entries  -> is_file True, entries 0, error None
+#   4. a readable file with entries            -> is_file True, entries 2, error None
+#   5. a readable path that cannot be opened   -> is_file True, entries 0, error = str(exc)
+# plus the two siblings the issue never named: a dangling symlink (already correct, through the
+# same `is_file()` predicate state 2 uses) and a file that is not UTF-8 (`UnicodeDecodeError`
+# is a ValueError, not an OSError, and reaches the same `read_text` frame state 5 does).
+_S267_MISSING = "<no glossary key>"
+
+
+def _s267_stage_run(stage, *args, **kwargs):
+    """One real stage call as `(returned, the stream's text, the exception raised)`.
+
+    The wrap is the evidence, not a convenience: on the tree this change fixes, states 5 and 6
+    raise out of the stage, and an uncaught exception here would take the rest of the suite with
+    it. A check that never reaches its own comparison is not a check.
+    """
+    stream = io.StringIO()
+    try:
+        result = stage(*args, stream=stream, **kwargs)
+    except Exception as exc:
+        return None, stream.getvalue(), f"{type(exc).__name__}: {exc}"
+    return result, stream.getvalue(), ""
+
+
+with tempfile.TemporaryDirectory() as _s267_td:
+    _s267_root = pathlib.Path(_s267_td)
+    _s267_bodies = ["содержимое"] * 8
+    # The variant `A` carries (`:6876`, ilqf -> iLQR). The control below is the difference
+    # between this note and a glossary-less run of it, which is what shows the field tracks a
+    # glossary that was actually read rather than a field that is written and ignored.
+    _s267_bodies[3] = "Применяется ILQF."
+    _s267_note = _s267_root / "note.md"
+    _s267_note.write_text(audit_note(*_s267_bodies), encoding="utf-8")
+    _s267_txt = _s267_root / "transcript.txt"
+    _s267_txt.write_text("содержимое\n", encoding="utf-8")
+    _s267_report = _s267_root / "audit.json"
+    _s267_report.write_text(json.dumps({"findings": []}), encoding="utf-8")
+
+    # The readable-glossary control reuses the suite's own fixture `A` (`:6873`) rather than
+    # inventing a second table: the two entries written back out in the format the loader
+    # parses, so `entries == len(A.entries) == 2` is the fixture's number.
+    _s267_readable = _s267_root / "glossary.md"
+    _s267_readable.write_text(
+        "| Вариант ASR | Канон | Домен | Дата |\n|---|---|---|---|\n"
+        + "".join(f"| {v} | {c} | — | 2026-10-01 |\n" for v, c in A.entries),
+        encoding="utf-8",
+    )
+    _s267_empty = _s267_root / "empty.md"
+    _s267_empty.write_text("", encoding="utf-8")
+    _s267_absent = _s267_root / "absent.md"
+    _s267_dangling = _s267_root / "dangling.md"
+    _s267_dangling.symlink_to(_s267_root / "nothing-here.md")
+    _s267_binary = _s267_root / "binary.md"
+    _s267_binary.write_bytes(b"\xff\xfe not utf-8\n")
+    _s267_unreadable = _s267_root / "unreadable.md"
+    _s267_unreadable.write_text(
+        "| Вариант ASR | Канон | Домен | Дата |\n|---|---|---|---|\n"
+        "| ilqf | iLQR (iterative LQR) | управление | 2026-10-01 |\n",
+        encoding="utf-8",
+    )
+    os.chmod(_s267_unreadable, 0)
+
+    # (name, the path handed to the stage, the object it must record, the reason its line must
+    # carry). `None` for the reason means the stage has nothing to report -- the rule had a
+    # vocabulary to compare against, which is the one state that is clean.
+    _s267_shapes = [
+        ("no path supplied", None, None, "no glossary supplied"),
+        (
+            "a path that names no file",
+            _s267_absent,
+            {"path": str(_s267_absent), "is_file": False, "entries": 0, "error": None},
+            "is not a readable file",
+        ),
+        (
+            "a dangling symlink",
+            _s267_dangling,
+            {"path": str(_s267_dangling), "is_file": False, "entries": 0, "error": None},
+            "is not a readable file",
+        ),
+        (
+            "a readable file with no usable entries",
+            _s267_empty,
+            {"path": str(_s267_empty), "is_file": True, "entries": 0, "error": None},
+            "has no usable entries",
+        ),
+        (
+            "a readable file with entries",
+            _s267_readable,
+            {
+                "path": str(_s267_readable),
+                "is_file": True,
+                "entries": len(A.entries),
+                "error": None,
+            },
+            None,
+        ),
+    ]
+
+    def _s267_dir(stage: str, name: str) -> pathlib.Path:
+        return _s267_root / f"{stage}-{name.replace(' ', '-')}"
+
+    _s267_audit: dict = {}
+    for _s267_name, _s267_path, _s267_want, _s267_clause in _s267_shapes:
+        _s267_dest = _s267_dir("audit", _s267_name)
+        _s267_ret, _s267_text, _s267_raised = _s267_stage_run(
+            dyau.run, _s267_note, _s267_txt, _s267_dest, glossary_path=_s267_path
+        )
+        _s267_state = json.loads((_s267_dest / dyau.PROVENANCE_NAME).read_text(encoding="utf-8"))[
+            "tier1"
+        ].get("glossary", _S267_MISSING)
+        _s267_audit[_s267_name] = _s267_state
+        _s267_line = ("term/drift did not run" in _s267_text) == (_s267_clause is not None) and (
+            _s267_clause is None or _s267_clause in _s267_text
+        )
+        check(
+            f"#267: audit-provenance.json records the glossary state ({_s267_name})",
+            _s267_ret is not None and _s267_state == _s267_want and _s267_line,
+            f"state={_s267_state!r} want={_s267_want!r} line={'yes' if _s267_line else 'no'} "
+            f"raised={_s267_raised!r}",
+        )
+
+    _s267_repair: dict = {}
+    for _s267_name, _s267_path, _s267_want, _s267_clause in _s267_shapes:
+        _s267_dest = _s267_dir("repair", _s267_name)
+        _s267_ret, _s267_text, _s267_raised = _s267_stage_run(
+            dyrep.run, _s267_note, _s267_report, _s267_dest, glossary_path=_s267_path
+        )
+        _s267_state = json.loads(
+            (_s267_dest / dyrep.PROVENANCE_NAME).read_text(encoding="utf-8")
+        ).get("glossary", _S267_MISSING)
+        _s267_repair[_s267_name] = _s267_state
+        _s267_line = ("term/drift did not run" in _s267_text) == (_s267_clause is not None) and (
+            _s267_clause is None or _s267_clause in _s267_text
+        )
+        check(
+            f"#267: repair-provenance.json records the glossary state ({_s267_name})",
+            _s267_ret is not None and _s267_state == _s267_want and _s267_line,
+            f"state={_s267_state!r} want={_s267_want!r} line={'yes' if _s267_line else 'no'} "
+            f"raised={_s267_raised!r}",
+        )
+
+    check(
+        "#267: the two stages record the same object for the same glossary",
+        _s267_audit == _s267_repair and _s267_audit["no path supplied"] is None,
+        f"audit={_s267_audit!r} repair={_s267_repair!r}",
+    )
+    # The heart of #267: the two situations the doc promised were told apart were byte-identical.
+    _s267_none_prov = (_s267_dir("audit", "no path supplied") / dyau.PROVENANCE_NAME).read_bytes()
+    _s267_absent_prov = (
+        _s267_dir("audit", "a path that names no file") / dyau.PROVENANCE_NAME
+    ).read_bytes()
+    check(
+        "#267: 'not configured' and 'supplied and unusable' no longer write the same provenance",
+        _s267_none_prov != _s267_absent_prov,
+        "0 differing bytes before this change (measured on the branch point)",
+    )
+
+    # The sensitivity control, reproduced rather than asserted: a readable glossary makes the
+    # rule fire, so the states above are not all-clean because nothing was looked at.
+    _s267_with = json.loads(
+        (_s267_dir("audit", "a readable file with entries") / dyau.REPORT_NAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    _s267_without = json.loads(
+        (_s267_dir("audit", "no path supplied") / dyau.REPORT_NAME).read_text(encoding="utf-8")
+    )
+    _s267_new_rules = sorted(
+        {f["rule"] for f in _s267_with["findings"]} - {f["rule"] for f in _s267_without["findings"]}
+    )
+    _s267_bytes = (
+        (_s267_dir("audit", "no path supplied") / dyau.REPORT_NAME).stat().st_size,
+        (_s267_dir("audit", "a readable file with entries") / dyau.REPORT_NAME).stat().st_size,
+    )
+    check(
+        "#267: a readable glossary on a note carrying the variant makes term/drift fire",
+        _s267_new_rules == ["term/drift"]
+        and len(_s267_with["findings"]) == len(_s267_without["findings"]) + 1
+        and _s267_bytes[0] != _s267_bytes[1],
+        f"with={len(_s267_with['findings'])} without={len(_s267_without['findings'])} "
+        f"new rules={_s267_new_rules} audit.json bytes={_s267_bytes}",
+    )
+    # The other half of "nothing else moves": for the states where the rule had nothing to read,
+    # `audit.json` is unchanged, `tier1.rules` is the same list and its value is still 4.
+    _s267_reports = {
+        _s267_dir("audit", _s267_name) / dyau.REPORT_NAME
+        for _s267_name in (
+            "no path supplied",
+            "a path that names no file",
+            "a dangling symlink",
+            "a readable file with no usable entries",
+        )
+    }
+    _s267_provenance = json.loads(_s267_none_prov)
+    check(
+        "#267: the states that leave the rule nothing to read still write one audit.json",
+        len({p.read_bytes() for p in _s267_reports}) == 1
+        and _s267_provenance["tier1"]["rules_run"] == 4
+        and _s267_without["tier1_rules_run"] == 4
+        and _s267_provenance["tier1"]["rules"] == json.loads(_s267_absent_prov)["tier1"]["rules"],
+        f"distinct audit.json={len({p.read_bytes() for p in _s267_reports})} "
+        f"rules_run={_s267_provenance['tier1']['rules_run']} "
+        f"report rules_run={_s267_without['tier1_rules_run']}",
+    )
+
+    # The shape #285 protects, read off the two written documents rather than off the source:
+    # `error` is the loader's per-file state nested inside `glossary`, never a field of the
+    # provenance document itself -- a top-level `error` belongs to run-state.json, which is
+    # what the narrowed #285 check above scans for.
+    _s267_document_keys = (
+        set(_s267_provenance),
+        set(
+            json.loads(
+                (_s267_dir("repair", "no path supplied") / dyrep.PROVENANCE_NAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+        ),
+    )
+    check(
+        "#267/#270: the state is four keys under `tier1.glossary`, not `error` on the document",
+        all("error" not in keys for keys in _s267_document_keys)
+        and isinstance(_s267_audit.get("a path that names no file"), dict)
+        and set(_s267_audit["a path that names no file"])
+        == {"path", "is_file", "entries", "error"},
+        f"document keys={_s267_document_keys} state={_s267_audit.get('a path that names no file')!r}",
+    )
+
+    # states 5 and 6, whose `error` is the reader's reason and cannot be a literal here.
+    for _s267_name, _s267_path, _s267_want in (
+        ("a readable path that cannot be opened", _s267_unreadable, "Permission denied"),
+        ("a readable file that is not UTF-8", _s267_binary, "codec"),
+    ):
+        if _s267_name.startswith("a readable path") and os.geteuid() == 0:
+            # Root reads a 0o0 file, so the shape would pass vacuously and say nothing.
+            print(f"SKIP  #270: {_s267_name} needs a non-root euid")
+            continue
+        for _s267_stage, _s267_module, _s267_call in (
+            ("audit", dyau, dyau.run),
+            ("repair", dyrep, dyrep.run),
+        ):
+            _s267_dest = _s267_dir(_s267_stage, _s267_name)
+            if _s267_stage == "audit":
+                _s267_ret, _s267_text, _s267_raised = _s267_stage_run(
+                    _s267_call, _s267_note, _s267_txt, _s267_dest, glossary_path=_s267_path
+                )
+            else:
+                _s267_ret, _s267_text, _s267_raised = _s267_stage_run(
+                    _s267_call, _s267_note, _s267_report, _s267_dest, glossary_path=_s267_path
+                )
+            # Read only when the stage returned. Before this change both shapes raise out of
+            # the stage and write nothing, so an unconditional read would turn the FAIL line
+            # into a FileNotFoundError that takes the rest of the suite with it -- the same
+            # reason `_s267_stage_run` wraps the call.
+            _s267_prov: dict = {}
+            if _s267_ret is not None:
+                _s267_prov = json.loads(
+                    (_s267_dest / _s267_module.PROVENANCE_NAME).read_text(encoding="utf-8")
+                )
+            _s267_state = (
+                _s267_prov.get("tier1", {}).get("glossary", _S267_MISSING)
+                if _s267_stage == "audit"
+                else _s267_prov.get("glossary", _S267_MISSING)
+            )
+            _s267_error = _s267_state["error"] if isinstance(_s267_state, dict) else _S267_MISSING
+            check(
+                f"#270: {_s267_stage} records and names: {_s267_name}",
+                _s267_ret is not None
+                and isinstance(_s267_state, dict)
+                and _s267_state["is_file"] is True
+                and _s267_state["entries"] == 0
+                and _s267_want in str(_s267_error)
+                and _s267_want in _s267_text
+                and "term/drift did not run" in _s267_text,
+                f"state={_s267_state!r} raised={_s267_raised!r} line={_s267_text[-120:]!r}",
+            )
 
 # Dimensions. These are the cases the engine is for, and the ones it must NOT fire on.
 bodies = ["содержимое"] * 8
@@ -10675,6 +10999,12 @@ _REPAIR_KEYS = {
     "declined_reasons",
     "idempotent",
     "changes",
+    # #267/#270: stage 10 reads `--glossary` through the same loader stage 9 uses, so its
+    # provenance carries the same object beside `endpoint` -- `None` when no path was supplied,
+    # a four-key state otherwise. The two asserts below are why this set, and not the audit
+    # side, is the half that fails if the key lands without it: `audit-provenance.json` has no
+    # key-set pin (its checks read keys with `.get`).
+    "glossary",
 }
 _repair_provenance = json.loads(dyrep.provenance(dyrep.Report(), _seed_config))
 check(
