@@ -4,7 +4,7 @@ The bundle lives in `$XDG_STATE_HOME/dyak/<lecture>/` by default (`$DYAK_OUTPUT_
 `--output-dir` name it explicitly). The root is **flat**: `images/` is the only subdirectory.
 
 Produced by run 13, `1_lecture_OCS.mp4` (4520 s): 30 entries in the root, 58 frames under
-`images/`.
+`images/`; runs after #93 add `findings-ledger.json`, so the root count is 31.
 
 ## Root files, by writer
 
