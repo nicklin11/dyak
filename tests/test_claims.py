@@ -797,7 +797,10 @@ check(
 #: SECTIONS entry and a note section are both "the next section" to a reader -- and stage 6's
 #: `frames` is the frame it is about to caption.
 _LOOPS = (
-    ("caption.py", 'progress_line(out, "frames"', "reply = llm.chat("),
+    # Stage 6's request goes through `_caption_chat`, the one `llm.chat` call site caption.py
+    # owns (#256). The check follows that wrapper; the concurrent path (#339) plans every
+    # frame and writes the same line before dispatching the jobs.
+    ("caption.py", 'progress_line(out, "frames"', "reply = _caption_chat("),
     ("synth.py", 'progress_line(out, "sections"', "outcome = synthesizer.section("),
     ("audit.py", 'progress_line(progress, "sections"', "reply = llm.chat("),
 )

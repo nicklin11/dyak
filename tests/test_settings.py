@@ -44,7 +44,7 @@ from dyak import pipeline as dyp  # noqa: E402
 from dyak import runner  # noqa: E402
 from dyak import settings  # noqa: E402
 from dyak import workspace as dyw  # noqa: E402
-from dyak.llm import DEFAULT_CONCURRENCY, Config  # noqa: E402
+from dyak.llm import DEFAULT_CONCURRENCY, DEFAULT_VISION_CONCURRENCY, Config  # noqa: E402
 from dyak.stt import backends as sttb  # noqa: E402
 from dyak.stt import openai_compat, whispercpp  # noqa: E402
 
@@ -606,6 +606,7 @@ COMPUTED_DEFAULTS: dict[str, Callable[[], str | None]] = {
     "tempfile.gettempdir()": tempfile.gettempdir,
     "str(DEFAULT_MAX_UPLOAD_BYTES)": lambda: str(openai_compat.DEFAULT_MAX_UPLOAD_BYTES),
     "str(DEFAULT_CONCURRENCY)": lambda: str(DEFAULT_CONCURRENCY),
+    "str(DEFAULT_VISION_CONCURRENCY)": lambda: str(DEFAULT_VISION_CONCURRENCY),
 }
 
 
