@@ -65,6 +65,7 @@ LLM_ENDPOINT_ENV = "DYAK_LLM_ENDPOINT"
 LLM_MODEL_ENV = "DYAK_LLM_MODEL"
 LLM_KEY_ENV = "DYAK_LLM_KEY"
 LLM_CONCURRENCY_ENV = "DYAK_LLM_CONCURRENCY"
+VLM_CONCURRENCY_ENV = "DYAK_VLM_CONCURRENCY"
 VLM_ENDPOINT_ENV = "DYAK_VLM_ENDPOINT"
 VLM_MODEL_ENV = "DYAK_VLM_MODEL"
 VLM_KEY_ENV = "DYAK_VLM_KEY"
@@ -112,7 +113,11 @@ HONOURED_SETTINGS: frozenset[str] = frozenset(
 #: bare TOML integer in the file is the value rather than a type error (#192). Derived from the
 #: constant above for the same reason `HONOURED_SETTINGS` is: the name exists once.
 NUMERIC_SETTINGS: frozenset[str] = frozenset(
-    {settings_key(OPENAI_MAX_UPLOAD_BYTES_ENV), settings_key(LLM_CONCURRENCY_ENV)}
+    {
+        settings_key(OPENAI_MAX_UPLOAD_BYTES_ENV),
+        settings_key(LLM_CONCURRENCY_ENV),
+        settings_key(VLM_CONCURRENCY_ENV),
+    }
 )
 
 # --- the built-in default of every key (#243) -----------------------------------------
@@ -152,13 +157,20 @@ def _upload_default() -> str:
 def _concurrency_default() -> str:
     """`llm.DEFAULT_CONCURRENCY`, for the reason `_vault_default` gives.
 
-    `llm.py:526` resolves this key with `default=str(DEFAULT_CONCURRENCY)`, so the listing reads
+    `llm.py` resolves this key with `default=str(DEFAULT_CONCURRENCY)`, so the listing reads
     that constant rather than restating the number: the same value written twice is the drift
     this table is checked against (#250).
     """
     from . import llm
 
     return str(llm.DEFAULT_CONCURRENCY)
+
+
+def _vision_concurrency_default() -> str:
+    """`llm.DEFAULT_VISION_CONCURRENCY`, the stage-6 half of the same rule (#339)."""
+    from . import llm
+
+    return str(llm.DEFAULT_VISION_CONCURRENCY)
 
 
 #: The built-in default of every honoured key: the value the key has when no flag, no
@@ -190,6 +202,7 @@ SETTING_DEFAULTS: dict[str, Callable[[], str | None]] = {
     settings_key(STT_BACKEND_ENV): lambda: "auto",
     settings_key(TERMS_DIR_ENV): _no_default,
     settings_key(VAULT_ENV): _vault_default,
+    settings_key(VLM_CONCURRENCY_ENV): _vision_concurrency_default,
     settings_key(VLM_ENDPOINT_ENV): _no_default,
     settings_key(VLM_KEY_ENV): _no_default,
     settings_key(VLM_MODEL_ENV): _no_default,
@@ -604,6 +617,11 @@ def describe(flags: Mapping[str, str | None] | None = None) -> list[Setting]:
         ),
         resolve(TERMS_DIR_ENV, flag=flags.get(TERMS_DIR_ENV), default=default_for(TERMS_DIR_ENV)),
         resolve(VAULT_ENV, flag=flags.get(VAULT_ENV), default=default_for(VAULT_ENV)),
+        resolve(
+            VLM_CONCURRENCY_ENV,
+            flag=flags.get(VLM_CONCURRENCY_ENV),
+            default=default_for(VLM_CONCURRENCY_ENV),
+        ),
         resolve(
             VLM_ENDPOINT_ENV,
             flag=flags.get(VLM_ENDPOINT_ENV),

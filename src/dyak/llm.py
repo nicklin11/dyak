@@ -37,13 +37,15 @@ the requested one and the two are left to disagree in the open.
 ## Concurrency
 
 `DYAK_LLM_CONCURRENCY` (default **1**) is how many section requests stage 7 and stage 9 may
-have in flight at once (#153). Both make one request per note section and both are blocking
-`urllib` calls, so the number is a thread count: it bounds what this client has outstanding,
-and says nothing about what the endpoint does with them.
+have in flight at once (#153). `DYAK_VLM_CONCURRENCY` (default **1**) is the same number for
+stage 6's per-frame captions (#339). Both are blocking `urllib` calls, so the number is a
+thread count: it bounds what this client has outstanding, and says nothing about what the
+endpoint does with them.
 
-The default is 1 because the endpoint this is built against is a local gateway. A gateway with
-one model behind it serves concurrent requests by queueing them, so the knob buys wall clock
-only where the provider does, and it stays opt-in.
+The defaults are 1 because the endpoints this is built against are local gateways. A gateway
+with one model behind it serves concurrent requests by queueing them, so the knobs buy wall
+clock only where the provider does, and they stay opt-in. The vision knob is separate because
+vision is a separate role and may be a different endpoint with a different rate limit.
 
 Two rules hold at any value:
 
@@ -55,9 +57,10 @@ Two rules hold at any value:
   line consumes the replies in the order it submitted the jobs, so no lock is needed and the
   interleaving the counter shows is the section order (#197).
 
-The two stages stop differently, and that difference lives in their own loops rather than
-here: stage 9 stops at the first failed call, stage 7 after `BREAKER_MAX` consecutive
-connection failures. `map_bounded` takes the rule as a predicate.
+The stages stop differently, and that difference lives in their own loops rather than here:
+stage 9 stops at the first failed call, stage 7 after `BREAKER_MAX` consecutive connection
+failures, and stage 6 after the same count while keeping the replies already in flight. All
+three pass the rule to `map_bounded` as a predicate.
 """
 
 from __future__ import annotations
@@ -82,6 +85,7 @@ from .settings import LLM_CONCURRENCY_ENV as CONCURRENCY_ENV
 from .settings import LLM_ENDPOINT_ENV as ENDPOINT_ENV
 from .settings import LLM_KEY_ENV as KEY_ENV
 from .settings import LLM_MODEL_ENV as MODEL_ENV
+from .settings import VLM_CONCURRENCY_ENV as VISION_CONCURRENCY_ENV
 from .settings import VLM_ENDPOINT_ENV as VISION_ENDPOINT_ENV
 from .settings import VLM_KEY_ENV as VISION_KEY_ENV
 from .settings import VLM_MODEL_ENV as VISION_MODEL_ENV
@@ -692,6 +696,31 @@ class Breaker:
 #: the local gateway the stages are pointed at (#153).
 DEFAULT_CONCURRENCY = 1
 
+#: Frame captions stage 6 may have in flight at once when `DYAK_VLM_CONCURRENCY` is unset. 1
+#: is the sequential run and the right default for a local vision endpoint, the same reasoning
+#: as `DEFAULT_CONCURRENCY` (#153). The knob is separate because vision is a separate role and
+#: may be a different endpoint whose rate limit has nothing to do with the text endpoint's.
+DEFAULT_VISION_CONCURRENCY = 1
+
+
+def _positive_count(raw: object, env_name: str, roles: str, default: int) -> int:
+    """Parse one concurrency knob, refusing a value that is not a positive whole number."""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        value = 0
+    if value < 1:
+        raise runner.DependencyError(
+            name="llm",
+            code=ec.USAGE,
+            message=f"{env_name} is not a positive request count: {raw!r}",
+            remediation=(
+                f"set it to the number of {roles} that may have in flight at once "
+                f"(default {default} = one at a time)"
+            ),
+        )
+    return value
+
 
 def concurrency() -> int:
     """How many section requests one stage may have in flight at once.
@@ -705,21 +734,27 @@ def concurrency() -> int:
     `DYAK_OPENAI_MAX_UPLOAD_BYTES` gives a bad count (`stt/openai_compat.py:470`).
     """
     raw = resolve(CONCURRENCY_ENV, default=str(DEFAULT_CONCURRENCY)).value
-    try:
-        value = int(str(raw).strip())
-    except (TypeError, ValueError):
-        value = 0
-    if value < 1:
-        raise runner.DependencyError(
-            name="llm",
-            code=ec.USAGE,
-            message=f"{CONCURRENCY_ENV} is not a positive request count: {raw!r}",
-            remediation=(
-                "set it to the number of section requests stage 7 and stage 9 may have in "
-                f"flight at once (default {DEFAULT_CONCURRENCY} = one at a time)"
-            ),
-        )
-    return value
+    return _positive_count(
+        raw,
+        CONCURRENCY_ENV,
+        "section requests stage 7 and stage 9",
+        DEFAULT_CONCURRENCY,
+    )
+
+
+def vision_concurrency() -> int:
+    """How many frame captions stage 6 may have in flight at once.
+
+    The same contract as `concurrency()`: read where it is used, default 1, and a value that
+    is not a positive whole number is exit 1 naming the variable rather than a silent clamp.
+    """
+    raw = resolve(VISION_CONCURRENCY_ENV, default=str(DEFAULT_VISION_CONCURRENCY)).value
+    return _positive_count(
+        raw,
+        VISION_CONCURRENCY_ENV,
+        "frame captions stage 6",
+        DEFAULT_VISION_CONCURRENCY,
+    )
 
 
 T = TypeVar("T")
@@ -739,15 +774,15 @@ def map_bounded(
 
     `stop_when` is asked after each reply, in that same order, whether the calls after it
     should be left alone; an unattempted job's slot is `None`. The predicate belongs to the
-    caller because the two stages stop on different things: stage 9 stops at the first failed
-    call, where its sequential loop `break`s, and stage 7 stops after `BREAKER_MAX` consecutive
-    connection failures. Calls already in flight when the predicate trips still finish -- at
-    most `workers` of them -- and their replies are kept, so a dead endpoint costs a bounded
-    number of ladders instead of one per section (#124).
+    caller because the stages stop on different things: stage 9 stops at the first failed
+    call, where its sequential loop `break`s, stage 7 and stage 6 after `BREAKER_MAX`
+    consecutive connection failures. Calls already in flight when the predicate trips still
+    finish -- at most `workers` of them -- and their replies are kept, so a dead endpoint
+    costs a bounded number of ladders instead of one per unit (#124).
 
-    `EndpointError` and `NotConfiguredError` come back as values, because both stages catch
-    both around their call and a raised one would lose the section it belongs to. Anything else
-    is a bug in this program and propagates.
+    `EndpointError` and `NotConfiguredError` come back as values, because the stages catch
+    both around their call and a raised one would lose the section or frame it belongs to.
+    Anything else is a bug in this program and propagates.
     """
     results: list[T | EndpointError | NotConfiguredError | None] = [None] * len(jobs)
     if not jobs:

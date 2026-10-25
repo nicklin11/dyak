@@ -585,6 +585,172 @@ def load_cache(target: Path, model: str) -> dict[str, dict]:
     }
 
 
+def _caption_chat(message: dict, config: llm.Config) -> llm.Reply:
+    """One caption request: the single sampling call site stage 6 owns (#256).
+
+    Both the sequential loop and the concurrent jobs go through here, so the request's
+    `max_tokens` and the call itself are stated once. `llm.chat` records the seed and the
+    sampling parameters; a second copy in the concurrent path would be a fifth call site the
+    #256 census does not know about.
+    """
+    return llm.chat([message], config, max_tokens=1024)
+
+
+def _caption_concurrent(
+    report: Report,
+    images: Path,
+    config: llm.Config,
+    *,
+    cache: dict[str, dict],
+    out,
+    workers: int,
+) -> dict[str, dict]:
+    """The `workers > 1` caption path (#339).
+
+    The caller thread plans every frame, applies the cache and records the missing ones.
+    Only the HTTP request runs in `llm.map_bounded`'s workers; the replies are folded back in
+    frame order, so the captions and their traces are the same as the sequential path's. The
+    one deliberate difference is the breaker: with N in flight, the stop takes effect after
+    the third consecutive failed **result**, and calls already dispatched finish, so up to N
+    frames can overshoot the stop. Frames that were never dispatched are `STOPPED`, exactly
+    as they are at 1.
+    """
+    produced: dict[str, dict] = {}
+    reused = 0
+    failed = 0
+    refused = 0
+    breaker = llm.Breaker()
+    tripped = False
+    planned: list[tuple[object, str]] = []
+    messages: list[dict] = []
+
+    for index, alignment in enumerate(report.considered):
+        # The same first statement as the sequential loop (#197): every considered frame
+        # advances the counter, whatever path it leaves by. With calls in flight this is a
+        # dispatch counter, not a completion counter; the stage's result line carries
+        # completion.
+        stages.progress_line(out, "frames", index, len(report.considered))
+        source = alignment.enhanced or alignment.image
+        path = images / source
+        if not path.is_file():
+            alignment.caption_status = "FRAME_MISSING"
+            alignment.reason = f"{source} is not in the bundle"
+            alignment.caption_trace = {"source": "missing", "image": source}
+            failed += 1
+            continue
+        fingerprint = llm.frame_fingerprint(path)
+        prior = cache.get(alignment.frame)
+        if prior and prior.get("fingerprint") == fingerprint and prior.get("text"):
+            alignment.caption = str(prior["text"])
+            is_refusal = alignment.caption == NO_NEW_INFORMATION
+            alignment.caption_status = "NO_NEW_INFORMATION" if is_refusal else "OK"
+            alignment.reason = (
+                "the model found nothing on screen that the excerpt does not already state"
+                if is_refusal
+                else ""
+            )
+            if is_refusal:
+                refused += 1
+            alignment.caption_trace = {
+                "source": "cached",
+                "fingerprint": fingerprint,
+                "model": prior.get("model"),
+                "served_model": prior.get("served_model"),
+            }
+            reused += 1
+            continue
+        planned.append((alignment, fingerprint))
+        messages.append(llm.vision_message(CAPTION_PROMPT, path, text=alignment.text))
+
+    jobs = [lambda message=message: _caption_chat(message, config) for message in messages]
+
+    def stop_when(outcome: object) -> bool:
+        nonlocal tripped
+        if isinstance(outcome, llm.NotConfiguredError):
+            return True
+        if isinstance(outcome, llm.EndpointError):
+            if outcome.connection:
+                tripped = breaker.fail() or tripped
+                return tripped
+            breaker.ok()
+            return False
+        breaker.ok()
+        return False
+
+    replies = llm.map_bounded(jobs, workers, stop_when=stop_when)
+
+    for (alignment, fingerprint), reply in zip(planned, replies):
+        if reply is None:
+            alignment.caption_status = "STOPPED"
+            alignment.reason = (
+                f"not attempted: {breaker.limit} consecutive connection failures stopped stage 6"
+            )
+            alignment.caption_trace = {"source": "breaker"}
+            failed += 1
+            continue
+        if isinstance(reply, llm.NotConfiguredError):
+            raise reply
+        if isinstance(reply, llm.EndpointError):
+            alignment.caption_status = "ERROR"
+            alignment.reason = f"vision endpoint refused: {reply}"
+            alignment.caption_trace = {
+                "source": "error",
+                "fingerprint": fingerprint,
+                "model": config.model,
+                "detail": str(reply),
+            }
+            failed += 1
+            continue
+
+        text = reply.text.strip()
+        if not text:
+            alignment.caption_status = "EMPTY"
+            alignment.reason = "vision model returned nothing; empty completions are not retried"
+            alignment.caption_trace = {
+                "source": "empty",
+                "fingerprint": fingerprint,
+                "model": config.model,
+                "served_model": reply.served_model,
+                "attempts": reply.attempts,
+            }
+            failed += 1
+            continue
+
+        alignment.caption = text
+        is_refusal = text == NO_NEW_INFORMATION
+        alignment.caption_status = "NO_NEW_INFORMATION" if is_refusal else "OK"
+        alignment.reason = (
+            "the model found nothing on screen that the excerpt does not already state"
+            if is_refusal
+            else ""
+        )
+        if is_refusal:
+            refused += 1
+        alignment.caption_trace = {
+            "source": "called",
+            "fingerprint": fingerprint,
+            **reply.as_dict(),
+        }
+        produced[alignment.frame] = {
+            "fingerprint": fingerprint,
+            "model": config.model,
+            "served_model": reply.served_model,
+            "text": text,
+        }
+        out.write(f"         {alignment.frame}: {len(text)} chars\n")
+
+    if tripped:
+        out.write(
+            f"         stopped after {breaker.limit} consecutive connection failures; "
+            "frames already in flight were allowed to finish, the rest were not attempted\n"
+        )
+    out.write(
+        f"         {len(produced)} captioned, {reused} from cache, {failed} failed, "
+        f"{refused} refused\n"
+    )
+    return produced
+
+
 def caption_frames(
     report: Report,
     images: Path,
@@ -592,6 +758,7 @@ def caption_frames(
     *,
     cache: dict[str, dict] | None = None,
     stream=None,
+    workers: int | None = None,
 ) -> dict[str, dict]:
     """Caption every frame stage 5 passed. Returns the cache entries to persist.
 
@@ -602,6 +769,9 @@ def caption_frames(
     """
     out = stream if stream is not None else sys.stdout
     cache = cache if cache is not None else {}
+    workers = llm.vision_concurrency() if workers is None else workers
+    if workers > 1:
+        return _caption_concurrent(report, images, config, cache=cache, out=out, workers=workers)
     produced: dict[str, dict] = {}
     reused = 0
     failed = 0
@@ -662,10 +832,8 @@ def caption_frames(
             continue
 
         try:
-            reply = llm.chat(
-                [llm.vision_message(CAPTION_PROMPT, path, text=alignment.text)],
-                config,
-                max_tokens=1024,
+            reply = _caption_chat(
+                llm.vision_message(CAPTION_PROMPT, path, text=alignment.text), config
             )
         except llm.NotConfiguredError:
             raise
@@ -816,6 +984,7 @@ def run(
     destination.mkdir(parents=True, exist_ok=True)
 
     target = destination / REPORT_NAME
+    workers = llm.vision_concurrency()
     try:
         config = llm.Config.vision_from_env()
     except llm.NotConfiguredError as exc:
@@ -835,7 +1004,7 @@ def run(
         out.write(f"         no vision endpoint: {exc}\n")
     else:
         prior = load_cache(cache_source or target, config.model)
-        produced = caption_frames(report, images, config, cache=prior, stream=out)
+        produced = caption_frames(report, images, config, cache=prior, stream=out, workers=workers)
         outcome = CaptionOutcome(
             captioned=len(produced),
             reused=sum(1 for a in report.considered if a.caption_status in DESCRIBED)
@@ -850,7 +1019,7 @@ def run(
 
     write(report, target, settings, outcome, {**prior, **produced})
     (destination / PROVENANCE_NAME).write_text(
-        provenance(settings, config, outcome) + "\n", encoding="utf-8"
+        provenance(settings, config, outcome, concurrency=workers) + "\n", encoding="utf-8"
     )
     if report.uncovered:
         for line in report.explain().splitlines():
@@ -888,7 +1057,13 @@ def write(
     )
 
 
-def provenance(settings: Settings, config: llm.Config, outcome: CaptionOutcome) -> str:
+def provenance(
+    settings: Settings,
+    config: llm.Config,
+    outcome: CaptionOutcome,
+    *,
+    concurrency: int | None = None,
+) -> str:
     return json.dumps(
         {
             "stage": 6,
@@ -896,6 +1071,15 @@ def provenance(settings: Settings, config: llm.Config, outcome: CaptionOutcome) 
             "method": "segment overlap; boundary at first word >= frame display start",
             "requires_model": True,
             "caption": outcome.as_dict(),
+            "concurrency": concurrency if concurrency is not None else llm.vision_concurrency(),
+            "breaker": {
+                "limit": llm.BREAKER_MAX,
+                "scope": (
+                    "per stage; only connection-level failures count. Above one request in "
+                    "flight, calls already dispatched finish after the stop, so up to the "
+                    "concurrency value can overshoot it"
+                ),
+            },
             "model": config.redacted() | {"served_model": outcome.served_model},
             "inherited_text_endpoint": config.is_vision_default,
             "cache_key": "sha256(frame bytes) + model id",

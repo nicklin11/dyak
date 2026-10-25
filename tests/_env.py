@@ -28,15 +28,28 @@ four. Anything that is genuinely `DYAK_*` belongs in a test's own arrangement, s
 from __future__ import annotations
 
 import os
+import tempfile
 
 PREFIX = "DYAK_"
 
+#: A settings path that does not exist, installed by `isolate()` for the same reason the
+#: `DYAK_*` variables are scrubbed: `settings.resolve` reads `~/.config/dyak/settings.toml`
+#: when no layer names one, so a developer's `llm_concurrency = 4` silently changed stage 7's
+#: call order in the #117 test. A suite that reads the developer's config is not hermetic.
+#: A test that wants the default path pops this variable; `test_settings` sets its own.
+NO_SETTINGS = os.path.join(tempfile.gettempdir(), f"dyak-tests-no-settings-{os.getpid()}.toml")
+
 
 def isolate() -> dict[str, str]:
-    """Remove every `DYAK_*` variable from `os.environ`; return them to restore later."""
+    """Remove every `DYAK_*` variable and point the settings file at a non-existent path.
+
+    The settings file is a second ambient layer, not a `DYAK_*` variable, so scrubbing the
+    prefix alone left it readable.
+    """
     saved = {key: value for key, value in os.environ.items() if key.startswith(PREFIX)}
     for key in saved:
         del os.environ[key]
+    os.environ["DYAK_SETTINGS"] = NO_SETTINGS
     return saved
 
 

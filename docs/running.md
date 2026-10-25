@@ -58,6 +58,7 @@ path.
 | `DYAK_LLM_MODEL` | `llm.py`, `deps.py` | model id sent in the request |
 | `DYAK_LLM_KEY` | `llm.py` | optional; unset means no `Authorization` header |
 | `DYAK_LLM_CONCURRENCY` | `llm.py`, `audit.py`, `synth.py` | section requests stages 7 and 9 may have in flight at once; default `1`, and a value that is not a positive whole number is exit 1 naming the variable. Default is 1 because the endpoint this is built against is a local gateway: one model behind one URL serves concurrent requests by queueing them, so the knob buys wall clock only where the provider does (#153). Above 1 every section is sent, and stage 9's finding cap changes meaning — at 1 it stops requests, above 1 it becomes a report limit on the collected findings (`cap_scope`/`cap_dropped` in `audit.json`, and the count in the run line); the two readings do not produce the same audit. Measured on the tailnet gateway `http://100.64.0.2:8317/v1` (`opencode-go/glm-5.3-flash`) with stage 9's 8-section fixture at `limit=99`, so neither arm is capped: **8.2 s at 1, 3.6 s at 4** (medians of three runs, 2.3×), while the seconds the endpoint itself reported went from 8.0 to 10.2 — the gateway queues what it is sent, and the wall clock is what the run pays |
+| `DYAK_VLM_CONCURRENCY` | `llm.py`, `caption.py` | frame captions stage 6 may have in flight at once; default `1`, and a value that is not a positive whole number is exit 1 naming the variable. Separate from `DYAK_LLM_CONCURRENCY` because vision is a separate role and may be a different endpoint with its own rate limit (#339). At 1 the loop is the sequential one the stage shipped with; above 1 the uncached frames are dispatched through `llm.map_bounded` and folded back in frame order. The breaker still stops after 3 consecutive connection failures, but calls already in flight finish, so up to the concurrency value can overshoot the stop; `caption-provenance.json` records the concurrency and the limit |
 | `DYAK_VLM_ENDPOINT` | `llm.py`, `deps.py` | stage 6 frame captioning; unset falls back to `DYAK_LLM_ENDPOINT` |
 | `DYAK_VLM_MODEL` | `llm.py`, `deps.py` | as above, falls back to `DYAK_LLM_MODEL` |
 | `DYAK_VLM_KEY` | `llm.py`, `deps.py` | as above, falls back to `DYAK_LLM_KEY` |
@@ -114,6 +115,7 @@ written `$HOME`/`$TMPDIR` here, because this document has to read the same on an
 | `DYAK_LLM_MODEL` | `llm_model` | none |
 | `DYAK_LLM_KEY` | `llm_key` | none |
 | `DYAK_LLM_CONCURRENCY` | `llm_concurrency` | `1` |
+| `DYAK_VLM_CONCURRENCY` | `vlm_concurrency` | `1` |
 | `DYAK_VLM_ENDPOINT` | `vlm_endpoint` | none |
 | `DYAK_VLM_MODEL` | `vlm_model` | none |
 | `DYAK_VLM_KEY` | `vlm_key` | none |
@@ -123,7 +125,9 @@ written `$HOME`/`$TMPDIR` here, because this document has to read the same on an
 Reports missing or conflicting dependencies and exits 2/3 with the reason and remediation.
 Run it before a run, not after a failure. Both model roles are probed: the text endpoint, and
 the vision endpoint stage 6 captions with when `DYAK_VLM_*` is set. An unset vision role is
-reported, not failed — stage 6 falls back to the text pair.
+reported, not failed — stage 6 falls back to the text pair. `DYAK_VLM_CONCURRENCY` is a
+separate dial from `DYAK_LLM_CONCURRENCY`: the vision role may be a different endpoint with a
+different rate limit.
 
 ## `dyak settings`
 

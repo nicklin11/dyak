@@ -5137,6 +5137,99 @@ try:
         routcome.as_dict(),
     )
 
+    # --- #339: frame captions are independent, and the concurrent path preserves order ----
+    _ccimg = ctmp / "concurrent_images"
+    _ccimg.mkdir(parents=True, exist_ok=True)
+    _ccframes = [f"c_{i:010d}.png" for i in range(3)]
+    for _i, _name in enumerate(_ccframes):
+        # Different bytes per frame, so the cache key and the echoed caption differ per frame.
+        (_ccimg / _name).write_bytes(_FAKE_FRAME + bytes([_i]))
+
+    def _cc_report():
+        return dycap.Report(
+            alignments=[
+                dycap.Alignment(
+                    frame=_name,
+                    pts_ms=i * 1000,
+                    image=_name,
+                    enhanced=None,
+                    on_screen_ms=(i * 1000, (i + 1) * 1000),
+                    segment_indices=[0],
+                    text=f"t{i}",
+                )
+                for i, _name in enumerate(_ccframes)
+            ]
+        )
+
+    _active = {"now": 0, "max": 0}
+    _active_lock = threading.Lock()
+
+    def _echo_chat(messages, config, **kwargs):
+        with _active_lock:
+            _active["now"] += 1
+            _active["max"] = max(_active["max"], _active["now"])
+        time.sleep(0.03)
+        url = messages[0]["content"][1]["image_url"]["url"]
+        digest = hashlib.sha256(url.encode()).hexdigest()[:8]
+        with _active_lock:
+            _active["now"] -= 1
+        return _caption_reply(f"caption {digest}")
+
+    _cc_cfg = dyle.Config(endpoint="http://vision.invalid/v1", model="fake-vision")
+    dyle.chat = _echo_chat
+    os.environ.pop("DYAK_VLM_CONCURRENCY", None)
+    _sequential = dycap.caption_frames(_cc_report(), _ccimg, _cc_cfg, stream=io.StringIO())
+    os.environ["DYAK_VLM_CONCURRENCY"] = "3"
+    _concurrent = dycap.caption_frames(_cc_report(), _ccimg, _cc_cfg, stream=io.StringIO())
+    check(
+        "stage 6 at concurrency 3 produces the same cache entries and captions as at 1 (#339)",
+        _concurrent == _sequential,
+        f"sequential={_sequential} concurrent={_concurrent}",
+    )
+    check(
+        "and the three requests really were in flight together",
+        _active["max"] >= 2,
+        f"max active={_active['max']}",
+    )
+    os.environ.pop("DYAK_VLM_CONCURRENCY", None)
+
+    os.environ["DYAK_VLM_CONCURRENCY"] = "0"
+    _vlm_knob = raises(dyle.vision_concurrency)
+    os.environ.pop("DYAK_VLM_CONCURRENCY", None)
+    check(
+        "DYAK_VLM_CONCURRENCY refuses a non-positive count instead of clamping (#339)",
+        _vlm_knob is not None
+        and _vlm_knob.code == ec.USAGE
+        and dyle.VISION_CONCURRENCY_ENV in _vlm_knob.message,
+        str(_vlm_knob),
+    )
+
+    _conc_breport = _cc_report()
+    _conc_calls: list[int] = []
+
+    def _conc_dead_chat(messages, config, **kwargs):
+        _conc_calls.append(1)
+        raise dyle.EndpointError("connection refused", connection=True)
+
+    os.environ["DYAK_VLM_CONCURRENCY"] = "3"
+    dyle.chat = _conc_dead_chat
+    try:
+        dycap.caption_frames(_conc_breport, _ccimg, _cc_cfg, stream=io.StringIO(), workers=3)
+    finally:
+        dyle.chat = _real_chat
+        os.environ.pop("DYAK_VLM_CONCURRENCY", None)
+    check(
+        "a dead endpoint at concurrency 3 still stops after the breaker limit, not once per frame (#339)",
+        len(_conc_calls) == dyle.BREAKER_MAX,
+        f"calls={len(_conc_calls)}",
+    )
+    check(
+        "and the frames never dispatched say STOPPED, as they do at 1",
+        sum(1 for a in _conc_breport.considered if a.caption_status == "STOPPED")
+        == len(_ccframes) - dyle.BREAKER_MAX,
+        str([(a.frame, a.caption_status) for a in _conc_breport.considered]),
+    )
+
     # --- #124: stage 6 stops calling an endpoint that is not answering -----------------
     #
     # Each call has its own retry ladder on purpose, so 58 frames against a dead endpoint is
