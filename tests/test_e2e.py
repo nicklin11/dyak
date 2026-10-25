@@ -604,6 +604,31 @@ def main() -> int:
             f"outcome={run_state['outcome']!r} stages={run_state['stages_completed']}",
         )
 
+        # #93: the ledger is written by the pipeline, not by a stage, and must survive the
+        # next run's `clear_root` — it is not in `RUN_ARTEFACTS`. The cold run establishes
+        # the counts; the warm run below proves the history is kept.
+        ledger = json.loads((bundle / "findings-ledger.json").read_text(encoding="utf-8"))
+        cold_lint = json.loads((bundle / "lint.json").read_text(encoding="utf-8"))
+        cold_audit = json.loads((bundle / "audit.json").read_text(encoding="utf-8"))
+        cold_findings = sum(int(entry["findings"]) for entry in ledger["rules"].values())
+        check(
+            "the bundle carries the findings ledger with one run recorded",
+            ledger["tool"] == "dyak-findings-ledger-v1" and ledger["runs"] == 1,
+            f"tool={ledger.get('tool')!r} runs={ledger.get('runs')!r}",
+        )
+        check(
+            "the ledger's counters are this run's stage 8 plus stage 9 findings",
+            cold_findings == len(cold_lint["findings"]) + len(cold_audit["findings"]),
+            f"ledger={cold_findings} lint={len(cold_lint['findings'])} "
+            f"audit={len(cold_audit['findings'])}",
+        )
+        check(
+            "a rule that did not fire is present with an explicit zero",
+            ledger["rules"]["structure/missing-section"]["findings"] == 0
+            and ledger["rules"]["structure/missing-section"]["runs_with_findings"] == 0,
+            str(ledger["rules"]["structure/missing-section"]),
+        )
+
         stage_names = (
             "probe",
             "audio",
@@ -671,6 +696,19 @@ def main() -> int:
             and all(a["caption_trace"].get("source") == "cached" for a in warm_considered)
             and len(warm_gated) == len(gated),
             str([a["caption_trace"].get("source") for a in warm_considered]),
+        )
+
+        warm_ledger = json.loads((bundle / "findings-ledger.json").read_text(encoding="utf-8"))
+        warm_findings = sum(int(entry["findings"]) for entry in warm_ledger["rules"].values())
+        check(
+            "the warm run keeps the ledger and counts a second run (#93)",
+            warm_ledger["runs"] == 2,
+            f"runs={warm_ledger['runs']}",
+        )
+        check(
+            "and the ledger's totals include both runs, not just the last one",
+            warm_findings >= cold_findings,
+            f"cold={cold_findings} warm={warm_findings}",
         )
 
         if failures:

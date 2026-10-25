@@ -121,6 +121,11 @@ class Transcript:
     wav: Path
     audio_duration: float
     segments: tuple[Segment, ...]
+    #: Parser observations about this payload (a segment skipped for a missing text field, an
+    #: end before a start, and so on). Recorded in `stt-provenance.json` and printed -- the
+    #: first ten -- by stage 3, but deliberately never gated (#93). No measurement ties the
+    #: count to note quality; a threshold would be a number without a denominator. #49 and #32
+    #: are the measurements that could change this decision.
     anomalies: tuple[str, ...] = field(default_factory=tuple)
     raw_payload: bytes = b""
     backend: str = "unknown"

@@ -17,6 +17,7 @@ from . import exitcodes as ec
 from . import bundle as dyb
 from . import caption as dycap
 from . import link as dylnk
+from . import llm
 from . import pipeline as dyp
 from . import repair as dyr
 from . import runner
@@ -25,14 +26,6 @@ from . import settings as dys
 from . import web as dyweb
 from .deps import PROCESS_REQUIRES, Check, run_all, worst_code
 from .workspace import WorkDir
-
-# Subcommands that are not built yet. Each names its tracking issue so the failure is a
-# pointer, not a dead end. The standalone subcommand is unbuilt; the stage itself runs inside
-# `process`, so "stage 9, tracked in #11" would now be a false statement about the pipeline.
-PENDING: dict[str, str] = {
-    "audit": "the standalone `dyak audit NOTE` entry point, tracked in #11; stage 9 "
-    "does run as part of `process`",
-}
 
 
 def _render(checks: list[Check]) -> None:
@@ -133,12 +126,8 @@ def _preflight(no_llm: bool = False) -> int:
     return worst_code(checks)
 
 
-def _pending(name: str) -> int:
-    print(
-        f"dyak: `{name}` is not implemented yet ({PENDING[name]}).\n"
-        f"dyak: run `dyak doctor` for what is available.",
-        file=sys.stderr,
-    )
+def _usage(message: str) -> int:
+    print(f"dyak: {message}", file=sys.stderr)
     return ec.USAGE
 
 
@@ -515,8 +504,62 @@ def process(
     return ec.OK
 
 
-def _audit(_args: argparse.Namespace) -> int:
-    return _pending("audit")
+def _audit(args: argparse.Namespace) -> int:
+    """Stage 9 over a note that already exists (#11, #132).
+
+    The pipeline's stage 9 is the same code path, so a standalone audit and an audit inside
+    `process` cannot disagree about what a finding is. The note and transcript are required
+    rather than defaulted: reading a typo as an empty file would audit nothing and exit 0,
+    which is the failure mode the whole audit exists to prevent (#93).
+    """
+    note = Path(args.note).expanduser()
+    transcript = Path(args.transcript).expanduser()
+    for label, path in (("note", note), ("transcript", transcript)):
+        if not path.is_file():
+            return _usage(f"audit: {label} not found: {path}")
+
+    glossary = None
+    if args.glossary:
+        glossary = Path(args.glossary).expanduser()
+        if not glossary.is_file():
+            return _usage(f"audit: glossary not found: {glossary}")
+    if args.tier2_limit < 1:
+        return _usage(f"audit: --tier2-limit must be at least 1, not {args.tier2_limit}")
+    if args.section_chars < 1:
+        return _usage(f"audit: --section-chars must be at least 1, not {args.section_chars}")
+
+    config: llm.Config | None = None
+    if not args.no_llm:
+        try:
+            config = llm.Config.from_env()
+        except llm.NotConfiguredError as exc:
+            # Tier 1 is deterministic and needs no model. The audit is still useful, and the
+            # absence of tier 2 is stated in the report rather than left to be inferred.
+            print(
+                f"dyak: audit: tier 2 will not run -- {exc}; tier 1 still runs. "
+                "Pass --no-llm to make this explicit.",
+                file=sys.stderr,
+            )
+
+    destination = Path(args.output_dir).expanduser() if args.output_dir else note.parent / "audit"
+    try:
+        report = dya.run(
+            note,
+            transcript,
+            destination,
+            glossary_path=glossary,
+            config=config,
+            tier2_limit=args.tier2_limit,
+            section_chars=args.section_chars,
+            stream=sys.stdout,
+        )
+    except OSError as exc:
+        print(f"dyak: audit: could not read or write the audit artefacts: {exc}", file=sys.stderr)
+        return ec.DEPENDENCY_FAILED
+
+    print(f"dyak: audit: {report.summary()}")
+    print(f"dyak: audit: findings -> {destination / dya.REPORT_NAME}")
+    return ec.OK if report.ok else ec.AUDIT_FINDINGS
 
 
 def _terms_dir(args: argparse.Namespace):
@@ -822,9 +865,71 @@ def build_parser() -> argparse.ArgumentParser:
     p_audit = sub.add_parser(
         "audit",
         help="audit a note that already exists",
-        description="Run the audit stage against an existing note. Not implemented in this build.",
+        description=(
+            "Run the audit stage against an existing Markdown note. The note and its "
+            "transcript are both required: a finding without a transcript citation is not "
+            "evidence (ADR-0001 D5), so an audit with no transcript cannot do the job it "
+            "was asked to do."
+        ),
     )
-    p_audit.add_argument("note", nargs="?", help="Markdown note to audit")
+    p_audit.add_argument("note", help="Markdown note to audit")
+    p_audit.add_argument(
+        "--transcript",
+        required=True,
+        metavar="FILE",
+        help=(
+            "the plain-text transcript the note was written from, used both by the unsourced "
+            "number check and by the critic's citations. Required: without it every tier-2 "
+            "finding would be discarded for want of a citation"
+        ),
+    )
+    p_audit.add_argument(
+        "--glossary",
+        metavar="FILE",
+        help=(
+            "ASR term glossary for the term-drift rule, in the "
+            "`| variant | canonical | domain | date |` format. Without it the rule finds "
+            "nothing and the audit says so"
+        ),
+    )
+    p_audit.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        help=(
+            "where audit.json, audit-provenance.json and audit-llm-transcript.json are "
+            "written (default: <note-directory>/audit/)"
+        ),
+    )
+    p_audit.add_argument(
+        "--tier2-limit",
+        type=int,
+        default=6,
+        metavar="N",
+        help=(
+            "keep at most N tier-2 findings (default: 6, the pipeline's cost bound). A "
+            "regression audit wants the whole set: pass a value above the number of "
+            "sections, and `audit.json` still records what the cap dropped"
+        ),
+    )
+    p_audit.add_argument(
+        "--section-chars",
+        type=int,
+        default=dya.SECTION_CHARS,
+        metavar="N",
+        help=(
+            "send at most N characters of one note section to the critic (default 6000, the "
+            "pipeline's cost bound). A regression audit that must see the whole note passes "
+            "a value above its longest section; the artefact records what was cut"
+        ),
+    )
+    p_audit.add_argument(
+        "--no-llm",
+        action="store_true",
+        help=(
+            "run tier 1 only: the deterministic rules, with no critic. Useful for a "
+            "reproducible check of the note's structure, dimensions and numbers"
+        ),
+    )
     p_audit.set_defaults(fn=_audit)
 
     # `mscs-termlink`'s three subcommands, kept as one group: the ported tool keeps its own

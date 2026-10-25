@@ -99,6 +99,22 @@ class Finding:
         }
 
 
+#: Every tier-1 rule id this stage can emit, the two abstentions included. One literal, used
+#: by `provenance()` and the findings ledger (#93), so the two cannot disagree about what a
+#: zero means. The stage tests harvest the `report.add` call sites against this list (#266).
+TIER1_RULES = (
+    "term/drift",
+    "dimension/mismatch",
+    "dimension/undeclared",
+    "number/unsourced",
+    "math/empty",
+    # The two abstentions, which are results too: a check that did not run says so
+    # (`:311` when the note declares no domains, `:389` when there is no transcript)
+    # instead of leaving the absence to be read as clean.
+    "audit/dimensions-skipped",
+    "audit/numbers-skipped",
+)
+
 #: The tier-2 finding ids, declared (#305). Tier 1's ids travel through `report.add`, whose
 #: call sites the stage tests harvest against `tier1.rules` (#266); these three do not go
 #: through it -- `parse_critic_findings` builds `critic/finding` itself because it carries
@@ -671,12 +687,16 @@ TRANSCRIPT_HEADING = "## СТЕНОГРАММА ЛЕКЦИИ"
 NOTE_HEADING = "## КОНСПЕКТ — "
 
 
-def _section_request(index: int, part: str, transcript_text: str) -> _Section | None:
+def _section_request(
+    index: int, part: str, transcript_text: str, section_chars: int = SECTION_CHARS
+) -> _Section | None:
     """The request for one `## ` section, or None when it has no body to audit.
 
     Shared by the sequential loop and the concurrent one so a section cannot be sent one thing
     in one mode and another in the other: the transcript-first order (#123) and the
-    `SECTION_CHARS` cut are decided here, once.
+    `section_chars` cut are decided here, once. The cut is a parameter rather than the module
+    constant so a standalone regression audit can send a long section whole; the pipeline keeps
+    the cost bound, and both record what was sent.
     """
     heading, _, body = part.partition("\n")
     if not body.strip() or body.strip() == "в лекции не затрагивается":
@@ -692,7 +712,7 @@ def _section_request(index: int, part: str, transcript_text: str) -> _Section | 
                 # provider prefix-cache is built for; section-first made every request's
                 # prefix unique, so none of them could share anything.
                 f"{TRANSCRIPT_HEADING}\n\n{transcript_text.strip()}"
-                f"\n\n{NOTE_HEADING}{heading.strip()}\n\n{section_text[:SECTION_CHARS]}"
+                f"\n\n{NOTE_HEADING}{heading.strip()}\n\n{section_text[:section_chars]}"
             ),
         },
     ]
@@ -701,7 +721,7 @@ def _section_request(index: int, part: str, transcript_text: str) -> _Section | 
         heading=heading.strip(),
         text=section_text,
         messages=messages,
-        over_limit=len(section_text) > SECTION_CHARS,
+        over_limit=len(section_text) > section_chars,
     )
 
 
@@ -750,6 +770,7 @@ def tier2_critic(
     llm_log: llm.Transcript,
     limit: int = 6,
     stream=None,
+    section_chars: int = SECTION_CHARS,
 ) -> tuple[list[Finding], list[dict], dict]:
     """A zero-shot critic that is given the transcript it is auditing the note against.
 
@@ -803,7 +824,7 @@ def tier2_critic(
             if findings_so_far >= limit:
                 skipped += 1
                 continue
-            section = _section_request(index, part, transcript_text)
+            section = _section_request(index, part, transcript_text, section_chars)
             if section is None:
                 skipped += 1
                 continue
@@ -833,7 +854,7 @@ def tier2_critic(
             # dispatch is what makes the count an observable fact, and a line written per
             # completion would interleave nondeterministically (#197).
             stages.progress_line(progress, "sections", index, len(sections))
-            section = _section_request(index, part, transcript_text)
+            section = _section_request(index, part, transcript_text, section_chars)
             plans.append(section)
             if section is None:
                 skipped += 1
@@ -889,7 +910,7 @@ def tier2_critic(
         "capped": (skipped > 0 and findings_so_far >= limit) if workers == 1 else cap_dropped > 0,
         "dropped": len(all_dropped),
         "transcript_chars": len(transcript_text.strip()),
-        "section_chars": SECTION_CHARS,
+        "section_chars": section_chars,
         "truncated": truncated,
         "enforced": "quote verbatim in note, citation verbatim in transcript, confidence stated",
     }
@@ -911,6 +932,7 @@ def audit(
     llm_transcript: llm.Transcript | None = None,
     tier2_limit: int = 6,
     stream=None,
+    section_chars: int = SECTION_CHARS,
 ) -> Report:
     from .lint import _outside_code
 
@@ -932,6 +954,7 @@ def audit(
                 llm_transcript or llm.Transcript(),
                 tier2_limit,
                 stream=stream,
+                section_chars=section_chars,
             )
         except llm.NotConfiguredError as exc:
             report.tier2 = f"NOT_CONFIGURED: {exc}"
@@ -960,7 +983,7 @@ def audit(
                 # as reviewed, and the line is where that would be believed (#123).
                 report.tier2 += (
                     f" ({len(report.tier2_truncated)} section(s) truncated at "
-                    f"{SECTION_CHARS} chars)"
+                    f"{section_chars} chars)"
                 )
             report.dropped.extend(dropped)
             report.findings.extend(found)
@@ -978,7 +1001,7 @@ def audit(
     if report.tier2_truncated:
         out.write(
             f"           note: {len(report.tier2_truncated)} section(s) exceeded "
-            f"{SECTION_CHARS} characters and were audited only in part: "
+            f"{section_chars} characters and were audited only in part: "
             f"{', '.join(report.tier2_truncated)}\n"
         )
     if report.tier2 == "NOT_CONFIGURED":
@@ -996,7 +1019,9 @@ def run(
     *,
     glossary_path: Path | None = None,
     config: llm.Config | None = None,
+    tier2_limit: int = 6,
     stream=None,
+    section_chars: int = SECTION_CHARS,
 ) -> Report:
     destination.mkdir(parents=True, exist_ok=True)
     markdown = note.read_text(encoding="utf-8") if note.is_file() else ""
@@ -1008,7 +1033,14 @@ def run(
     )
     trace = llm.Transcript()
     report = audit(
-        markdown, transcript, glossary, config=config, llm_transcript=trace, stream=stream
+        markdown,
+        transcript,
+        glossary,
+        config=config,
+        llm_transcript=trace,
+        tier2_limit=tier2_limit,
+        stream=stream,
+        section_chars=section_chars,
     )
     (destination / REPORT_NAME).write_text(
         json.dumps(report.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
@@ -1065,18 +1097,7 @@ def provenance(report: Report, config: llm.Config | None = None) -> str:
                 # It is NOT `rules_run` below (the four checks that ran, which is what a
                 # summary line prints): one check can reach several of these ids, and
                 # `check_dimensions` alone emits three of the seven.
-                "rules": [
-                    "term/drift",
-                    "dimension/mismatch",
-                    "dimension/undeclared",
-                    "number/unsourced",
-                    "math/empty",
-                    # The two abstentions, which are results too: a check that did not run
-                    # says so (`:311` when the note declares no domains, `:389` when there is
-                    # no transcript) instead of leaving the absence to be read as clean.
-                    "audit/dimensions-skipped",
-                    "audit/numbers-skipped",
-                ],
+                "rules": list(TIER1_RULES),
                 "scope": (
                     "rank agreement in sums over declared shapes. NOT a proof checker: a "
                     "wrong constant, a transposed index and a correct formula for the wrong "

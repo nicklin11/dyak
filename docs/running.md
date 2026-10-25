@@ -279,10 +279,33 @@ reattaches to it.
 ## `dyak audit`
 
 ```
-dyak audit [note]
+dyak audit NOTE --transcript FILE [--glossary FILE] [--output-dir DIR] [--no-llm]
 ```
 
-Run the audit stage against an existing note. Registered, not implemented in this build.
+Run stage 9 against a note that already exists. This is the same `audit.run` the pipeline
+calls, so a standalone audit and an audit inside `process` cannot disagree about what a
+finding is. The note **and its transcript** are required: a tier-2 finding without a
+transcript citation is discarded (ADR-0001 D5), so an audit with no transcript would look
+clean for the wrong reason.
+
+| flag | meaning |
+|---|---|
+| `--transcript FILE` | the plain-text transcript the note was built from. Used by the unsourced-number rule, and by the critic's citation guard. Required |
+| `--glossary FILE` | the ASR term glossary the term-drift rule reads, in the `\| variant \| canonical \| domain \| date \|` format. Without it the rule finds nothing and `audit.json` says why |
+| `--output-dir DIR` | where `audit.json`, `audit-provenance.json` and (when tier 2 ran) `audit-llm-transcript.json` land. Default: `<note-directory>/audit/` |
+| `--tier2-limit N` | keep at most `N` tier-2 findings (default: `6`, the pipeline's cost bound). A regression audit wants the whole set: pass a value above the number of sections. The artefact still records what the cap dropped |
+| `--section-chars N` | send at most `N` characters of one note section to the critic (default: `6000`, the pipeline's cost bound). A regression audit that must see the whole note passes a value above its longest section; the artefact records what was cut |
+| `--no-llm` | run tier 1 only: the four deterministic checks, with no critic. No endpoint is needed, and `tier2` is recorded as `NOT_CONFIGURED` rather than as a clean result |
+
+Exit **5** when any finding is `ERROR`, **0** otherwise. A `WARN` does not fail the audit: the
+note is still worth writing, and the finding is in `audit.json`. Exit **1** when the note,
+the transcript or the glossary path does not exist — a typo is not an empty note.
+
+```
+dyak audit "mscs/Оптимальные СУ/Лекция 1/note.md" \
+    --transcript ~/.local/state/dyak/lecture/transcript.txt \
+    --glossary mscs/_terms/glossary.md
+```
 
 ## `dyak term`
 

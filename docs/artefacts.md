@@ -4,7 +4,7 @@ The bundle lives in `$XDG_STATE_HOME/dyak/<lecture>/` by default (`$DYAK_OUTPUT_
 `--output-dir` name it explicitly). The root is **flat**: `images/` is the only subdirectory.
 
 Produced by run 13, `1_lecture_OCS.mp4` (4520 s): 30 entries in the root, 58 frames under
-`images/`.
+`images/`; runs after #93 add `findings-ledger.json`, so the root count is 31.
 
 ## Root files, by writer
 
@@ -28,13 +28,22 @@ Produced by run 13, `1_lecture_OCS.mp4` (4520 s): 30 entries in the root, 58 fra
 | `report.json` | stage 12 `report` | what stage 12 verified, and what it did not find |
 | `timings.json` | `pipeline` | wall clock per stage and the total; written after stage 12, not a registered artefact |
 | `run-state.json` | `pipeline` | the run's id, `started_at`/`finished_at`, the stage reached, and whether the run **completed**, was **interrupted**, or **failed**; written in a `finally`, so it exists on the runs that did not finish |
+| `findings-ledger.json` | `pipeline` | per-rule finding counts **across runs of this lecture**, including every rule that has produced 0; written after stages 8 and 9, not a registered artefact, and deliberately not cleared between runs (#93) |
 
-`timings.json` and `run-state.json` are the two sidecars written by `pipeline.run` itself
-rather than by a stage. Both are written from the same `finally`, so a run that raised still
-has its per-stage seconds and still says how it ended (#92). Neither is registered through
+`timings.json` and `run-state.json` are sidecars written by `pipeline.run` itself rather than
+by a stage. Both are written from the same `finally`, so a run that raised still has its
+per-stage seconds and still says how it ended (#92). Neither is registered through
 `Bundle.record`, so neither travels to the vault; both are in `bundle.RUN_ARTEFACTS`, so the
 next run clears them. A stale `outcome: completed` left beside a fresh bundle is exactly the
 file a reader would mistake for this run's.
+
+`findings-ledger.json` is the third sidecar, and the exception to that clearing rule: it is
+not in `RUN_ARTEFACTS`, because its whole point is to accumulate. After stage 8 and again
+after stage 9 the pipeline folds that stage's findings into it, and the counters — `runs`,
+and per rule `findings`, `runs_with_findings`, `last_seen` — are what turn a zero in a single
+`lint.json` from "no finding" into "no finding in N recorded runs, for a rule that was
+declared" (#93). It is not exported to the vault, for the same reason `timings.json` is not:
+it is a record of runs, not a product of the note.
 
 `note.synth.md` does not exist: `Bundle.publish` names published files by their source
 basename, and stage 7 publishes `note.md` plus `synth.json`.
