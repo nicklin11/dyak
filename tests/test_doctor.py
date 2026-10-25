@@ -663,13 +663,23 @@ check(
 check("a real version command is still reported", "ffmpeg version 7.1.1-1" in text, text)
 check("ffprobe version reported separately", "ffprobe version 7.1.1-1" in text, text)
 
-# --- 8. unimplemented subcommands point at their issue, not a dead end -------
+# --- 8. a usage error names the form the command needs ----------------------
 out, err = io.StringIO(), io.StringIO()
 with redirect_stdout(out), redirect_stderr(err):
     rc = dyc.main(["audit"])
 check("`audit` -> exit 1", rc == ec.USAGE, f"rc={rc}")
-check("`audit` names its tracking issue", "#11" in err.getvalue(), err.getvalue())
-check("`audit` suggests doctor", "doctor" in err.getvalue(), err.getvalue())
+check(
+    "`audit` names the missing note and transcript, not a tracking issue",
+    "--transcript" in err.getvalue()
+    and "note" in err.getvalue()
+    and "not implemented" not in err.getvalue(),
+    err.getvalue(),
+)
+check(
+    "`audit` is implemented, so it no longer points at #11",
+    "#11" not in err.getvalue(),
+    err.getvalue(),
+)
 
 # `process` IS implemented, but only for stages 0-3. With no path it is still a
 # usage error, and it must print the form rather than a dead end.

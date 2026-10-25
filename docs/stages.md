@@ -32,6 +32,7 @@ its rule set, what it changed, and since #257 the endpoint and the seed.
 | 7, 9 | `synth-`/`audit-llm-transcript.json` | every call: full messages, model, tokens, seconds, attempts, `finish_reason` |
 | 1-12 | `timings.json` | wall clock per stage, and their sum in `total_seconds`. Written after stage 12, not registered as an artefact. Since #115 stages 2-5 run as two branches, their seconds overlap and the sum is larger than the run's wall clock: `total_seconds` is the cost of the stages, and `run-state.json`'s `started_at`/`finished_at` are the time the run took |
 | 1-12 | `run-state.json` | the run id, `started_at`/`finished_at`, the stage reached, and `completed`/`interrupted`/`failed`. Written in a `finally`, so an interrupted run's bundle says so (#92) |
+| 8, 9 | `findings-ledger.json` | per-rule finding counts across runs of this lecture, zeros included; the sidecar that makes "0 findings" mean "0 over N runs" rather than "not checked" (#93) |
 
 `finish_reason` is why the model stopped. `length` means the endpoint's output cap cut it off:
 the section is real but incomplete, and stage 7 marks it degraded instead of letting a

@@ -48,6 +48,7 @@ from dyak import audio as dya  # noqa: E402
 from dyak import cli as dyc  # noqa: E402
 from dyak import deps as dyd  # noqa: E402
 from dyak import exitcodes as ec  # noqa: E402
+from dyak import findings as dyf  # noqa: E402
 from dyak import bundle as dyb  # noqa: E402
 from dyak import frames as dyfr  # noqa: E402
 from dyak import pipeline as dyp  # noqa: E402
@@ -3696,9 +3697,11 @@ _r_registered = {Path(p).name for p in _r.bundle.artefacts.values()} if _r is no
 _r_root_files = (
     {p.name for p in _r.bundle.root.iterdir() if p.is_file()} if _r is not None else set()
 )
-#: The declared exceptions. `TIMINGS_NAME` and `RUN_STATE_NAME` in `pipeline.py` say why
-#: neither is registered; if either decision is reversed, this list changes with it.
-SIDECARS = {dyp.TIMINGS_NAME, dyp.RUN_STATE_NAME}
+#: The declared exceptions. `TIMINGS_NAME`, `RUN_STATE_NAME` and `findings.NAME` say why none
+#: is registered; if any decision is reversed, this list changes with it. The ledger is the
+#: one that must *not* be cleared between runs (#93), so it is deliberately outside
+#: `RUN_ARTEFACTS`.
+SIDECARS = {dyp.TIMINGS_NAME, dyp.RUN_STATE_NAME, dyf.NAME}
 
 check(
     "stage 12's artefacts are registered, so they can be exported",
@@ -6499,6 +6502,49 @@ check(
     "the whole-line rule lost the detection",
 )
 check(
+    # #241: a `####` subsection that declares itself empty, beside a sibling that does not,
+    # is not a claim about the `##` chapter. The rule read the whole chapter as one body, so
+    # a sentinel under `#### 2.3` was attributed to `## 2` and reported as a blocking ERROR.
+    "a subsection's sentinel is not attributed to its chapter",
+    not rules(
+        note(
+            *["содержимое"] * 7
+            + [
+                "### 2.1 Лабораторная\n\nтекст\n\n"
+                f"#### 2.3 Дедлайны\n\n{dysy.NOT_COVERED}\n\n"
+                "#### 2.4 Позиция\n\nещё текст"
+            ]
+        ),
+        "structure/claims-empty-but-is-not",
+    ),
+    str(
+        rules(
+            note(
+                *["содержимое"] * 7
+                + [
+                    "### 2.1 Лабораторная\n\nтекст\n\n"
+                    f"#### 2.3 Дедлайны\n\n{dysy.NOT_COVERED}\n\n"
+                    "#### 2.4 Позиция\n\nещё текст"
+                ]
+            ),
+            "structure/claims-empty-but-is-not",
+        )
+    ),
+)
+check(
+    # ...and the same subsection with prose under the sentinel is still the padding the
+    # rule exists for. The scope narrowed; the detection did not weaken.
+    "a subsection's sentinel beside its own prose is still an error",
+    rules(
+        note(
+            *["содержимое"] * 7
+            + [f"### 2.3 Дедлайны\n\n{dysy.NOT_COVERED}\n\nА на самом деле три абзаца."]
+        ),
+        "structure/claims-empty-but-is-not",
+    ),
+    "the narrowed scope lost the detection",
+)
+check(
     "a filler in prose still fires after the whole-line rewrite",
     rules(note(*["ну, как же без этого"] * 8), "style/filler"),
     "the filler rule stopped detecting prose",
@@ -7867,6 +7913,190 @@ check(
     str(sorted(dyrep.REPAIRABLE)),
 )
 
+# --- 15b. the standalone audit subcommand (#11, #132) --------------------------------
+# Stage 9 already ran inside `process`; this is the entry point that audits a note on disk.
+# It is the other half of #20: a regression check needs to audit a fixed note against a
+# fixed transcript, not a fresh run whose STT output differs (#49).
+aud_dir = tmp / "audit-cli"
+aud_dir.mkdir(parents=True, exist_ok=True)
+aud_note_path = aud_dir / "note.md"
+aud_transcript = aud_dir / "transcript.txt"
+aud_note_path.write_text(
+    "# Тест\n\n## 1. Постановка\n\n" + decl + "\n\n$J = \\mathbf{A} + \\mathbf{x}$\n",
+    encoding="utf-8",
+)
+aud_transcript.write_text("коэффициент 0.5 в переходе\n", encoding="utf-8")
+aud_out = aud_dir / "out"
+
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    aud_rc = dyc.main(
+        [
+            "audit",
+            str(aud_note_path),
+            "--transcript",
+            str(aud_transcript),
+            "--no-llm",
+            "--output-dir",
+            str(aud_out),
+        ]
+    )
+check(
+    "`dyak audit` runs tier 1 and exits 5 on an ERROR", aud_rc == ec.AUDIT_FINDINGS, f"rc={aud_rc}"
+)
+check(
+    "and it writes audit.json and audit-provenance.json",
+    (aud_out / dyau.REPORT_NAME).is_file() and (aud_out / dyau.PROVENANCE_NAME).is_file(),
+    str(sorted(p.name for p in aud_out.iterdir())) if aud_out.is_dir() else "no directory",
+)
+_aud_payload = json.loads((aud_out / dyau.REPORT_NAME).read_text(encoding="utf-8"))
+check(
+    "the standalone artefact says tier 2 did not run, rather than reading clean",
+    _aud_payload["tier2"] == "NOT_CONFIGURED"
+    and any(f["rule"] == "dimension/mismatch" for f in _aud_payload["findings"]),
+    str(_aud_payload.get("tier2")),
+)
+check(
+    "and the provenance names the same stage-9 tool",
+    json.loads((aud_out / dyau.PROVENANCE_NAME).read_text(encoding="utf-8"))["tool"]
+    == "dyak-audit-v1",
+    "tool changed",
+)
+
+# A path that is a typo must not be read as an empty note: `audit.run` treats a missing file
+# as empty, which is right for a pipeline that has already probed its inputs and wrong for a
+# command a user types.
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    aud_missing = dyc.main(
+        [
+            "audit",
+            str(aud_dir / "missing.md"),
+            "--transcript",
+            str(aud_transcript),
+            "--no-llm",
+        ]
+    )
+check(
+    "`dyak audit` refuses a missing note as a usage error, not an empty audit",
+    aud_missing == ec.USAGE and "note not found" in err.getvalue(),
+    f"rc={aud_missing} err={err.getvalue()!r}",
+)
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    aud_no_tr = dyc.main(
+        ["audit", str(aud_note_path), "--transcript", str(aud_dir / "missing.txt"), "--no-llm"]
+    )
+check(
+    "and a missing transcript is refused for the same reason",
+    aud_no_tr == ec.USAGE and "transcript not found" in err.getvalue(),
+    f"rc={aud_no_tr} err={err.getvalue()!r}",
+)
+
+# The default destination is the note's own `audit/` directory, the layout the hand-written
+# baseline already uses. Pinned because `--output-dir` must be an override, not a requirement.
+clean_dir = tmp / "audit-cli-clean"
+clean_dir.mkdir(parents=True, exist_ok=True)
+(clean_dir / "note.md").write_text(clean_note, encoding="utf-8")
+(clean_dir / "transcript.txt").write_text("содержимое\n", encoding="utf-8")
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    aud_clean_rc = dyc.main(
+        [
+            "audit",
+            str(clean_dir / "note.md"),
+            "--transcript",
+            str(clean_dir / "transcript.txt"),
+            "--no-llm",
+        ]
+    )
+check(
+    "a clean note exits 0 and the default destination is <note>/audit/",
+    aud_clean_rc == ec.OK and (clean_dir / "audit" / dyau.REPORT_NAME).is_file(),
+    f"rc={aud_clean_rc} err={err.getvalue()!r}",
+)
+
+
+# --- 15c. the findings ledger (#93) -------------------------------------------------
+# A zero in one run's lint.json is indistinguishable from a rule that never ran. The ledger
+# keeps the count across runs, and every declared rule is present from the first write, so a
+# zero is a recorded zero rather than an absence.
+check(
+    "the ledger declares every rule stage 8 and 9 can emit",
+    set(dyf.RULES) == set(dyln.RULES) | set(dyau.TIER1_RULES) | set(dyau.TIER2_RULES),
+    f"ledger-only={sorted(set(dyf.RULES) - (set(dyln.RULES) | set(dyau.TIER1_RULES) | set(dyau.TIER2_RULES)))}",
+)
+ledger_path = tmp / "ledger" / dyf.NAME
+first = dyf.record(
+    ledger_path,
+    "run-1",
+    [dyln.Finding("style/filler", dyln.WARN, 1, "once")],
+)
+check(
+    "the first run is counted once, and the finding lands on its rule",
+    first["runs"] == 1
+    and first["rules"]["style/filler"]["findings"] == 1
+    and first["rules"]["style/filler"]["runs_with_findings"] == 1,
+    str(first["rules"]["style/filler"]),
+)
+second = dyf.record(
+    ledger_path,
+    "run-1",
+    [
+        dyln.Finding("style/filler", dyln.WARN, 2, "again"),
+        dyau.Finding("tier1", "dimension/mismatch", "ERROR", 3, "a bad sum"),
+    ],
+)
+check(
+    "a second stage call in the same run does not increment `runs`",
+    second["runs"] == 1,
+    str(second["runs"]),
+)
+check(
+    "and both stages' findings accumulate under their own rules",
+    second["rules"]["style/filler"]["findings"] == 2
+    and second["rules"]["dimension/mismatch"]["findings"] == 1,
+    str(second["rules"]),
+)
+third = dyf.record(ledger_path, "run-2", [])
+check(
+    "a run with no findings still increments `runs`",
+    third["runs"] == 2,
+    str(third["runs"]),
+)
+check(
+    "a rule that has never fired is present with an explicit zero",
+    third["rules"]["structure/missing-section"]
+    == {
+        "stage": 8,
+        "findings": 0,
+        "runs_with_findings": 0,
+        "last_seen": "",
+    },
+    str(third["rules"]["structure/missing-section"]),
+)
+check(
+    "the ledger round-trips through disk, with an undeclared rule preserved",
+    dyf.snapshot(ledger_path)["rules"]["style/filler"]["findings"] == 2,
+    str(dyf.snapshot(ledger_path)["rules"].get("style/filler")),
+)
+# A ledger from a newer/older version may carry a rule this build no longer declares. It is
+# kept rather than pruned: the file's job is to remember what ran.
+_unknown = json.loads(ledger_path.read_text(encoding="utf-8"))
+_unknown["rules"]["future/rule"] = {
+    "stage": 9,
+    "findings": 3,
+    "runs_with_findings": 1,
+    "last_seen": "run-2",
+}
+ledger_path.write_text(json.dumps(_unknown), encoding="utf-8")
+check(
+    "an undeclared rule in an older ledger is not pruned",
+    dyf.snapshot(ledger_path)["rules"]["future/rule"]["findings"] == 3,
+    str(dyf.snapshot(ledger_path)["rules"].get("future/rule")),
+)
+
+
 # --- 16. acceptance criteria #11 and #18 that had no test ---------------------------
 
 rdest = tmp / "repair-out"
@@ -8588,7 +8818,7 @@ def _cr_lint_run(note, images, ldir, *, stream=None):
     ldir.mkdir(parents=True, exist_ok=True)
     for name in (dyln.REPORT_NAME, dyln.PROVENANCE_NAME):
         (ldir / name).write_text("{}", encoding="utf-8")
-    return _Stub(summary=lambda: "0 findings")
+    return _Stub(summary=lambda: "0 findings", findings=[])
 
 
 def _cr_audit_run(note, txt, adir, *, glossary_path=None, config=None, stream=None):
@@ -8596,7 +8826,7 @@ def _cr_audit_run(note, txt, adir, *, glossary_path=None, config=None, stream=No
     adir.mkdir(parents=True, exist_ok=True)
     for name in dyau.ALL_ARTEFACTS:
         (adir / name).write_text("{}", encoding="utf-8")
-    return _Stub(summary=lambda: "0 findings")
+    return _Stub(summary=lambda: "0 findings", findings=[])
 
 
 def _cr_repair_run(

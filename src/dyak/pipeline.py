@@ -44,6 +44,7 @@ from . import (
     caption,
     deps,
     exitcodes as ec,
+    findings,
     frames,
     lint,
     link,
@@ -895,6 +896,10 @@ def _stages(
         artefacts[extra] = bundle.publish(extra, ldir / extra)
     reports.append(StageReport(8, "lint", time.monotonic() - began, lreport.summary()))
     out.write(reports[-1].line() + "\n")
+    # #93: fold this run's lint findings into the bundle's cross-run ledger. A sidecar, not a
+    # registered artefact -- `clear_root` leaves it alone, so the next run of this lecture
+    # sees what the earlier ones found.
+    findings.record(bundle.root / findings.NAME, run_id, lreport.findings)
 
     # --- stage 9: audit --------------------------------------------------------
     # Tier 1 is deterministic and carries the load. Tier 2 is a zero-shot critic that sees
@@ -916,6 +921,7 @@ def _stages(
             artefacts[f"audit/{extra}"] = published
     reports.append(StageReport(9, "audit", time.monotonic() - began, areport.summary()))
     out.write(reports[-1].line() + "\n")
+    findings.record(bundle.root / findings.NAME, run_id, areport.findings)
 
     # --- stage 10: repair -----------------------------------------------------
     began = time.monotonic()

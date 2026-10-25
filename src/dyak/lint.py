@@ -50,6 +50,24 @@ PROVENANCE_NAME = "lint-provenance.json"
 ERROR = "ERROR"
 WARN = "WARN"
 
+#: Every rule id stage 8 can emit. Declared once here and used by `provenance()` and the
+#: findings ledger (#93), so a rule cannot be in one and absent from the other.
+RULES = (
+    "structure/missing-section",
+    "structure/unknown-section",
+    "structure/renamed-section",
+    "structure/order",
+    "structure/duplicate-heading",
+    "structure/claims-empty-but-is-not",
+    "math/inline-unbalanced",
+    "math/display-unbalanced",
+    "math/brace-unbalanced",
+    "link/inside-math",
+    "asset/missing",
+    "text/mojibake",
+    "style/filler",
+)
+
 #: Words that carry no meaning in a technical note but survive verbatim from the lecture.
 #: Matched as whole words, case-insensitively, on word boundaries -- `ну` inside `нулевой`
 #: or `как` inside `какой` must not trigger.
@@ -359,6 +377,30 @@ def check_filler(markdown: str, report: Report) -> None:
         )
 
 
+def _heading_scopes(markdown: str) -> list[tuple[int, str, list[str]]]:
+    """`(line_number, heading, direct_body_lines)` for every heading, at every level.
+
+    The direct body runs to the next heading of **any** level. That is the unit a "not
+    covered" sentence is about (#241): a `#### 2.3` that says the section is not covered
+    says nothing about `#### 2.4` beside it, and a sentinel deep inside a chapter is not a
+    claim made by the chapter's own heading. Reading the whole `##` chapter as one body
+    attributed every subsection's sentinel to its ancestors.
+    """
+    lines = _outside_code(markdown)
+    headings: list[tuple[int, str]] = []
+    for position, (_, line) in enumerate(lines):
+        match = re.match(r"^(#{1,6})\s+(.*\S)\s*$", line)
+        if match:
+            headings.append((position, match.group(2)))
+    scopes: list[tuple[int, str, list[str]]] = []
+    for index, (position, heading) in enumerate(headings):
+        end = headings[index + 1][0] if index + 1 < len(headings) else len(lines)
+        scopes.append(
+            (lines[position][0], heading, [line for _, line in lines[position + 1 : end]])
+        )
+    return scopes
+
+
 def check_empty_section_claims(markdown: str, report: Report) -> None:
     """A section that says "not covered" and then writes paragraphs is lying.
 
@@ -379,26 +421,30 @@ def check_empty_section_claims(markdown: str, report: Report) -> None:
     severity, so the pipeline refused to finish a run whose note was correct. The section
     says one narrow thing is out of scope; it does not declare itself empty.
 
+    The scope is the heading's own direct body, not the whole `##` chapter (#241). A note
+    that declares `#### 2.3 Дедлайны` not covered while `#### 2.4` beside it has prose is
+    correct, and reading the `##` chapter as one unit reported it as a blocking ERROR. A
+    `##` heading's sentinel applies to the text directly under it; its subsections are
+    checked on their own, so one subsection's sentinel is never attributed to its parent.
+
     Both readings still work after the change: a template section carrying the bare sentinel
-    *and* content is a real bug and is still reported; a bare sentinel alone is not.
+    *and* content in the same heading scope is a real bug and is still reported; a bare
+    sentinel alone is not.
     """
     report.checked += 1
-    parts = re.split(r"^## ", markdown, flags=re.M)[1:]
-    for part in parts:
-        heading, _, body = part.partition("\n")
-        lines = body.splitlines()
-        if not any(line.strip() == synth.NOT_COVERED for line in lines):
+    for line_number, heading, body in _heading_scopes(markdown):
+        if not any(line.strip() == synth.NOT_COVERED for line in body):
             continue
         extra = [
             line
-            for line in lines
+            for line in body
             if line.strip() and line.strip() != synth.NOT_COVERED and not line.startswith("#")
         ]
         if extra:
             report.add(
                 "structure/claims-empty-but-is-not",
                 ERROR,
-                0,
+                line_number,
                 f"«{heading.strip()}» declares itself not covered and then has "
                 f"{len(extra)} more line(s)",
             )
@@ -492,21 +538,7 @@ def provenance(report: Report) -> str:
             # `structure/unknown-section` sits next to `structure/missing-section` because the
             # same branch emits both: a section heading that is absent, and one that is present
             # and is not one of the eight the synthesizer skill defines.
-            "rules": [
-                "structure/missing-section",
-                "structure/unknown-section",
-                "structure/renamed-section",
-                "structure/order",
-                "structure/duplicate-heading",
-                "structure/claims-empty-but-is-not",
-                "math/inline-unbalanced",
-                "math/display-unbalanced",
-                "math/brace-unbalanced",
-                "link/inside-math",
-                "asset/missing",
-                "text/mojibake",
-                "style/filler",
-            ],
+            "rules": list(RULES),
             "blocking": ERROR,
             "errors": len(report.errors),
             "warnings": len(report.warnings),
