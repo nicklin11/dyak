@@ -38,9 +38,9 @@ of 57 captioned is a success. Read the counts on the `[6/12] caption` line, or c
 `caption_trace` entries whose `source` is `error`:
 
 ```
-[6/12] caption  1 frames aligned, 2 words, 0 without transcript coverage
-         no frame was captioned -- see caption-provenance.json
-         status='ERROR' source='error' detail='... [Errno 111] Connection refused'
++ 135.9s   [6/12] caption  1 frames aligned, 2 words, 0 without transcript coverage [opencode-zen/deepseek-v4.1-flash]
++ 135.9s            no frame was captioned -- see caption-provenance.json
++ 135.9s            status='ERROR' source='error' detail='... [Errno 111] Connection refused'
 ```
 
 ## STT anomalies — recorded, never gated (the #93 decision)
