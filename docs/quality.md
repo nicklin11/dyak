@@ -90,6 +90,36 @@ dyak: stage 6 captioned nothing: stage 5 passed 0 frames, so no image reached th
 The absolute floor is a build constant in this version, so a recording that scores below it
 cannot be captioned; making it a settings key is a separate decision about what the gate means.
 
+### When frames pass the gate and no caption comes back
+
+The other shape of the same loss, and the one #347 measured: five frames pass, stage 6 sends
+five requests, and the vision model answers each with an empty completion. Nothing is captioned,
+but every frame still carries the words spoken while it was on screen — stage 6 attaches the
+transcript window before it decides whether to caption, and stage 7 slices on every frame
+boundary, gated or not. So the note is written from the whole transcript rather than the
+surviving fifth of it, and it says which halves it has:
+
+- the provenance line reads `Собрано из стенограммы: кадры были, но ни один не получил описания
+  (стадия 6, см. captions.json). Содержимое экрана в конспект не попало.` — no frame-derived
+  content is claimed, and the writer is told the screen is unknown rather than given filenames
+  to invent "Доска/слайды" from.
+- the slice markers in the writer's payload say `, без описания` when a slice's frames produced
+  no caption, so a truncation report cannot be read as "these frames were described".
+- `synth.json` is `degraded: true` with a `notes` entry naming the stage and the count, and
+  stage 7's summary line says `N описано` next to the frame count.
+- the exit code is **3**: the frames were sent and the endpoint failed, which is a dependency
+  failure rather than a content verdict. The message adds the outcome the code cannot carry:
+
+```
+dyak: stage 6 captioned 0 of 5 frames via <model> (5 failed); see /path/to/bundle
+dyak:   f_0000245840.png: EMPTY -- vision model returned nothing; empty completions are not retried
+dyak:   remediation: check that the model serves vision requests; ...
+dyak:   the note was written from the transcript alone; it carries no screen content
+```
+
+A run with *some* captions keeps exit 0 and the frame-derived provenance line; the table above
+is the place to look for the partial case.
+
 ## Stage 8 — the lint gate
 
 Nine mechanical checks against the note before the audit runs. The nine counts checks *that ran*,

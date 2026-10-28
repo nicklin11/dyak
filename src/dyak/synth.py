@@ -368,19 +368,21 @@ def build_sections(alignments: list[dict], limit: int = 12) -> list[Section]:
     limit is a section nobody can read. Slicing on frame boundaries means each chunk is a
     stretch of lecture during which one thing was on screen.
 
-    Empty frames are collapsed into the preceding slice rather than becoming their own
-    section, so a gap in frame detection does not become a heading with no content.
+    Every detected frame is a boundary, including the ones stage 5 gated out. A gated frame
+    anchors no caption, but it did hold the screen for its window, and the words spoken
+    during that window belong to the slice that contains it. Filtering `GATED_OUT` out here
+    is how 7 of this recording's 12 frames deleted 246 s of a 421 s transcript while
+    `coverage` read 1.0 (#347).
     """
-    usable = [a for a in alignments if a.get("caption_status") != "GATED_OUT"]
-    if not usable:
+    if not alignments:
         return []
-    per = max(1, (len(usable) + limit - 1) // limit)
+    per = max(1, (len(alignments) + limit - 1) // limit)
 
     out: list[Section] = []
     cursor = 0
     number = 1
-    while cursor < len(usable):
-        chunk = usable[cursor : cursor + per]
+    while cursor < len(alignments):
+        chunk = alignments[cursor : cursor + per]
         text = " ".join((c.get("text") or "").strip() for c in chunk).strip()
         frames = tuple(c["frame"] for c in chunk)
         described: list[tuple[str, str]] = []
@@ -472,11 +474,17 @@ def _lecture_block(section: Section) -> str:
     The marker is what lets a truncated payload say *which* slice it lost, and it hands the
     writer the frame boundary the slice was cut on -- a frame boundary is where one thing
     stopped being on screen, which is the one thing a time slice is good for.
+
+    `без описания` is the other half: a slice whose frames produced no caption (stage 5 gated
+    them out, or stage 6 returned nothing) names the boundary but says no description exists,
+    because a bare filename in front of a writer is what "Доска/слайды" was invented from on
+    the #347 run.
     """
     if section.frames:
+        described = "" if section.captions else ", без описания"
         head = (
             f"[Фрагмент {section.number}: кадры {section.frames[0]}–{section.frames[-1]}, "
-            f"{section.start_ms / 1000:.0f}–{section.end_ms / 1000:.0f} с]"
+            f"{section.start_ms / 1000:.0f}–{section.end_ms / 1000:.0f} с{described}]"
         )
     else:
         head = f"[Фрагмент {section.number}: без кадров, только стенограмма]"
@@ -560,7 +568,8 @@ class TemplateSynthesizer:
         # that the prose is missing. A reader can tell this is not a finished note.
         window = (
             f"{section.start_ms / 1000:.0f}–{section.end_ms / 1000:.0f} с, "
-            f"{len(section.frames)} кадров, {section.word_count} слов"
+            f"{len(section.frames)} кадров, {len(section.captions)} описано, "
+            f"{section.word_count} слов"
             if section.frames
             else f"без кадров (только стенограмма), {section.word_count} слов"
         )
@@ -608,8 +617,20 @@ class LLMSynthesizer:
                 "только из стенограммы.\n\n"
                 f"{described}\n\n"
             )
+        elif section.frames:
+            # #347: a filename is not a description. This branch used to print
+            # `Кадры на экране: f_0000245840.png, ...`, and the writer invented
+            # "Доска/слайды (кадры f_...) с последовательной выкладкой" from exactly that --
+            # the same failure #84 fixed, reached from the other side. Say what is true: the
+            # frames exist, nothing described them, and the screen is unknown.
+            on_screen = (
+                "Кадры на экране: ни один кадр не был описан (стадия 6 не вернула ни одного "
+                "описания). Содержимое экрана — доска, слайды, записи — не наблюдалось; "
+                "не утверждай, что там было, и не ссылайся на номера кадров как на "
+                "содержание.\n\n"
+            )
         else:
-            on_screen = f"Кадры на экране: {', '.join(section.frames) or 'нет'}.\n\n"
+            on_screen = "Кадров нет: конспект собран только из стенограммы.\n\n"
         messages = [
             {"role": "system", "content": SYSTEM},
             {
@@ -645,6 +666,7 @@ def assemble(
     sections: list[Section],
     *,
     transcript_only: bool = False,
+    no_captions: bool = False,
 ) -> str:
     """Interleave the eight required sections with whatever the synthesizer produced.
 
@@ -652,10 +674,11 @@ def assemble(
     heading would renumber the note, and stage 8's structural lint would then be checking a
     document that changed shape to satisfy it.
 
-    `transcript_only` states the run's input in the provenance line. The default line claims
-    "выравненных кадров и стенограммы", and a fallback run has no aligned frame: saying so is
-    the difference between a note that is missing the screen and one that pretends it is not
-    (#345).
+    `transcript_only` and `no_captions` state the run's input in the provenance line. The
+    default line claims "выравненных кадров и стенограммы"; a fallback run has no aligned
+    frame, and a run whose captions all came back empty has frames but no description of any
+    of them. Saying so is the difference between a note that is missing the screen and one
+    that pretends it is not (#345, #347).
     """
     # The provenance footer goes directly under the title, not at the end. Appended last it
     # would land inside the final section's body -- and stage 8's
@@ -667,6 +690,11 @@ def assemble(
             parts.append(
                 "> Собрано только из стенограммы: ни один кадр не прошёл контроль качества "
                 "(см. `quality.json`). Содержимое экрана в конспект не попало."
+            )
+        elif no_captions:
+            parts.append(
+                "> Собрано из стенограммы: кадры были, но ни один не получил описания "
+                "(стадия 6, см. `captions.json`). Содержимое экрана в конспект не попало."
             )
         else:
             parts.append(
@@ -847,16 +875,32 @@ def synthesise(
 ) -> Note:
     out = stream if stream is not None else sys.stdout
     slices = build_sections(alignments)
-    # No frame survived stage 5 (or the source has none): the transcript is the only input
-    # there is. Without this a gate failure erased the lecture -- `gather([])` returned
-    # `Lecture(text="")` and all eight sections were written as "no source material" without
-    # a single model call, while 1 308 transcribed words sat in the bundle (#345).
-    transcript_only = not slices and bool(transcript_text.strip())
+    lecture = gather(slices, budget=budget)
+    # A run with no frame stage 6 was handed is #345's case, whatever the gated alignments'
+    # text now carries (#347): there is no caption verdict to report, and the stage-5 warning
+    # is the true one. `lecture.text` is the second half -- a bundle whose alignments carry no
+    # text has no words to send either. Without this a gate failure erased the lecture:
+    # `gather([])` returned `Lecture(text="")` and all eight sections were written as "no
+    # source material" without a single model call, while 1 308 transcribed words sat in the
+    # bundle (#345).
+    considered = sum(1 for a in alignments if a.get("caption_status") != "GATED_OUT")
+    transcript_only = (not lecture.text.strip() or not considered) and bool(transcript_text.strip())
     if transcript_only:
         slices = [transcript_section(transcript_text)]
-    # Every section request carries the whole lecture (#117). The slices are not indexed per
-    # section: they exist to keep a frame boundary visible inside the payload, not to bound it.
-    lecture = gather(slices, budget=budget)
+        # Every section request carries the whole lecture (#117). The slices are not indexed
+        # per section: they exist to keep a frame boundary visible inside the payload, not to
+        # bound it.
+        lecture = gather(slices, budget=budget)
+    # Frames that reached stage 7 but produced no caption: the note has no screen content,
+    # and it has to say so. On the #347 run every one of the five captions came back empty,
+    # the note claimed "Собрано из выравненных кадров", `synth.json` said
+    # `"degraded": false`, and the writer invented a slide format from the filenames.
+    no_captions = (
+        bool(slices)
+        and not transcript_only
+        and considered > 0
+        and not any(s.captions for s in slices)
+    )
     note_title = title or f"Конспект — {Path(source).name}"
     bodies: dict[int, str] = {}
     reported: list[dict] = []
@@ -866,6 +910,11 @@ def synthesise(
         warnings.append(
             (f"stage 5 rejected all {gated} frames" if gated else "the source produced no frames")
             + "; the note was written from the transcript alone and carries no screen content"
+        )
+    elif no_captions:
+        warnings.append(
+            f"stage 6 returned no description for any of the {considered} frames it was given"
+            "; the note was written from the transcript alone and carries no screen content"
         )
     breaker = llm.Breaker()
     stopped = False
@@ -988,7 +1037,13 @@ def synthesise(
         warnings.extend(extra)
         reported.append(entry)
 
-    markdown = assemble(note_title, bodies, slices, transcript_only=transcript_only)
+    markdown = assemble(
+        note_title,
+        bodies,
+        slices,
+        transcript_only=transcript_only,
+        no_captions=no_captions,
+    )
     missing = [n for n, _, _ in SECTIONS if not bodies.get(n, "").strip()]
     name = getattr(synthesizer, "name", "unknown")
     # Falling back to the template is itself a degradation, independent of whether the

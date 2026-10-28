@@ -18,6 +18,7 @@ The one real end-to-end run lives outside this file, in the acceptance notes.
 
 import ast
 import base64
+import dataclasses
 import hashlib
 import io
 import json
@@ -1599,6 +1600,53 @@ check(
     "#345: and it names stage 5, the stage that rejected the frames",
     "stage 5 passed 0 frames" in err.getvalue()
     and "written from the transcript alone" in err.getvalue(),
+    err.getvalue()[-400:],
+)
+
+
+# #347: the mirror case. Frames passed the gate and were sent, and the vision model answered
+# with five empty completions. That *is* an endpoint failure (exit 3), but the run is not a
+# loss: stage 7 wrote the note from the transcript. The old message stopped at the failure
+# and left the reader to discover the note by opening the bundle.
+def empty_captions_pipeline(source, work, **kw):
+    result = fake_pipeline(source, work, **kw)
+    result.caption = dycap.Report(
+        alignments=[
+            dycap.Alignment(
+                frame=f"f_0000{i}0000.png",
+                pts_ms=i * 35000,
+                image=f"f_0000{i}0000.png",
+                enhanced=None,
+                on_screen_ms=(i * 35000, (i + 1) * 35000),
+                segment_indices=[i],
+                word_count=1,
+                text="слово",
+                quality_gate="PASS",
+                caption_status="EMPTY",
+            )
+            for i in range(5)
+        ]
+    )
+    result.caption_outcome = dycap.CaptionOutcome(
+        captioned=0, reused=0, failed=5, model="test-model", served_model=None
+    )
+    return result
+
+
+dyp.run = empty_captions_pipeline
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    rc_empty = dyc.main(["process", str(src)])
+dyp.run = fake_pipeline
+check(
+    "#347: empty captions on frames that were sent are still a dependency failure",
+    rc_empty == ec.DEPENDENCY_FAILED,
+    f"rc={rc_empty} want={ec.DEPENDENCY_FAILED}\n{err.getvalue()[-400:]}",
+)
+check(
+    "#347: and the message says the note exists and was written from the transcript",
+    "the note was written from the transcript alone; it carries no screen content"
+    in err.getvalue(),
     err.getvalue()[-400:],
 )
 
@@ -4648,10 +4696,11 @@ check(
     abs(by_name["f_0000100000.png"].first_word_ms - 100.5) < 1e-6,
     str(by_name["f_0000100000.png"].first_word_ms),
 )
-# The third frame is GATED_OUT, so it is never aligned and carries no boundary. Asserting
-# "all three" would have been asserting the absence of the gate.
+# `considered` is the captioning/A-V-sync set, so the third frame -- GATED_OUT -- is not in
+# it. Its words, however, are a different question (#347): the gate decides what gets a
+# caption, not which stretch of transcript belongs to the lecture.
 check(
-    "every aligned frame gets a word boundary, not only the first",
+    "every considered frame gets a word boundary, not only the first",
     [a.first_word_ms for a in capp.considered] == [0.0, 100.5],
     str([(a.frame, a.first_word_ms, a.caption_status) for a in capp.alignments]),
 )
@@ -4666,6 +4715,22 @@ check(
     by_name["f_0000200000.png"].quality_gate == "FAIL"
     and by_name["f_0000200000.png"].crop_state == "full_frame_fallback",
     str(by_name["f_0000200000.png"]),
+)
+# #347: the gated frame's window is [200, 300) s and segment 2 ("gamma", one timed word)
+# overlaps it. Before the fix this alignment was appended with text="" and word_count=0,
+# and `build_sections` dropped it, which is how 246 s of a 421 s lecture disappeared while
+# `coverage` read 1.0. Stage 6's half of the contract: the words are attached even though
+# the frame is not captioned.
+_gated = by_name["f_0000200000.png"]
+check(
+    "#347: a gated frame still carries the words spoken while it was on screen",
+    _gated.text == "gamma" and _gated.word_count == 1 and _gated.segment_indices == [2],
+    f"text={_gated.text!r} words={_gated.word_count} segments={_gated.segment_indices}",
+)
+check(
+    "#347: and it is still excluded from the captioned/coverage set",
+    all(a.frame != "f_0000200000.png" for a in capp.considered),
+    str([a.frame for a in capp.considered]),
 )
 
 # Captioning is absent, and says so. A null caption and a missing caption field must not
@@ -5474,10 +5539,14 @@ check(
     and cuts[1].end_ms == 240000,
     str(cuts[1]),
 )
+_gated_slice = dysy.build_sections([{"frame": "a", "caption_status": "GATED_OUT", "text": "x"}])
 check(
-    "gated-out frames are not cut into sections",
-    dysy.build_sections([{"frame": "a", "caption_status": "GATED_OUT", "text": "x"}]) == [],
-    "a gated frame produced a section",
+    # #347: a gated frame is still a boundary, and its window's words still belong to the
+    # lecture. Filtering it out here deleted 246 s of a 421 s transcript while `coverage`
+    # reported 1.0. It anchors no caption -- `captions` stays empty -- but it keeps its text.
+    "a gated-out frame keeps its words even though it anchors no caption",
+    [s.text for s in _gated_slice] == ["x"] and _gated_slice[0].captions == (),
+    str(_gated_slice),
 )
 check("no alignments is no sections", dysy.build_sections([]) == [], "produced sections")
 
@@ -5545,6 +5614,124 @@ check(
     "#345: a source with neither frames nor words makes no model call and fills nothing",
     _silent_recorder.payloads == [] and _silent_note.filled == 0,
     f"calls={len(_silent_recorder.payloads)} filled={_silent_note.filled}",
+)
+# #345 and #347 together. Since #347 a gated frame keeps its window's words, so a run whose
+# every frame was gated out now has non-empty slices. It is still a run stage 6 was handed
+# nothing in, and the reason must stay stage 5's -- "no description for any of the 0 frames it
+# was given" is a true sentence about the wrong subsystem.
+_gated_words_recorder = _RecordingSynthesizer()
+_gated_words_note = dysy.synthesise(
+    [
+        {
+            "frame": "f_0000000000.png",
+            "caption_status": "GATED_OUT",
+            "quality_gate": "FAIL",
+            "text": "слова первого окна",
+        },
+        {
+            "frame": "f_0000180000.png",
+            "caption_status": "GATED_OUT",
+            "quality_gate": "FAIL",
+            "text": "слова второго окна",
+        },
+    ],
+    "слова первого окна слова второго окна",
+    Path("x.mkv"),
+    _gated_words_recorder,
+    stream=io.StringIO(),
+)
+check(
+    "#345/#347: all frames gated is still a stage-5 verdict, whatever words they kept",
+    "Собрано только из стенограммы" in _gated_words_note.markdown
+    and "stage 5 rejected all 2 frames" in _gated_words_note.notes[0]
+    and "stage 6" not in _gated_words_note.notes[0],
+    str(_gated_words_note.notes[:2]),
+)
+check(
+    "#345/#347: and those words still reach the model",
+    "слова первого окна" in _gated_words_recorder.payloads[0],
+    _gated_words_recorder.payloads[0][:120],
+)
+
+
+# --- #347: gated frames keep their words; no captions is a stated input -----------------
+# The 421 s run behind #347: 7 of 12 frames gated out, 5 captioned to nothing. Stage 6 had
+# attached no words to the gated frames and `build_sections` had filtered them out, so the
+# payload was 2 660 of 5 825 characters -- 246 s of a 421 s lecture -- while coverage read
+# 1.0. The fix has two halves, and each is asserted here: the words survive the gate, and a
+# note with no captions says so.
+_mixed = [
+    {
+        "frame": "f_0.png",
+        "text": "первые слова лекции",
+        "word_count": 3,
+        "caption_status": "GATED_OUT",
+        "on_screen_ms": [0, 35000],
+    },
+    {
+        "frame": "f_1.png",
+        "text": "следующая часть",
+        "word_count": 2,
+        "caption_status": "EMPTY",
+        "on_screen_ms": [35000, 70000],
+    },
+]
+_mixed_slices = dysy.build_sections(_mixed, limit=2)
+_mixed_lecture = dysy.gather(_mixed_slices)
+check(
+    "#347: the words of a gated frame reach the payload",
+    "первые слова лекции" in _mixed_lecture.text and "следующая часть" in _mixed_lecture.text,
+    _mixed_lecture.text[:120],
+)
+check(
+    "#347: and coverage counts every frame's words, not only the captioned ones",
+    _mixed_lecture.words_total == 5 and _mixed_lecture.coverage == 1.0,
+    f"total={_mixed_lecture.words_total} coverage={_mixed_lecture.coverage}",
+)
+check(
+    "#347: the slice marker says when its frames were never described",
+    "без описания" in _mixed_lecture.text,
+    _mixed_lecture.text[:80],
+)
+_nocap_recorder = _RecordingSynthesizer()
+_nocap_note = dysy.synthesise(
+    _mixed,
+    "первые слова лекции следующая часть",
+    Path("x.mkv"),
+    _nocap_recorder,
+    stream=io.StringIO(),
+)
+check(
+    "#347: a run whose captions all came back empty does not claim frame content",
+    "Собрано из стенограммы: кадры были, но ни один не получил описания" in _nocap_note.markdown
+    and "выравненных кадров" not in _nocap_note.markdown,
+    "\n".join(line for line in _nocap_note.markdown.splitlines() if line.startswith(">")),
+)
+check(
+    "#347: and that run is degraded, with the reason in synth.json",
+    _nocap_note.degraded
+    and any("stage 6 returned no description" in warning for warning in _nocap_note.notes),
+    str(_nocap_note.notes[:2]),
+)
+check(
+    "#347: a run with a real caption keeps the frame-derived provenance line",
+    "Собрано из выравненных кадров"
+    in dysy.synthesise(
+        [
+            {
+                "frame": "f_0.png",
+                "text": "слова",
+                "caption_status": "OK",
+                "caption": "формула на доске",
+                "on_screen_ms": [0, 1000],
+            }
+        ],
+        "слова",
+        Path("x.mkv"),
+        _RecordingSynthesizer(),
+        stream=io.StringIO(),
+    ).markdown,
+    "a captioned run lost its provenance line",
 )
 
 
@@ -5784,7 +5971,7 @@ check(
 )
 check(
     "the section report records how many captions it carries",
-    _wsec.as_dict()["captions"] == 2 and len(_wsec.as_dict()["frames"]) == 2,
+    _wsec.as_dict()["captions"] == 2 and len(_wsec.as_dict()["frames"]) == 3,
     str(_wsec.as_dict()),
 )
 
@@ -5836,10 +6023,17 @@ check(
     _wp[:400],
 )
 
-# A section with no captions still names its frames: the fallback the pre-#84 prompt used.
-_nocap = dysy.build_sections([{"frame": "f_z.png", "text": "t", "caption_status": "OK"}], limit=1)[
-    0
-]
+# A section whose frames produced no caption: the pre-#84 prompt named them anyway, and
+# #347 measured what that produces -- the writer invented "Доска/слайды (кадры f_...) с
+# последовательной выкладкой" from the filenames of five frames whose captions all came back
+# empty. The filenames are not content, so the prompt says the screen is unknown instead.
+_nocap = dataclasses.replace(
+    dysy.build_sections([{"frame": "f_z.png", "text": "t", "caption_status": "OK"}], limit=1)[0],
+    # The real writer gets the skill's brief (`_section_target`), not the slice's auto-generated
+    # one -- and that auto brief is the slice's frame range. Keep the fixture honest about which
+    # string the prompt is being checked for.
+    brief="карточка лекции",
+)
 _wprompts.clear()
 dyle.chat = _wire_chat
 try:
@@ -5847,8 +6041,9 @@ try:
 finally:
     dyle.chat = _real_chat
 check(
-    "a section with no captions still reports which frames were on screen",
-    "Кадры на экране: f_z.png" in _wprompts[0][1]["content"],
+    "#347: a section with no captions says the screen is unknown, not which files exist",
+    "ни один кадр не был описан" in _wprompts[0][1]["content"]
+    and "f_z.png" not in _wprompts[0][1]["content"],
     _wprompts[0][1]["content"][:300],
 )
 
