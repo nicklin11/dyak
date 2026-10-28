@@ -852,7 +852,14 @@ def _stages(
         # blur cannot reach the output; the extract pass then seeks the original.
         began = time.monotonic()
         frames_dir = work.dir("frames")
-        manifest, produced = frames.run(Path(source), frames_dir)
+        # `max_gap` is derived from the source's length (#345). A fixed 180 s is the right
+        # guarantee for an hour-long lecture and three frames for a 7-minute recording; the
+        # probe's duration is the only thing that distinguishes the two.
+        manifest, produced = frames.run(
+            Path(source),
+            frames_dir,
+            settings=frames.Settings(max_gap=frames.cadence(info.duration)),
+        )
         reports.append(
             StageReport(4, "frames", time.monotonic() - began, frames.summary(manifest, produced))
         )

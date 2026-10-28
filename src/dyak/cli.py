@@ -322,12 +322,29 @@ def process(
         )
         for line in result.quality.explain().splitlines():
             print(f"dyak: {line.strip()}", file=sys.stderr)
-        print(
-            "dyak:   remediation: lower quality.decay to tighten the gate, or "
-            "re-extract with a higher source bitrate -- interpolation cannot recover "
-            "text that was never encoded",
-            file=sys.stderr,
-        )
+        if result.caption.considered:
+            print(
+                "dyak:   remediation: lower quality.decay to tighten the gate, or "
+                "re-extract with a higher source bitrate -- interpolation cannot recover "
+                "text that was never encoded",
+                file=sys.stderr,
+            )
+        else:
+            # #345: stage 6 never had a frame to send. The gate failing is the verdict; the
+            # vision endpoint is not implicated, and the note that was written came from the
+            # transcript alone. Saying that here is the only place a reader learns it before
+            # opening the bundle.
+            print(
+                "dyak: stage 6 captioned nothing: stage 5 passed 0 frames, so no image "
+                "reached the vision model; the note was written from the transcript alone",
+                file=sys.stderr,
+            )
+            print(
+                "dyak:   remediation: the gate compares every frame against an absolute "
+                "sharpness floor, and light-on-dark writing can score below it. The note is "
+                "usable, but it carries no screen content",
+                file=sys.stderr,
+            )
     audit_errors = [f for f in result.audit.findings if f.severity == "ERROR"]
     if audit_errors:
         # ADR-0001 D5: the note is written and FLAGGED, never withheld. Exit 5 is that flag.
@@ -384,11 +401,17 @@ def process(
     #   0 -- every stage ran, every artefact is on disk, and the note was actually synthesised.
     if audit_errors:
         return ec.AUDIT_FINDINGS
-    if not result.caption_outcome.ok:
+    if not result.caption_outcome.ok and result.caption.considered:
         # The endpoint was configured and reachable enough to try, and nothing came back.
         # That is a dependency failing, not a content verdict, so it is exit 3 -- and it is
         # checked before the quality gate because a dead vision endpoint would otherwise be
         # reported as soft crops, sending the reader to tune the wrong thing.
+        #
+        # The `considered` guard is the other half of #345: `CaptionOutcome.ok` is a zero
+        # test, so a run whose every frame stage 5 gated out also fails it -- and that run
+        # made no request at all. Reporting it as a vision-endpoint failure sent the reader
+        # to the wrong subsystem and exited 3 where the gate's 4 is the true statement. With
+        # the guard it falls through to the quality gate below.
         outcome = result.caption_outcome
         print(
             f"dyak: stage 6 captioned 0 of {len(result.caption.considered)} frames "

@@ -1167,3 +1167,21 @@ the code now. The strings name the variables to set and the endpoint kind, and t
 raw-port-versus-proxy history lives in this record only. The decision is unchanged — there is
 still no built-in endpoint, an unset URL is *not configured* and distinct from *configured and
 unreachable* — and nothing about endpoint resolution moves.
+
+## 2026-10-28 — D3 amended: the gap guarantee scales with the source, and a zero-frame run keeps the transcript (#345)
+
+`max_gap = 180` was a *guarantee* written for an hour-long lecture. On a 421 s recording it
+produced three frames -- 0/180/360 s -- stage 5 rejected all three, and stage 7 wrote an empty
+note. A fixed gap is a fixed *number of frames* only when the duration is fixed, and it was not.
+
+`frames.cadence()` now derives the gap from the probe's duration: `duration / 12`, clamped to
+`[30, 180]`. Lecture 1 (4396 s) is unchanged at 180 s; the 421 s source gets 35 s and 12
+frames. `Settings.max_gap` keeps its 180 s default for a caller that supplies no duration, and
+`detect.json` records the value that ran.
+
+D3's other half is that a frame set nobody can read is not input. Stage 5 gating every frame
+out used to erase the lecture: `build_sections` returned `[]`, `gather([])` returned an empty
+payload, and eight sections were written as "no source material" without a model call, while
+the transcript sat in the bundle. Stage 7 now sends the transcript as one untimed slice
+(`synth.transcript_section`) and the note states that it carries no screen content. The exit
+code is 4 -- the gate's own -- and only a stage 6 that had frames and failed still reports 3.
