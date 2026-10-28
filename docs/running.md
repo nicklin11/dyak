@@ -173,13 +173,26 @@ dyak process [path] [options]
 
 ### What the progress output looks like
 
+The run opens with a **header**, before stage 1: the source, then one line per model role with
+the model id, the endpoint and the layer that supplied each (`file`, `env`, `default` or `flag`
+— #343). A role with nothing configured says `(unset)` and what that costs, so a missing endpoint
+is visible before the first stage instead of at stage 7. `inherited` on the `vlm` line means the
+vision role is using the text role's configuration. Endpoints are redacted (#279): a password or
+key in the URL prints as `***`.
+
+Every line then carries a **leading `+s` column**, the seconds since the run began, written when
+the line is emitted. It is what makes the overlap of the two branches visible: a stage line that
+appears at `+30.0s` and another at `+31.4s` overlapped, whatever order their stage numbers are in.
+A line's own `s` figure remains the time *that stage* took.
+
 One line per stage, printed when the stage finishes, with the seconds it took. Four stages also
 write *continuation* lines while they work: stage 3 announces itself before the transcription
 begins and, on the hosted route, prints an indented `chunks k/N` after each upload returns
 (#193); stages 6, 7 and 9 print an indented `frames k/N` or `sections k/N` before each unit's
 blocking call (#197). The count is the units **examined** so far — a cached, capped or skipped
-unit still advances it, so it can pass a stage's own "reviewed" figure — and it carries no clock,
-because no rate has been measured for the vision or text endpoint. Stages 2-5 are two branches —
+unit still advances it, so it can pass a stage's own "reviewed" figure — and the count still
+carries no rate, because none has been measured for the vision or text endpoint. Stages 2-5 are
+two branches —
 `audio`→`stt` and `frames`→`quality` — joined by stage 6 (#115), so their lines can arrive out
 of stage order and each of them names the branch that wrote it, `(A)` or `(B)`. `DYAK_SERIAL=1`
 puts the two branches back on one thread in stage order, and then there is no tag to print. With
@@ -190,34 +203,43 @@ one behind each of them (#153). This is a real run — 180 s of lecture 1, seven
 stages that print detail trimmed:
 
 ```
-  [1/12] probe       0.0s  video h264 1920x1080, audio aac 48000Hz 2ch, 180.0s
-  [2/12] audio       0.2s  audio.wav 180.0s 16000Hz mono, 5.5 MiB  (A)
-  [3/12] stt     starting  180s of audio through whispercpp at http://127.0.0.1:8080, expect 36s-54s; this backend reports no progress  (A)
-  [3/12] stt         9.1s  52 segments, 611 timed words, speech to 180.0s of 180.0s audio [whispercpp]  (A)
-  [4/12] frames     12.5s  7 frames, 2.7 MiB, median gap 9s  (B)
-  [5/12] quality     3.7s  7/7 frames pass (MEGE 57230-146128, threshold 38303, 7 cropped)  (B)
-           frames 0/7
-  [6/12] caption   119.5s  7 frames aligned, 493 words, 0 without transcript coverage
-           sections 0/8
-  [7/12] synth     327.7s  llm, 66 lines, 7/8 sections filled  DEGRADED
-  [8/12] lint        0.0s  9 checks, clean
-           sections 0/8
-  [9/12] audit     752.1s  4 rules, 0 errors, 7 warnings, 4 discarded, tier 2 ran, 7 findings, 4 discarded, 5/8 sections reviewed (capped at 6 findings)
-  [10/12] repair      0.0s  nothing to repair
-  [11/12] link        0.0s  34 terms, inserted 2 links across 1 files
-  [12/12] report OK: 8 verified, 0 optional absent, frames 7/7
++   0.0s   source     lecture-1.mkv
++   0.0s   llm        opencode-zen/deepseek-v4.1-flash  http://127.0.0.1:8317/v1  (file)
++   0.0s   vlm        opencode-zen/deepseek-v4.1-flash  http://127.0.0.1:8317/v1  (file, inherited)
++   0.0s   [1/12] probe       0.0s  video h264 1920x1080, audio aac 48000Hz 2ch, 180.0s
++   0.2s   [2/12] audio       0.2s  audio.wav 180.0s 16000Hz mono, 5.5 MiB  (A)
++   0.3s   [3/12] stt     starting  180s of audio through whispercpp at http://127.0.0.1:8080, expect 36s-54s; this backend reports no progress  (A)
++   9.3s   [3/12] stt         9.1s  52 segments, 611 timed words, speech to 180.0s of 180.0s audio [whispercpp]  (A)
++  12.7s   [4/12] frames     12.5s  7 frames, 2.7 MiB, median gap 9s  (B)
++  16.4s   [5/12] quality     3.7s  7/7 frames pass (MEGE 57230-146128, threshold 38303, 7 cropped)  (B)
++  16.4s            frames 0/7
++ 135.9s   [6/12] caption   119.5s  7 frames aligned, 493 words, 0 without transcript coverage [opencode-zen/deepseek-v4.1-flash]
++ 135.9s            sections 0/8
++ 463.6s   [7/12] synth     327.7s  llm [opencode-zen/deepseek-v4.1-flash], 66 lines, 7/8 sections filled  DEGRADED
++ 463.6s   [8/12] lint        0.0s  9 checks, clean
++ 463.6s            sections 0/8
++1215.7s   [9/12] audit     752.1s  4 rules, 0 errors, 7 warnings, 4 discarded, tier 2 ran, 7 findings, 4 discarded, 5/8 sections reviewed (capped at 6 findings)
++1215.7s   [10/12] repair      0.0s  nothing to repair
++1215.7s   [11/12] link        0.0s  34 terms, inserted 2 links across 1 files
++1215.7s   [12/12] report OK: 8 verified, 0 optional absent, frames 7/7
 ```
 
-Four things about that shape are worth knowing:
+Five things about that shape are worth knowing:
 
 - **`[3/12] stt starting` is not a duplicate.** It appears before the transcription begins, and
-  has no seconds because nothing has elapsed yet. Every other stage prints exactly one line, but
-  four of them also print indented continuation lines underneath: `chunks k/N` on the hosted STT
-  route, `frames k/N` in stage 6 and `sections k/N` in stages 7 and 9, written before each
-  unit's call. Those are not stage lines either, and only each loop's first line is shown above.
-- **The gap between lines is the stage's real cost.** Stage 9 above took 752 s of a 1225 s run.
-  On a full 75-minute lecture the same run spends most of its wall clock in transcription,
-  frame extraction, synthesis and audit, in that order.
+  has no stage seconds because nothing has been timed yet — only the leading run clock. Every
+  other stage prints exactly one line, but four of them also print indented continuation lines
+  underneath: `chunks k/N` on the hosted STT route, `frames k/N` in stage 6 and `sections k/N`
+  in stages 7 and 9, written before each unit's call. Those are not stage lines either, and only
+  each loop's first line is shown above.
+- **The trailing `[…]` names who did the work.** Stage 3 has always ended with `[whispercpp]`;
+  stages 6 and 7 now do the same with their model, so the two lines that spend the money say
+  which model they spent it on (#343). With no model — a template note, or stage 6 with no frame
+  to align — the bracket is absent rather than empty.
+- **The stage's own `s` is its cost; the leading `+s` is when it finished.** Stage 9 above took
+  752 s of a 1225 s run, and the two figures say different things: `+1215.7s` is the moment, and
+  `752.1s` is the work. On a full 75-minute lecture the same run spends most of its wall clock
+  in transcription, frame extraction, synthesis and audit, in that order.
 - **The `(A)`/`(B)` tag is the branch, not the stage.** `(A)` is `audio`/`stt`, `(B)` is
   `frames`/`quality`; stage 6 is the join and prints untagged, as do stage 1 and stages 7-12.
   The tag is appended to the line the pipeline already wrote, continuation lines included, so a

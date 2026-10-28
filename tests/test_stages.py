@@ -8903,6 +8903,9 @@ def _cr_synth_run(captions, txt, source, sdir, *, config=None, title="", stream=
         markdown="# note\n",
         filled=1,
         degraded=False,
+        # #343: the stage-7 line names the model, so the stub has to answer the field a real
+        # `Note` carries. `None` is what the template synthesizer records.
+        model=None,
     )
 
 
@@ -10484,9 +10487,11 @@ with tempfile.TemporaryDirectory() as _br_td:
     check(
         "#115: the serial arm prints the stage lines in stage order, stage 3's documented start "
         "line included (#97)",
-        re.findall(r"^  \[(\d+)/12\] ", _br_ser.get("text", ""), re.M)
+        # #343 put the elapsed-time column in front of every line; the stage prefix itself is
+        # unchanged, which is what this reads.
+        re.findall(r"^\+\s*[\d.]+s +\[(\d+)/12\] ", _br_ser.get("text", ""), re.M)
         == ["1", "2", "3", "3", "4", "5"],
-        repr(re.findall(r"^  \[(\d+)/12\] ", _br_ser.get("text", ""), re.M)),
+        repr(re.findall(r"^\+\s*[\d.]+s +\[(\d+)/12\] ", _br_ser.get("text", ""), re.M)),
     )
 
     # Arm 3: the control again, with the rendezvous back on. A serial run has one branch in
@@ -10615,27 +10620,41 @@ with tempfile.TemporaryDirectory() as _br_td:
     check(
         "#115: a stage line says which branch wrote it -- audio/stt are (A), frames/quality are "
         "(B)",
-        any(re.match(r"^  \[2/12\] audio\s+\d+\.\ds  .*\(A\)$", line) for line in _br_par_lines)
-        and any(re.match(r"^  \[3/12\] stt\s+.*\(A\)$", line) for line in _br_par_lines)
-        and any(re.match(r"^  \[4/12\] frames\s+.*\(B\)$", line) for line in _br_par_lines)
-        and any(re.match(r"^  \[5/12\] quality\s+.*\(B\)$", line) for line in _br_par_lines),
-        "\n".join(line for line in _br_par_lines if re.match(r"^  \[\d+/12\]", line)),
+        any(
+            re.match(r"^\+\s*[\d.]+s +\[2/12\] audio\s+\d+\.\ds  .*\(A\)$", line)
+            for line in _br_par_lines
+        )
+        and any(re.match(r"^\+\s*[\d.]+s +\[3/12\] stt\s+.*\(A\)$", line) for line in _br_par_lines)
+        and any(
+            re.match(r"^\+\s*[\d.]+s +\[4/12\] frames\s+.*\(B\)$", line) for line in _br_par_lines
+        )
+        and any(
+            re.match(r"^\+\s*[\d.]+s +\[5/12\] quality\s+.*\(B\)$", line) for line in _br_par_lines
+        ),
+        "\n".join(line for line in _br_par_lines if "[2/12]" in line or "[3/12]" in line),
     )
     check(
         "#115: the continuation line, which carries no stage prefix by design (#197), says which "
         "branch it belongs to as well",
-        any(line.strip() == "chunks 0/1  (A)" for line in _br_par_lines),
+        any(line.endswith("chunks 0/1  (A)") for line in _br_par_lines),
         repr([line for line in _br_par_lines if "chunks" in line]),
     )
+    _br_par_nums = re.findall(r"\[([0-9]+)/12\]", _br_par.get("text", ""), re.M)
+    _br_ser_nums = re.findall(r"\[([0-9]+)/12\]", _br_ser.get("text", ""), re.M)
     check(
         "#115: neither arm prints a stage line the other does not -- the two branches add no "
         "second announcement of any stage (stage 3's start line is the documented extra, #97)",
-        sorted(int(n) for n in re.findall(r"^  \[(\d+)/12\] ", _br_par.get("text", ""), re.M))
+        sorted(
+            int(n)
+            for n in re.findall(r"^\+\s*[\d.]+s +\[(\d+)/12\] ", _br_par.get("text", ""), re.M)
+        )
         == [1, 2, 3, 3, 4, 5]
-        and sorted(int(n) for n in re.findall(r"^  \[(\d+)/12\] ", _br_ser.get("text", ""), re.M))
+        and sorted(
+            int(n)
+            for n in re.findall(r"^\+\s*[\d.]+s +\[(\d+)/12\] ", _br_ser.get("text", ""), re.M)
+        )
         == [1, 2, 3, 3, 4, 5],
-        f"parallel={re.findall(r'^  [(]?([0-9]+)/12', _br_par.get('text', ''), re.M)} "
-        f"serial={re.findall(r'^  [(]?([0-9]+)/12', _br_ser.get('text', ''), re.M)}",
+        f"parallel={_br_par_nums} serial={_br_ser_nums}",
     )
 
     # The writer itself: a partial line must not get a tag in the middle of it. `getattr`, not
@@ -10670,6 +10689,151 @@ with tempfile.TemporaryDirectory() as _br_td:
             _br_tagged._out.getvalue().endswith("tail  (A)\n") and _br_tagged._out.flushes == 1,
             f"{_br_tagged._out.getvalue()!r} flushes={_br_tagged._out.flushes}",
         )
+
+
+# --- #343: the log names the model, and every line carries its place in the run -------------
+#
+# The stage lines named a backend (stage 3) and a threshold (stage 5) but never a model: stage
+# 6 read `no frames aligned` and stage 7 `llm`, so two runs against different models were
+# identical on the console while the model sat in `caption-provenance.json`. And no line carried
+# a time at all, so two branches that overlapped read exactly like the pre-#115 serial run.
+#
+# `getattr` rather than attribute access for the three new names: this file has to produce its
+# FAIL lines against unmodified `main`, where they do not exist, instead of raising and taking
+# the rest of the suite with it (the same reason `_TaggedStream` is fetched with `getattr`).
+
+_missing343 = [_n for _n in ("_Stamp", "_header", "_synth_summary") if not hasattr(dyp, _n)]
+if _missing343:
+    check(
+        "#343: the renderers this section reads exist",
+        False,
+        f"pipeline is missing {_missing343}",
+    )
+else:
+
+    def _header_text(env: dict[str, str], settings: str | None = None) -> str:
+        """`pipeline._header` rendered with `env` as the only configuration.
+
+        `DYAK_SETTINGS` is preserved rather than cleared: `_env.isolate()` points it at a file
+        that does not exist, and dropping it would let the developer's own `settings.toml`
+        answer the check.
+        """
+        saved = dict(os.environ)
+        for key in [k for k in os.environ if k.startswith("DYAK_") and k != "DYAK_SETTINGS"]:
+            del os.environ[key]
+        if settings is not None:
+            os.environ["DYAK_SETTINGS"] = settings
+        os.environ.update(env)
+        try:
+            rec = _FlushRecorder()
+            dyp._header(rec, Path("lecture.mp4"))
+            return rec.getvalue()
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+    _stamp_rec = _FlushRecorder()
+    _stamp = dyp._Stamp(_stamp_rec, time.monotonic())
+    _stamp.write("one\ntwo")
+    check(
+        "#343: every completed line starts with its elapsed seconds, and a partial line is held",
+        re.fullmatch(r"\+\s*[\d.]+s one\n", _stamp_rec.getvalue()) is not None,
+        repr(_stamp_rec.getvalue()),
+    )
+    _stamp.flush()
+    check(
+        "#343: flush emits the held line with its own stamp, and forwards the flush",
+        re.fullmatch(r"\+\s*[\d.]+s one\n\+\s*[\d.]+s two\n", _stamp_rec.getvalue()) is not None
+        and _stamp_rec.flushes == 1,
+        f"{_stamp_rec.getvalue()!r} flushes={_stamp_rec.flushes}",
+    )
+
+    _header_none = _header_text({})
+    check(
+        "#343: with nothing configured the header says so before stage 1, with what it costs",
+        "source     lecture.mp4" in _header_none
+        and "llm        (unset) -- stage 7 writes the template note" in _header_none
+        and "vlm        (unset) -- stage 6 captions nothing" in _header_none,
+        _header_none,
+    )
+
+    _header_env = _header_text(
+        {
+            "DYAK_LLM_ENDPOINT": "http://user:pw@h:8317/v1?api_key=secret",
+            "DYAK_LLM_MODEL": "opencode-zen/deepseek-v4.1-flash",
+        }
+    )
+    check(
+        "#343: a configured model is named with its endpoint redacted and the layer that "
+        "supplied it",
+        "opencode-zen/deepseek-v4.1-flash" in _header_env
+        and "http://***@h:8317/v1?api_key=***" in _header_env
+        and "(env, inherited)" in _header_env
+        and "pw" not in _header_env
+        and "secret" not in _header_env,
+        _header_env,
+    )
+
+    with tempfile.TemporaryDirectory() as _h343_td:
+        _h343_settings = Path(_h343_td) / "settings.toml"
+        _h343_settings.write_text('llm_endpoint = "http://h:9000/v1"\n', encoding="utf-8")
+        _header_mixed = _header_text({"DYAK_LLM_MODEL": "m"}, settings=str(_h343_settings))
+    check(
+        "#343: a model from the environment and an endpoint from the file name both layers -- "
+        "the state that shadowed settings.toml on 2026-10-28",
+        "(model env, endpoint file)" in _header_mixed,
+        _header_mixed,
+    )
+
+    check(
+        "#343: stage 6 names the model in stage 3's bracket form, and names nothing when no "
+        "model ran",
+        dycap.Report().summary("opencode-zen/deepseek-v4.1-flash")
+        == "no frames aligned [opencode-zen/deepseek-v4.1-flash]"
+        and dycap.Report().summary() == "no frames aligned",
+        dycap.Report().summary("m"),
+    )
+
+    _note_llm = SimpleNamespace(
+        synthesizer="llm",
+        model="opencode-zen/deepseek-v4.1-flash",
+        markdown="# note\n",
+        filled=1,
+        degraded=True,
+    )
+    _note_template = SimpleNamespace(
+        synthesizer="template", model=None, markdown="# note\n", filled=1, degraded=False
+    )
+    check(
+        "#343: stage 7 names the model that wrote the note, and a template note names none",
+        dyp._synth_summary(_note_llm)
+        == "llm [opencode-zen/deepseek-v4.1-flash], 1 lines, 1/8 sections filled  DEGRADED"
+        and dyp._synth_summary(_note_template) == "template, 1 lines, 1/8 sections filled",
+        dyp._synth_summary(_note_llm),
+    )
+
+    # The end-to-end half: a run of the real `pipeline.run` through the #115 stubs. It stops at
+    # the join, which is past the header and past four stages of counter lines -- enough to say
+    # the column is universal rather than a stage-line decoration.
+    with tempfile.TemporaryDirectory() as _h343_td:
+        _h343_root = Path(_h343_td)
+        (_h343_root / "lecture.mp4").write_bytes(b"x")
+        (_h343_root / "work").mkdir()
+        _h343_run = _br_run(_h343_root, "header", serial=True, meet=None)
+    _h343_text = _h343_run.get("text", "")
+    check(
+        "#343: a run's first line is the header, before stage 1",
+        re.match(r"^\+\s*[\d.]+s\s+source {5}\S*lecture\.mp4\n", _h343_text) is not None,
+        repr(_h343_text[:200]),
+    )
+    _h343_unstamped = [
+        line for line in _h343_text.splitlines() if line and not re.match(r"^\+\s*[\d.]+s ", line)
+    ]
+    check(
+        "#343: every line it writes carries the elapsed column, continuation lines included",
+        _h343_unstamped == [],
+        repr(_h343_unstamped[:5]),
+    )
 
 
 # --- #74, #77, #252: the note's structure, the run's seed, the transcript's missing text ---
@@ -11394,7 +11558,7 @@ def _r253_synth_run(captions, txt, source, sdir, *, config=None, title="", strea
     (sdir / dysy.NOTE_NAME).write_text(_r253_note, encoding="utf-8")
     for name in (dysy.REPORT_NAME, dysy.PROVENANCE_NAME):
         (sdir / name).write_text("{}", encoding="utf-8")
-    return _Stub(synthesizer="template", markdown=_r253_note, filled=8, degraded=False)
+    return _Stub(synthesizer="template", markdown=_r253_note, filled=8, degraded=False, model=None)
 
 
 def _r253_caption_run(manifest, transcript_json, quality_report, images, dest, **kw):
@@ -11405,7 +11569,9 @@ def _r253_caption_run(manifest, transcript_json, quality_report, images, dest, *
         json.dumps({"captions": [], "counts": {}}), encoding="utf-8"
     )
     (dest / dycap.PROVENANCE_NAME).write_text("{}", encoding="utf-8")
-    return _Stub(summary=lambda: "0 captioned, 0 reused, 0 refused"), _Stub()
+    # #343: the stage-6 line names the model, so the report's summary takes it and the outcome
+    # carries it. A real `CaptionOutcome` always has both.
+    return _Stub(summary=lambda model=None: "0 captioned, 0 reused, 0 refused"), _Stub(model=None)
 
 
 def _r253_stub_modules() -> None:

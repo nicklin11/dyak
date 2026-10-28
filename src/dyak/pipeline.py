@@ -59,7 +59,16 @@ from . import (
 )
 from . import llm
 from .bundle import Bundle
-from .settings import BBOX_SOURCE_ENV, SERIAL_ENV, resolve
+from .settings import (
+    BBOX_SOURCE_ENV,
+    LLM_ENDPOINT_ENV,
+    LLM_MODEL_ENV,
+    SERIAL_ENV,
+    VLM_ENDPOINT_ENV,
+    VLM_MODEL_ENV,
+    Resolved,
+    resolve,
+)
 from .workspace import WorkDir
 
 # Re-exported, not defined here. `quality` and `caption` write progress lines that need the
@@ -442,6 +451,43 @@ class _Branch(Generic[_T]):
         return self.value
 
 
+class _Stamp:
+    """Prefix every line with the seconds since the run began (#343).
+
+    A wrapper under both writers rather than a prefix at each call site. Stage lines are
+    formatted in `StageReport.line()`, a branch's lines are tagged by `_TaggedStream`, the
+    continuation counters are written by `stages.progress_line`, and the findings come from six
+    stage modules -- each of them a place a prefix could be forgotten. Intercepting the stream
+    once is the only spot that cannot miss a line, and it also stamps a line when it is
+    *written* rather than when its stage finished, which is what makes an overlap visible.
+
+    A partial line is held until its newline arrives, the same policy `_TaggedStream` uses, so a
+    stamp never lands in the middle of one. Every writer in this tree ends with `\\n`; `flush`
+    covers the day one does not.
+    """
+
+    def __init__(self, out, began: float) -> None:
+        self._out = out
+        self._began = began
+        self._pending = ""
+
+    def _stamp(self) -> str:
+        return f"+{time.monotonic() - self._began:6.1f}s "
+
+    def write(self, text: str) -> None:
+        self._pending += text
+        lines = self._pending.split("\n")
+        self._pending = lines.pop()
+        for line in lines:
+            self._out.write(f"{self._stamp()}{line}\n")
+
+    def flush(self) -> None:
+        if self._pending:
+            self._out.write(f"{self._stamp()}{self._pending}\n")
+            self._pending = ""
+        self._out.flush()
+
+
 class _TaggedStream:
     """One branch's writer: a lock so lines cannot tear, and the branch's tag on each line.
 
@@ -479,6 +525,109 @@ class _TaggedStream:
             self._out.flush()
 
 
+def _role_line(
+    role: str,
+    config: llm.Config | None,
+    *,
+    model: Resolved,
+    endpoint: Resolved,
+    unset: str,
+    inherited: bool = False,
+) -> str:
+    """One header row: the model, the redacted endpoint, and the layer that supplied them.
+
+    The two `Resolved` values are resolved by the caller rather than here, and for a reason
+    beyond style: `settings.resolve()` must be called with a variable's own name at the call
+    site, which is what lets `tests/test_deps.py` map every reader back to a honoured key. A
+    helper that took the name and resolved it would hide the pair behind an argument.
+
+    Model and endpoint can come from different layers -- `llm_model` in the settings file and
+    `DYAK_LLM_ENDPOINT` in the environment is a real state, and it is the state this line exists
+    to make visible. One shared layer prints once; otherwise each field names its own.
+
+    The endpoint goes through `redact_endpoint` (#279), the rule the provenance files already
+    follow: a URL can carry a credential in its userinfo or query, and a header is the one place
+    a reader would copy it from.
+    """
+    if config is None:
+        return f"  {role:<10} (unset) -- {unset}\n"
+    layers = {model.source, endpoint.source}
+    layer = (
+        layers.pop() if len(layers) == 1 else f"model {model.source}, endpoint {endpoint.source}"
+    )
+    if inherited:
+        layer += ", inherited"
+    return f"  {role:<10} {config.model}  {llm.redact_endpoint(config.endpoint)}  ({layer})\n"
+
+
+def _header(out, source: Path) -> None:
+    """The run's identity, before stage 1: the source and both model roles (#343).
+
+    Without it two runs whose models differ are byte-identical on the console. That was not
+    hypothetical: on 2026-10-28 a stale `DYAK_LLM_MODEL`/`DYAK_VLM_MODEL` in the niri session
+    shadowed `settings.toml` for a whole run, `dyak settings` said `source=env`, and the run log
+    said nothing -- so the empty note was debugged from provenance files after the fact.
+
+    `resolve()` already carries the layer, so this names it rather than re-deriving precedence.
+    A role that is not configured says so here, with what that costs, instead of being
+    discovered at stage 6 or 7.
+    """
+    out.write(f"  {'source':<10} {source}\n")
+    try:
+        text = llm.Config.from_env()
+    except llm.NotConfiguredError:
+        text = None
+    out.write(
+        _role_line(
+            "llm",
+            text,
+            model=resolve(LLM_MODEL_ENV),
+            endpoint=resolve(LLM_ENDPOINT_ENV),
+            unset="stage 7 writes the template note",
+        )
+    )
+    try:
+        vision = llm.Config.vision_from_env()
+    except llm.NotConfiguredError:
+        vision = None
+    # `vision_from_env` returns the text config when both vision names are unset, so report the
+    # layer of the names that actually supplied it, and say that it was inherited. The two
+    # branches are written out because each `resolve()` call site has to name its own variable.
+    inherited = vision is not None and vision.is_vision_default
+    if inherited:
+        model = resolve(LLM_MODEL_ENV)
+        endpoint = resolve(LLM_ENDPOINT_ENV)
+    else:
+        model = resolve(VLM_MODEL_ENV)
+        endpoint = resolve(VLM_ENDPOINT_ENV)
+    out.write(
+        _role_line(
+            "vlm",
+            vision,
+            model=model,
+            endpoint=endpoint,
+            unset="stage 6 captions nothing",
+            inherited=inherited,
+        )
+    )
+
+
+def _synth_summary(note) -> str:
+    """Stage 7's one line: which synthesizer, and the model when one wrote the note (#343).
+
+    `note.synthesizer` alone is a role -- `llm` -- so two runs against different models printed
+    the same line, and the model existed only in `synth-provenance.json`. The bracket is stage
+    3's `[whispercpp]` convention: it names whoever did the work.
+    """
+    return (
+        f"{note.synthesizer}"
+        + (f" [{note.model}]" if note.model else "")
+        + f", {note.markdown.count(chr(10))} lines, "
+        f"{note.filled}/{len(synth.SECTIONS)} sections filled"
+        + ("  DEGRADED" if note.degraded else "")
+    )
+
+
 def run(
     source: Path,
     work: WorkDir,
@@ -507,7 +656,7 @@ def run(
     nothing saying the run had not finished -- indistinguishable, to a reader, from a
     complete run whose verification artefacts happened to be missing.
     """
-    out = stream if stream is not None else sys.stdout
+    out = _Stamp(stream if stream is not None else sys.stdout, time.monotonic())
     bundle = bundle if bundle is not None else Bundle.open(source, overwrite=False)
     reports: list[StageReport] = []
     started_at = datetime.now(UTC).isoformat(timespec="seconds")
@@ -572,6 +721,9 @@ def _stages(
     vault_path: str | Path | None = None,
 ) -> RunResult:
     """The stages. `run` owns the run state; this owns the work."""
+    # First line of the run, before anything is written or cleared: what this run is running on
+    # (#343). The source and the model roles cannot be recovered from the stage lines.
+    _header(out, Path(source))
     # Before anything is written. `Bundle.open` only removes the root when `overwrite=True`,
     # so without this a run merges into the previous run's bundle: measured mid-run on
     # lecture 1, 12 files from the last run sat beside the 17 this one had written, two of
@@ -849,7 +1001,9 @@ def _stages(
     )
     for extra in (caption.REPORT_NAME, caption.PROVENANCE_NAME):
         artefacts[extra] = bundle.publish(extra, capdir / extra)
-    reports.append(StageReport(6, "caption", time.monotonic() - began, creport.summary()))
+    reports.append(
+        StageReport(6, "caption", time.monotonic() - began, creport.summary(coutcome.model))
+    )
     out.write(reports[-1].line() + "\n")
 
     # --- stage 7: synth ------------------------------------------------------
@@ -879,9 +1033,7 @@ def _stages(
             7,
             "synth",
             time.monotonic() - began,
-            f"{note.synthesizer}, {note.markdown.count(chr(10))} lines, "
-            f"{note.filled}/{len(synth.SECTIONS)} sections filled"
-            + ("  DEGRADED" if note.degraded else ""),
+            _synth_summary(note),
         )
     )
     out.write(reports[-1].line() + "\n")

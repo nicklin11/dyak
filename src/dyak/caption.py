@@ -216,15 +216,22 @@ class Report:
             return 1.0
         return sum(1 for a in considered if not a.covered) / len(considered)
 
-    def summary(self) -> str:
+    def summary(self, model: str | None = None) -> str:
+        """One line, and the model that produced it when there is one (#343).
+
+        `model` is passed rather than stored because the report is the alignment half, which
+        runs before the captioner and knows nothing about an endpoint. The bracket at the end
+        is stage 3's `[whispercpp]` convention: it names whoever did the work.
+        """
+        tag = f" [{model}]" if model else ""
         if not self.considered:
-            return "no frames aligned"
+            return f"no frames aligned{tag}"
         words = sum(a.word_count for a in self.considered)
         gated = len(self.alignments) - len(self.considered)
         tail = f", {gated} gated out by stage 5" if gated else ""
         return (
             f"{len(self.considered)} frames aligned, {words} words, "
-            f"{len(self.uncovered)} without transcript coverage{tail}"
+            f"{len(self.uncovered)} without transcript coverage{tail}{tag}"
         )
 
     def explain(self) -> str:
