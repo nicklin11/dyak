@@ -1185,3 +1185,44 @@ payload, and eight sections were written as "no source material" without a model
 the transcript sat in the bundle. Stage 7 now sends the transcript as one untimed slice
 (`synth.transcript_section`) and the note states that it carries no screen content. The exit
 code is 4 -- the gate's own -- and only a stage 6 that had frames and failed still reports 3.
+
+## 2026-10-28 — D3 amended again: a frame is a boundary, not the only carrier of its words (#347)
+
+The #345 amendment above made a zero-frame run keep the transcript. The next run of the same
+421 s source showed that the rule was still being applied to the wrong unit. Twelve frames,
+five passed the gate: stage 6 attached `text` only to the five it would caption, so the seven
+`GATED_OUT` alignments carried `text=""`, and stage 7's `build_sections` filtered them out.
+The writer's payload was 2 660 of the transcript's 5 825 characters -- the lecture from 246 s
+on, with the first 246 s missing -- and `coverage` read **1.0**, because `words_total` is
+summed over the slices that survived rather than over the transcript.
+
+**The gate decides what gets a caption. It does not decide which stretch of transcript belongs
+to the lecture.** A frame held the screen for its window whether or not stage 5 liked the
+pixels, and the words spoken during that window are the lecture. `caption.align` now computes
+`segment_indices`, `word_count` and `text` for every frame before the gate branch; `GATED_OUT`
+is a caption status, not an erasure. `synth.build_sections` slices on every alignment, so a
+gated frame is a boundary and keeps its words while contributing no caption.
+
+The same run's five *passing* frames all came back `EMPTY`. `CaptionOutcome.ok` was false, but
+stage 7 had no notion of "frames present, none described": `_lecture_block` printed the frame
+range with no description, `assemble` wrote `Собрано из выравненных кадров и стенограммы`, and
+`synth.json` recorded `degraded: false`. The writer filled the gap from the filenames and
+produced `Доска/слайды (кадры f_0000245840–f_0000386320) с последовательной выкладкой` -- the
+#84 failure reached from the other side.
+
+The note now has three input states, and the provenance line names which one it is:
+
+| state | provenance line | `degraded` |
+|---|---|---|
+| frames described | `Собрано из выравненных кадров и стенограммы` | per the existing rules |
+| frames present, none described | `Собрано из стенограммы: кадры были, но ни один не получил описания` | yes, with a stage-6 note |
+| no frames at all (#345) | `Собрано только из стенограммы` | yes |
+
+A slice whose frames produced no caption is marked `, без описания` in the writer's payload,
+and a section with frames but no captions is told the screen was never observed rather than
+given the filenames. The exit code is unchanged: 3 when frames were sent and the endpoint
+failed, 4 when the gate is what said no, 0 when some captions came back.
+
+What this amendment does **not** change: the absolute `quality.Settings.floor` (#342 remains
+open, and it is what binds this source at `0.43 × 19592.9 = 8 424.9`), the exit-code ladder, or
+the cadence rule from the #345 amendment.

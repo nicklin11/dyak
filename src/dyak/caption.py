@@ -508,14 +508,12 @@ def align(
             crop_state=gate.get("crop_state", ""),
         )
 
-        # Only frames the gate passed carry forward. A frame stage 5 rejected has no
-        # business anchoring a section of the note.
-        if alignment.quality_gate and alignment.quality_gate != "PASS":
-            alignment.reason = f"stage 5 {alignment.quality_gate}"
-            alignment.caption_status = "GATED_OUT"
-            report.alignments.append(alignment)
-            continue
-
+        # The words come first, and they do not depend on the gate. A frame that stage 5
+        # rejected still held the screen for its window, and the transcript for that window
+        # belongs to the lecture: `build_sections` slices stage 7's payload on these windows,
+        # so a GATED_OUT alignment that carried no text deleted the words spoken while it was
+        # up. On the 421 s recording that was 246 s of a 421 s lecture, sent as coverage 1.0
+        # (#347).
         hits = overlapping(segments, pts_ms, max(on_screen_end, pts_ms + 1))
         alignment.segment_indices = [s.index for s in hits]
         alignment.word_count = sum(len((s.text or "").split()) for s in hits)  # reporting only
@@ -536,6 +534,15 @@ def align(
         )
         if not alignment.covered:
             alignment.reason = UNCOVERED
+
+        # Only frames the gate passed are captioned. A frame stage 5 rejected has no business
+        # anchoring a section of the note -- but it does not take its window's words with it.
+        if alignment.quality_gate and alignment.quality_gate != "PASS":
+            alignment.reason = f"stage 5 {alignment.quality_gate}"
+            alignment.caption_status = "GATED_OUT"
+            report.alignments.append(alignment)
+            continue
+
         report.alignments.append(alignment)
 
     return report

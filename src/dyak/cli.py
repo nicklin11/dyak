@@ -430,6 +430,13 @@ def process(
             "DYAK_LLM_* pair when unset",
             file=sys.stderr,
         )
+        # #347: the note exists and was written from the transcript. Saying so is the whole
+        # difference between "the run failed" and "the screen could not be read, the lecture
+        # survived" -- and it is what a reader reopening the bundle a week later needs.
+        print(
+            "dyak:   the note was written from the transcript alone; it carries no screen content",
+            file=sys.stderr,
+        )
         return ec.DEPENDENCY_FAILED
     if not result.quality.ok:
         return ec.QUALITY_GATE_FAILED
