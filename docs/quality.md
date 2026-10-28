@@ -62,6 +62,34 @@ visible in the artefact and in the log, and the exit code does not depend on it.
 37320. On run 13, 58 detected frames: 57/58 pass. A frame that fails the gate is
 `GATED_OUT` from `manifest.tsv` and never leaves the machine.
 
+### When no frame passes the gate
+
+A source whose writing scores below the absolute floor can fail every frame -- light-on-dark
+handwriting measures well below a floor calibrated on dark-on-white slides. That used to be the
+end of the note: stage 7 built its payload from the frames stage 5 passed, so zero frames meant
+an empty payload and eight headings reading "no source material", with no model call at all.
+Stage 6 had captioned nothing because it had been handed nothing, and the run reported that as a
+vision-endpoint failure and exited 3.
+
+Since #345 that run degrades instead of collapsing:
+
+- stage 7 sends the transcript as one slice (`synth.transcript_section`) and every section is
+  written from it. The note's provenance line says `Собрано только из стенограммы`, and
+  `synth.json` records that no screen content is in it.
+- the exit code is **4**, the gate's code, because the frames were measured and rejected. The
+  vision-endpoint message is printed only when stage 6 had frames and the endpoint failed.
+- the message names the stage that said no:
+
+```
+dyak: quality gate failed for 3/3 frames; see /path/to/bundle
+dyak:   f_0000360000.png: MEGE 18242 < 20000, cropped, unknown (SOFT)
+dyak: stage 6 captioned nothing: stage 5 passed 0 frames, so no image reached the vision
+       model; the note was written from the transcript alone
+```
+
+The absolute floor is a build constant in this version, so a recording that scores below it
+cannot be captioned; making it a settings key is a separate decision about what the gate means.
+
 ## Stage 8 — the lint gate
 
 Nine mechanical checks against the note before the audit runs. The nine counts checks *that ran*,

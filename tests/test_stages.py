@@ -1535,6 +1535,74 @@ check(
 )
 
 
+# #345: the other zero-frame run, and the one a user actually hit. Three frames, all gated
+# out, so stage 6 was handed nothing -- but `CaptionOutcome.ok` is a zero test, and the ladder
+# read it before the quality gate. The run then printed "check that the model serves vision
+# requests" (no request was made) and exited 3 where the gate's 4 is the true statement.
+def gated_everything_pipeline(source, work, **kw):
+    result = fake_pipeline(source, work, **kw)
+    result.caption = dycap.Report(
+        alignments=[
+            dycap.Alignment(
+                frame=f"f_0000{i}0000.png",
+                pts_ms=i * 180000,
+                image=f"f_0000{i}0000.png",
+                enhanced=None,
+                on_screen_ms=(i * 180000, (i + 1) * 180000),
+                quality_gate="FAIL",
+                caption_status="GATED_OUT",
+                reason="stage 5 FAIL",
+            )
+            for i in range(3)
+        ]
+    )
+    result.caption_outcome = dycap.CaptionOutcome(
+        captioned=0, reused=0, failed=0, model="test-model", served_model=None
+    )
+    result.quality = dyq.Report(
+        frames=[
+            dyq.FrameQuality(
+                name="f_0000360000.png",
+                source=Path("f_0000360000.png"),
+                passed=False,
+                mege=18242.0,
+                threshold=20000.0,
+                crop_state="cropped",
+                content_type="unknown",
+                bbox_source="geometric",
+                edges=960000,
+                luma_mean=25.0,
+                luma_std=60.0,
+            )
+        ],
+        threshold=20000.0,
+    )
+    return result
+
+
+dyp.run = gated_everything_pipeline
+out, err = io.StringIO(), io.StringIO()
+with redirect_stdout(out), redirect_stderr(err):
+    rc_gated = dyc.main(["process", str(src)])
+dyp.run = fake_pipeline
+check(
+    "#345: a run whose every frame the gate rejected exits 4, not a vision-endpoint 3",
+    rc_gated == ec.QUALITY_GATE_FAILED,
+    f"rc={rc_gated} want={ec.QUALITY_GATE_FAILED}\n{err.getvalue()[-400:]}",
+)
+check(
+    "#345: and it does not blame an endpoint that was never called",
+    "check that the model serves vision requests" not in err.getvalue(),
+    err.getvalue()[-400:],
+)
+check(
+    "#345: and it names stage 5, the stage that rejected the frames",
+    "stage 5 passed 0 frames" in err.getvalue()
+    and "written from the transcript alone" in err.getvalue(),
+    err.getvalue()[-400:],
+)
+
+
 # The two controls the new gate must not mask, measured through the same real ladder rather
 # than assumed from the code: the quality gate still returns 4, and a run that is *both*
 # desynced and below the coverage threshold still returns 8. The second one is what the late
@@ -2034,6 +2102,39 @@ check(
     "gte(t-prev_selected_t" not in dyfr.detect_filter(dyfr.Settings(max_gap=0))
     and "gt(scene" in dyfr.detect_filter(dyfr.Settings(max_gap=0)),
     dyfr.detect_filter(dyfr.Settings(max_gap=0)),
+)
+
+# --- #345: the cadence follows the source's length ------------------------------------
+# A fixed 180 s guarantee is measured on an hour-long lecture. On the 421 s recording that
+# exposed #345 it produced three frames (0/180/360 s), stage 5 rejected all three, and stage 7
+# wrote an empty note. Twelve windows keep the long lecture unchanged and raise the count for
+# a short one.
+check(
+    "#345: a 7-minute source gets a cadence proportional to its length",
+    35.0 <= dyfr.cadence(421.0) <= 36.0,
+    repr(dyfr.cadence(421.0)),
+)
+check(
+    "#345: and a 7-minute source is sampled far more densely than the old 180 s gave it",
+    421.0 / dyfr.cadence(421.0) >= 11.0,
+    f"{421.0 / dyfr.cadence(421.0):.1f} frames over the same source",
+)
+check(
+    "#345: an hour-long lecture keeps the 180 s it was measured at",
+    dyfr.cadence(4396.0) == dyfr.CADENCE_CEILING == 180.0,
+    repr(dyfr.cadence(4396.0)),
+)
+check(
+    "#345: a very short source does not get a frame every half second",
+    dyfr.cadence(60.0) == dyfr.CADENCE_FLOOR == 30.0,
+    repr(dyfr.cadence(60.0)),
+)
+check(
+    "#345: an unmeasured duration falls back to the ceiling, not the floor",
+    dyfr.cadence(None) == dyfr.CADENCE_CEILING
+    and dyfr.cadence(0.0) == dyfr.CADENCE_CEILING
+    and dyfr.cadence(-1.0) == dyfr.CADENCE_CEILING,
+    f"{dyfr.cadence(None)} {dyfr.cadence(0.0)} {dyfr.cadence(-1.0)}",
 )
 _ff_argv: list = []
 _real_run_ffmpeg = dyfr._run_ffmpeg
@@ -3204,7 +3305,8 @@ seen: dict = {}
 dyp.run = real_run
 
 
-def fake_frames_run(source, frames_dir):
+def fake_frames_run(source, frames_dir, *, settings=None):
+    seen["frame_settings"] = settings
     frames_dir.mkdir(parents=True, exist_ok=True)
     made = []
     for i in range(2):
@@ -3405,6 +3507,15 @@ check(
     f"missing at stage 5: {seen.get('missing')}",
 )
 check("stage 5 was actually invoked", len(seen.get("paths", [])) == 2, str(seen.get("paths")))
+check(
+    # #345: 180 s of guarantee on a 1 s source is three frames on a 421 s lecture, and the
+    # cadence has to come from the probe's duration rather than from the default.
+    "#345: stage 4's cadence is derived from the probe's duration",
+    seen.get("frame_settings") is not None
+    and seen["frame_settings"].max_gap == dyfr.cadence(1.0)
+    and seen["frame_settings"].max_gap != dyfr.Settings().max_gap,
+    f"settings={seen.get('frame_settings')}",
+)
 check(
     "the frames still reach the bundle afterwards",
     len(list((tmp / "order_bundle" / "images").glob("*.png"))) == 2,
@@ -5369,6 +5480,72 @@ check(
     "a gated frame produced a section",
 )
 check("no alignments is no sections", dysy.build_sections([]) == [], "produced sections")
+
+
+# --- #345: a run with no passing frame keeps the transcript --------------------------
+# The 421 s recording that exposed this: stage 5 gated out all three frames, `build_sections`
+# returned `[]`, `gather([])` returned an empty payload, and stage 7 wrote eight "no source
+# material" headings without a single model call while 1 308 transcribed words sat in the
+# bundle. The transcript is the source when no frame survived.
+class _RecordingSynthesizer:
+    """Records what each section request was given, and answers without a model."""
+
+    name = "test"
+
+    def __init__(self) -> None:
+        self.payloads: list[str] = []
+
+    def section(self, section, transcript):
+        self.payloads.append(transcript)
+        return dysy.SectionBody(text=f"тело {section.number}")
+
+
+_gated_only = [
+    {"frame": "f_0000000000.png", "caption_status": "GATED_OUT", "quality_gate": "FAIL"},
+    {"frame": "f_0000180000.png", "caption_status": "GATED_OUT", "quality_gate": "FAIL"},
+]
+_recorder = _RecordingSynthesizer()
+_fallback_note = dysy.synthesise(
+    _gated_only,
+    "дробь это часть целого. " * 10,
+    Path("x.mkv"),
+    _recorder,
+    stream=io.StringIO(),
+)
+check(
+    "#345: no passing frame still sends every section a payload",
+    len(_recorder.payloads) == 8 and _fallback_note.filled == 8,
+    f"calls={len(_recorder.payloads)} filled={_fallback_note.filled}",
+)
+check(
+    "#345: and the transcript is what reached the model",
+    "дробь это часть целого" in _recorder.payloads[0],
+    _recorder.payloads[0][:80],
+)
+check(
+    "#345: the payload says there are no frames instead of claiming `0-0 с`",
+    _recorder.payloads[0].splitlines()[0] == "[Фрагмент 1: без кадров, только стенограмма]",
+    _recorder.payloads[0].splitlines()[0],
+)
+check(
+    "#345: and the note declares itself transcript-only, not frame-derived",
+    "Собрано только из стенограммы" in _fallback_note.markdown
+    and "выравненных кадров" not in _fallback_note.markdown,
+    "\n".join(line for line in _fallback_note.markdown.splitlines() if line.startswith(">")),
+)
+check(
+    "#345: the note records why, and the run is marked degraded",
+    _fallback_note.degraded
+    and any("transcript alone" in warning for warning in _fallback_note.notes),
+    str(_fallback_note.notes[:2]),
+)
+_silent_recorder = _RecordingSynthesizer()
+_silent_note = dysy.synthesise([], "", Path("x.mkv"), _silent_recorder, stream=io.StringIO())
+check(
+    "#345: a source with neither frames nor words makes no model call and fills nothing",
+    _silent_recorder.payloads == [] and _silent_note.filled == 0,
+    f"calls={len(_silent_recorder.payloads)} filled={_silent_note.filled}",
+)
 
 
 # --- #110: empty HTTP 200 remains diagnosable and policy is recorded -------------
@@ -8560,7 +8737,7 @@ class _Stub:
 
 
 def _cap_stub_modules():
-    _info = _Stub(summary=lambda: "x")
+    _info = _Stub(summary=lambda: "x", duration=1.0)
     dyp.probe = _Stub(
         probe=lambda p: _info,
         require_supported=lambda i: None,
@@ -8594,7 +8771,7 @@ def _cap_stub_modules():
         WARMUP_SECONDS=dysttc.WARMUP_SECONDS,
     )
 
-    def _cap_frames_run(src, fd):
+    def _cap_frames_run(src, fd, *, settings=None):
         fd.mkdir(parents=True, exist_ok=True)
         manifest = fd / "manifest.json"
         manifest.write_text("{}", encoding="utf-8")
@@ -8604,6 +8781,8 @@ def _cap_stub_modules():
         run=_cap_frames_run,
         summary=lambda m, p: "0 frames",
         ffmpeg_version=lambda: "stub",
+        Settings=dyfr.Settings,
+        cadence=dyfr.cadence,
     )
     dyp.quality = _Stub(
         Settings=lambda: _Stub(),
@@ -8677,7 +8856,7 @@ def _vc_chat(messages, config, **kw):
 
 
 def _vc_stub_modules():
-    _info = _Stub(summary=lambda: "x")
+    _info = _Stub(summary=lambda: "x", duration=1.0)
     dyp.probe = _Stub(
         probe=lambda p: _info,
         require_supported=lambda i: None,
@@ -8714,7 +8893,7 @@ def _vc_stub_modules():
         WARMUP_SECONDS=dysttc.WARMUP_SECONDS,
     )
 
-    def _vc_frames_run(src, fd):
+    def _vc_frames_run(src, fd, *, settings=None):
         fd.mkdir(parents=True, exist_ok=True)
         produced = []
         for name in ("f_0000000000.png", "f_0000100000.png", "f_0000200000.png"):
@@ -8736,6 +8915,8 @@ def _vc_stub_modules():
         run=_vc_frames_run,
         summary=lambda m, p: "3 frames",
         ffmpeg_version=lambda: "stub",
+        Settings=dyfr.Settings,
+        cadence=dyfr.cadence,
     )
 
     def _vc_quality_run(produced, workpath, **kw):
@@ -10261,7 +10442,7 @@ def _br_stub_modules(
         if meet is not None:
             meet.wait()
 
-    _probe_info = _Stub(summary=lambda: "video h264")
+    _probe_info = _Stub(summary=lambda: "video h264", duration=1.0)
     dyp.probe = _Stub(
         probe=lambda p: _probe_info,
         require_supported=lambda i: None,
@@ -10322,7 +10503,7 @@ def _br_stub_modules(
         WARMUP_SECONDS=dysttc.WARMUP_SECONDS,
     )
 
-    def _frames_run(src, frames_dir):
+    def _frames_run(src, frames_dir, *, settings=None):
         seen["order"].append("frames")
         note("frames:enter")
         frames_dir.mkdir(parents=True, exist_ok=True)
@@ -10337,6 +10518,8 @@ def _br_stub_modules(
         run=_frames_run,
         summary=lambda m, p: f"{len(p)} frames",
         ffmpeg_version=lambda: "stub",
+        Settings=dyfr.Settings,
+        cadence=dyfr.cadence,
     )
 
     def _quality_run(produced, dest, *, settings=None, bbox_source=None, stream=None):
@@ -11576,7 +11759,7 @@ def _r253_caption_run(manifest, transcript_json, quality_report, images, dest, *
 
 def _r253_stub_modules() -> None:
     """Stages 1-6 stubbed; 7 writes the fixture note; 8-12 are the real modules."""
-    _info = _Stub(summary=lambda: "video h264")
+    _info = _Stub(summary=lambda: "video h264", duration=1.0)
     dyp.probe = _Stub(
         probe=lambda p: _info,
         require_supported=lambda i: None,
@@ -11616,7 +11799,7 @@ def _r253_stub_modules() -> None:
         WARMUP_SECONDS=dysttc.WARMUP_SECONDS,
     )
 
-    def _r253_frames_run(src, frames_dir):
+    def _r253_frames_run(src, frames_dir, *, settings=None):
         frames_dir.mkdir(parents=True, exist_ok=True)
         manifest = frames_dir / dyfr.MANIFEST
         manifest.write_text(dyfr.MANIFEST_HEADER + "\n", encoding="utf-8")
@@ -11628,6 +11811,8 @@ def _r253_stub_modules() -> None:
         run=_r253_frames_run,
         summary=lambda m, p: f"{len(p)} frames",
         ffmpeg_version=lambda: "stub",
+        Settings=dyfr.Settings,
+        cadence=dyfr.cadence,
     )
 
     def _r253_quality_run(produced, dest, *, settings=None, bbox_source=None, stream=None):

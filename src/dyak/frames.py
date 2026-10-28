@@ -64,6 +64,27 @@ class Settings:
     width: int = 1600  # output frame width
 
 
+#: A frame at least every `duration / CADENCE_DIVISOR` seconds, clamped. The fixed 180 s
+#: guarantee above is measured on an hour-long lecture and is wrong for a short clip: on a
+#: 421 s recording it produced three frames, stage 5 rejected all three, and stage 7 had no
+#: input at all (#345). Twelve windows leave lecture 1 (4396 s) at 180 s, unchanged.
+CADENCE_DIVISOR = 12.0
+CADENCE_FLOOR = 30.0
+CADENCE_CEILING = 180.0
+
+
+def cadence(duration: float | None) -> float:
+    """The `max_gap` a source of this length needs, in seconds.
+
+    A source whose length could not be measured gets the ceiling: treating an unknown
+    duration as a long one costs sparser frames, and the alternative -- the floor -- would
+    multiply the frame count of a lecture whose probe failed.
+    """
+    if not duration or duration <= 0:
+        return CADENCE_CEILING
+    return min(CADENCE_CEILING, max(CADENCE_FLOOR, duration / CADENCE_DIVISOR))
+
+
 def detect_filter(settings: Settings) -> str:
     """The detector filter chain. Applied only in `detect()`, never to output frames.
 

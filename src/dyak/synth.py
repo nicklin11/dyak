@@ -434,8 +434,33 @@ class Lecture:
         return self.words_sent / self.words_total
 
 
+def transcript_section(transcript_text: str) -> Section:
+    """The whole transcript as one slice, for a run where no frame survived.
+
+    `build_sections` cuts on frame boundaries, so it has nothing to cut once stage 5 has
+    gated every frame out -- and stage 7 then sent all eight sections an empty payload, so
+    the note was eight headings of "no source material" written without a model call while a
+    perfectly good transcript sat in the bundle (#345). This is the fallback that keeps it.
+
+    No timing is invented here: with no frames there is nothing to derive one from, and
+    `_lecture_block` says "без кадров" rather than printing `0-0 с`.
+    """
+    text = transcript_text.strip()
+    return Section(
+        number=1,
+        title="",
+        brief="",
+        start_ms=0,
+        end_ms=0,
+        text=text,
+        word_count=len(text.split()),
+    )
+
+
 def _slice_label(section: Section) -> str:
     """How a slice is named when it does not reach the model."""
+    if not section.frames:
+        return f"фрагмент {section.number} (без кадров)"
     return (
         f"фрагмент {section.number} ({section.start_ms / 1000:.0f}–{section.end_ms / 1000:.0f} с)"
     )
@@ -448,11 +473,14 @@ def _lecture_block(section: Section) -> str:
     writer the frame boundary the slice was cut on -- a frame boundary is where one thing
     stopped being on screen, which is the one thing a time slice is good for.
     """
-    frames = f"{section.frames[0]}–{section.frames[-1]}" if section.frames else "нет"
-    return (
-        f"[Фрагмент {section.number}: кадры {frames}, "
-        f"{section.start_ms / 1000:.0f}–{section.end_ms / 1000:.0f} с]\n{section.text}"
-    )
+    if section.frames:
+        head = (
+            f"[Фрагмент {section.number}: кадры {section.frames[0]}–{section.frames[-1]}, "
+            f"{section.start_ms / 1000:.0f}–{section.end_ms / 1000:.0f} с]"
+        )
+    else:
+        head = f"[Фрагмент {section.number}: без кадров, только стенограмма]"
+    return f"{head}\n{section.text}"
 
 
 def gather(sections: list[Section], *, budget: int = SECTION_BUDGET) -> Lecture:
@@ -530,11 +558,16 @@ class TemplateSynthesizer:
     def section(self, section: Section, _transcript: str) -> SectionBody:
         # The template does not invent content. It reports what it has, and says plainly
         # that the prose is missing. A reader can tell this is not a finished note.
+        window = (
+            f"{section.start_ms / 1000:.0f}–{section.end_ms / 1000:.0f} с, "
+            f"{len(section.frames)} кадров, {section.word_count} слов"
+            if section.frames
+            else f"без кадров (только стенограмма), {section.word_count} слов"
+        )
         body = (
             f"**Источник:** `{Path(self.source).name}`, {len(self.transcript)} символов "
             f"транскрипта.\n\n"
-            f"**Окно:** {section.start_ms / 1000:.0f}–{section.end_ms / 1000:.0f} с, "
-            f"{len(section.frames)} кадров, {section.word_count} слов.\n\n"
+            f"**Окно:** {window}.\n\n"
             f"**Предобработка не выполнена.** Этот конспект собран без модели "
             f"синтеза: доступный текст стенограммы сохранён в `transcript.txt`, "
             f"структура разделов и тайминги кадров — в `captions.json`.\n\n"
@@ -606,12 +639,23 @@ class LLMSynthesizer:
 # --- note assembly ------------------------------------------------------------------
 
 
-def assemble(note_title: str, bodies: dict[int, str], sections: list[Section]) -> str:
+def assemble(
+    note_title: str,
+    bodies: dict[int, str],
+    sections: list[Section],
+    *,
+    transcript_only: bool = False,
+) -> str:
     """Interleave the eight required sections with whatever the synthesizer produced.
 
     The headings come from `SECTIONS`, never from the model. A model that emits its own
     heading would renumber the note, and stage 8's structural lint would then be checking a
     document that changed shape to satisfy it.
+
+    `transcript_only` states the run's input in the provenance line. The default line claims
+    "выравненных кадров и стенограммы", and a fallback run has no aligned frame: saying so is
+    the difference between a note that is missing the screen and one that pretends it is not
+    (#345).
     """
     # The provenance footer goes directly under the title, not at the end. Appended last it
     # would land inside the final section's body -- and stage 8's
@@ -619,10 +663,16 @@ def assemble(note_title: str, bodies: dict[int, str], sections: list[Section]) -
     # is a false positive caused by where the text sits, not by what it says.
     parts = [f"# {note_title}", ""]
     if sections:
-        parts.append(
-            "> Собрано из выравненных кадров и стенограммы. Тайминги — `captions.json`, "
-            "решения качества — `quality.json`, структура синтеза — `synth.json`."
-        )
+        if transcript_only:
+            parts.append(
+                "> Собрано только из стенограммы: ни один кадр не прошёл контроль качества "
+                "(см. `quality.json`). Содержимое экрана в конспект не попало."
+            )
+        else:
+            parts.append(
+                "> Собрано из выравненных кадров и стенограммы. Тайминги — `captions.json`, "
+                "решения качества — `quality.json`, структура синтеза — `synth.json`."
+            )
         parts.append("")
     for number, title, brief in SECTIONS:
         body = bodies.get(number, "").strip()
@@ -797,6 +847,13 @@ def synthesise(
 ) -> Note:
     out = stream if stream is not None else sys.stdout
     slices = build_sections(alignments)
+    # No frame survived stage 5 (or the source has none): the transcript is the only input
+    # there is. Without this a gate failure erased the lecture -- `gather([])` returned
+    # `Lecture(text="")` and all eight sections were written as "no source material" without
+    # a single model call, while 1 308 transcribed words sat in the bundle (#345).
+    transcript_only = not slices and bool(transcript_text.strip())
+    if transcript_only:
+        slices = [transcript_section(transcript_text)]
     # Every section request carries the whole lecture (#117). The slices are not indexed per
     # section: they exist to keep a frame boundary visible inside the payload, not to bound it.
     lecture = gather(slices, budget=budget)
@@ -804,6 +861,12 @@ def synthesise(
     bodies: dict[int, str] = {}
     reported: list[dict] = []
     warnings: list[str] = []
+    if transcript_only:
+        gated = sum(1 for a in alignments if a.get("caption_status") == "GATED_OUT")
+        warnings.append(
+            (f"stage 5 rejected all {gated} frames" if gated else "the source produced no frames")
+            + "; the note was written from the transcript alone and carries no screen content"
+        )
     breaker = llm.Breaker()
     stopped = False
     workers = llm.concurrency()
@@ -925,7 +988,7 @@ def synthesise(
         warnings.extend(extra)
         reported.append(entry)
 
-    markdown = assemble(note_title, bodies, slices)
+    markdown = assemble(note_title, bodies, slices, transcript_only=transcript_only)
     missing = [n for n, _, _ in SECTIONS if not bodies.get(n, "").strip()]
     name = getattr(synthesizer, "name", "unknown")
     # Falling back to the template is itself a degradation, independent of whether the
