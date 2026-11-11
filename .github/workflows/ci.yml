@@ -135,6 +135,12 @@ jobs:
       - name: Local web view suite (#242 M1)
         run: python tests/test_serve.py
 
+      # Fan-out changes only the wall clock (#355, #356): stages 4 and 5 write byte-identical
+      # frames and verdicts at 1 and 4 ffmpeg jobs (real ffmpeg, a lavfi fixture), and hosted
+      # STT splices the same transcript when its chunks come back out of order.
+      - name: Parallelism suite (#355, #356)
+        run: python tests/test_parallel.py
+
       # The only step that leaves this process. Every other suite replaces functions in
       # place -- `runner.run`, `urlopen`, `llm.chat` -- which is exactly why the bugs
       # this one exists for were found by a human doing a real run and by nothing here:

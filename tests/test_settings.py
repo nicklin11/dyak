@@ -46,6 +46,7 @@ from dyak import settings  # noqa: E402
 from dyak import workspace as dyw  # noqa: E402
 from dyak.llm import DEFAULT_CONCURRENCY, DEFAULT_VISION_CONCURRENCY, Config  # noqa: E402
 from dyak.stt import backends as sttb  # noqa: E402
+from dyak import parallel  # noqa: E402
 from dyak.stt import openai_compat, whispercpp  # noqa: E402
 
 failures: list[str] = []
@@ -607,6 +608,8 @@ COMPUTED_DEFAULTS: dict[str, Callable[[], str | None]] = {
     "str(DEFAULT_MAX_UPLOAD_BYTES)": lambda: str(openai_compat.DEFAULT_MAX_UPLOAD_BYTES),
     "str(DEFAULT_CONCURRENCY)": lambda: str(DEFAULT_CONCURRENCY),
     "str(DEFAULT_VISION_CONCURRENCY)": lambda: str(DEFAULT_VISION_CONCURRENCY),
+    "str(DEFAULT_FFMPEG_JOBS)": lambda: str(parallel.DEFAULT_FFMPEG_JOBS),
+    "str(DEFAULT_STT_CONCURRENCY)": lambda: str(openai_compat.DEFAULT_STT_CONCURRENCY),
 }
 
 

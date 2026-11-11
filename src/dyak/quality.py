@@ -107,6 +107,8 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
+from . import parallel
+
 REPORT_NAME = "quality.json"
 PROVENANCE_NAME = "quality-provenance.json"
 
@@ -723,14 +725,40 @@ def run(
     observations: list[Observation] = []
     errors: dict[str, str] = {}
     began = time.monotonic()
+    jobs = parallel.ffmpeg_jobs()
 
-    for source in frames:
+    def measure(source: Path) -> Observation | OSError:
         try:
-            observations.append(observe(source, settings, estimator))
+            return observe(source, settings, estimator)
         except OSError as exc:
-            errors[source.name] = str(exc)
+            return exc
+
+    # Each frame is measured by its own ffmpeg calls and nothing else, so the pass fans out
+    # (#355). Results come back in frame order; the threshold still waits for all of them.
+    for source, measured in zip(frames, parallel.map_ordered(measure, frames, jobs)):
+        if isinstance(measured, OSError):
+            errors[source.name] = str(measured)
+        else:
+            observations.append(measured)
 
     threshold = threshold_for(observations, settings)
+
+    by_name = {o.name: o for o in observations}
+
+    def judge(observation: Observation) -> FrameQuality | OSError:
+        try:
+            return evaluate(observation, enhanced_dir, settings, threshold)
+        except OSError as exc:
+            return exc
+
+    # The enhance pass is per-frame ffmpeg too, and now that the threshold is known it is
+    # independent per frame as well.
+    verdicts = dict(
+        zip(
+            by_name,
+            parallel.map_ordered(judge, list(by_name.values()), jobs),
+        )
+    )
 
     report = Report(threshold=threshold)
     for source in frames:
@@ -752,10 +780,12 @@ def run(
                 )
             )
             continue
-        observation = next(o for o in observations if o.name == source.name)
-        try:
-            report.frames.append(evaluate(observation, enhanced_dir, settings, threshold))
-        except OSError as exc:
+        observation = by_name[source.name]
+        verdict = verdicts[source.name]
+        if isinstance(verdict, FrameQuality):
+            report.frames.append(verdict)
+        else:
+            exc = verdict
             report.frames.append(
                 FrameQuality(
                     name=source.name,

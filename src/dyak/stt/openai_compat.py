@@ -48,6 +48,7 @@ import struct
 import urllib.error
 import urllib.request
 import uuid
+from concurrent import futures
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,10 +57,12 @@ from .. import exitcodes as ec
 from .. import runner
 from ..deps import PROBE_TIMEOUT
 from ..llm import append_path, redact_endpoint
+from ..parallel import positive_count
 from ..settings import OPENAI_KEY_ENV as ENV_KEY
 from ..settings import OPENAI_MAX_UPLOAD_BYTES_ENV as ENV_MAX_UPLOAD
 from ..settings import OPENAI_MODEL_ENV as ENV_MODEL
 from ..settings import OPENAI_URL_ENV, resolve
+from ..settings import STT_CONCURRENCY_ENV as ENV_CONCURRENCY
 from . import core
 from .backends import BackendInfo
 
@@ -89,6 +92,10 @@ def _route(base_url: str, route: str) -> str:
 #: rather than a literal at the call site, because the limit belongs to the endpoint: another
 #: provider documents another number, and this repo cannot measure it.
 DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+#: Chunk uploads in flight at once when `DYAK_STT_CONCURRENCY` is unset. 1 because a hosted
+#: endpoint's rate limit is unknown here; raise it where the provider allows (#356).
+DEFAULT_STT_CONCURRENCY = 1
 
 #: How far each chunk reaches back into the previous one. Overlap is what makes the seam
 #: recoverable: without it the last word of a chunk is cut by the decoder and there is no
@@ -279,26 +286,56 @@ class OpenAICompat:
         # between the requests, which a comprehension cannot do.
         if on_progress is not None:
             on_progress(0, len(chunks))
-        payloads: list[bytes] = []
-        for chunk in chunks:
-            payloads.append(
-                self._post(
+
+        def upload(chunk) -> bytes:
+            return self._post(
+                boundary,
+                self._multipart(
                     boundary,
-                    self._multipart(
-                        boundary,
-                        wav,
-                        # `chunk.offset` is data-relative -- that is what makes the time
-                        # `offset / bytes_per_second` -- so the read seeks past the header.
-                        offset=layout.data_offset + chunk.offset,
-                        length=chunk.length,
-                        header=_wav_header(layout.fmt, chunk.length),
-                    ),
-                    timeout=_chunk_timeout(timeout, chunk.length, layout.data_length),
-                )
+                    wav,
+                    # `chunk.offset` is data-relative -- that is what makes the time
+                    # `offset / bytes_per_second` -- so the read seeks past the header.
+                    offset=layout.data_offset + chunk.offset,
+                    length=chunk.length,
+                    header=_wav_header(layout.fmt, chunk.length),
+                ),
+                timeout=_chunk_timeout(timeout, chunk.length, layout.data_length),
             )
-            if on_progress is not None:
-                on_progress(len(payloads), len(chunks))
-        return self._splice(payloads, chunks, layout.bytes_per_second)
+
+        workers = min(self.concurrency(), len(chunks))
+        if workers <= 1:
+            payloads: list[bytes] = []
+            for chunk in chunks:
+                payloads.append(upload(chunk))
+                if on_progress is not None:
+                    on_progress(len(payloads), len(chunks))
+            return self._splice(payloads, chunks, layout.bytes_per_second)
+
+        # The chunks overlap and are spliced afterwards, so no upload depends on another (#356).
+        # The counter still counts completed uploads -- observed state, ADR-0001 D7 -- and is
+        # advanced on this thread only. The first failure cancels the uploads not yet started.
+        results: list[bytes | None] = [None] * len(chunks)
+        with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            submitted = {pool.submit(upload, chunk): i for i, chunk in enumerate(chunks)}
+            done = 0
+            try:
+                for future in futures.as_completed(submitted):
+                    results[submitted[future]] = future.result()
+                    done += 1
+                    if on_progress is not None:
+                        on_progress(done, len(chunks))
+            except BaseException:
+                for future in submitted:
+                    future.cancel()
+                raise
+        return self._splice([r for r in results if r is not None], chunks, layout.bytes_per_second)
+
+    def concurrency(self) -> int:
+        """Chunk uploads in flight at once; default 1, a bad value is exit 1 naming the knob."""
+        raw = resolve(ENV_CONCURRENCY, default=str(DEFAULT_STT_CONCURRENCY)).value
+        return positive_count(
+            raw, ENV_CONCURRENCY, "chunk uploads to have in flight", DEFAULT_STT_CONCURRENCY
+        )
 
     def _post(self, boundary: str, body: bytes, *, timeout: float) -> bytes:
         headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
