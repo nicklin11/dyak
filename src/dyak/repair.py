@@ -330,13 +330,14 @@ def repair(
         # match "C++ и" but does match inside "C++x" -- while the lookarounds ask only that
         # neither neighbour be a word character.
         pattern = re.compile(rf"(?<!\w){re.escape(variant)}(?!\w)", re.IGNORECASE)
-        # The fix log records the changed LINE, and "ilqf -> iLQR" is not before/after text:
+        # The fix log records every changed LINE, and "ilqf -> iLQR" is not before/after text:
         # the reader needs the sentence that was rewritten, because that is the sentence they
-        # have to re-check against the recording. It must be the first ACCEPTED occurrence --
-        # `pattern.search` lands on one the guards declined instead, and the report then
-        # carries a change whose `before` and `after` are equal, measured at 3 of the 8
-        # records on this note (line 8 once, line 87 twice) before the guards.
-        first: Change | None = None
+        # have to re-check against the recording. One record per changed line, not one per
+        # variant: the substitution below rewrites every accepted occurrence in the note, so a
+        # variant on three lines left two rewritten lines recorded nowhere, and the single
+        # `pattern.search` hit could be one the guards declined -- the report then carried a
+        # change whose `before` and `after` were equal, measured at 3 of the 8 records on this
+        # note (line 8 once, line 87 twice) before the guards.
         for index, line in enumerate(lines):
             accepted = [m for m in pattern.finditer(line) if _drift_ok(line, m, canonical)]
             if not accepted:
@@ -355,10 +356,19 @@ def repair(
                 cursor = match.end()
             parts.append(line[cursor:])
             lines[index] = "".join(parts)
-            if first is None:
-                first = Change("term/drift", index + 1, before_line, lines[index])
-        if first is not None:
-            report.changes.append(first)
+            if lines[index] == before_line:
+                continue
+            report.changes.append(Change("term/drift", index + 1, before_line, lines[index]))
+            # A finding that was applied is not also reported as declined (#283). `declined`
+            # means the reader is told repair did NOT touch this (`:5`, `:20`), so the entry
+            # goes when the write above actually changed the line -- keyed on the same
+            # (rule, line) pair the math loop drops by (`:277-281`), which is the finest key an
+            # audit finding carries. The deciding field is the changed line, not this loop
+            # running after the stamping: that would be the write order, and the report would
+            # then depend on the order of the two steps rather than on what repair did.
+            report.declined = [
+                d for d in report.declined if d["rule"] != "term/drift" or d["line"] != index + 1
+            ]
 
     # The glossary step above rewrote `lines`, so the join before it is no longer the last
     # word on the text -- the trailing newline included, which the same guard restores for
