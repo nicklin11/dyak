@@ -69,6 +69,8 @@ path.
 | `DYAK_WORKDIR` | `workspace.py` | parent of the managed work dir (scratch: `audio.wav` etc.); default `$TMPDIR` |
 | `DYAK_BBOX_SOURCE` | `pipeline.py` | stage 5 estimator name; the registry holds `geometric` (default) and `null` (`quality.ESTIMATORS`) |
 | `DYAK_SERIAL` | `pipeline.py` | run the two pre-caption branches — stages 2-3 (`audio`→`stt`) and stages 4-5 (`frames`→`quality`) — one after the other instead of concurrently (#115). Unset, or `0`/`false`/`no`/`off`, is concurrent, which is the default and what a real run does; `1`/`true`/`yes`/`on` is sequential, for a control arm and for a host where the two branches contend for one resource. Any other value is exit 1 naming the variable: a kill-switch must not read a typo as "off" |
+| `DYAK_FFMPEG_JOBS` | `parallel.py`, `frames.py`, `quality.py` | per-frame ffmpeg processes stages 4 and 5 may run at once: the extract pass, the measure pass and the enhance pass (#355). Default `4`; `1` is the sequential run. Results are collected in frame order, so the manifest, the frames and `quality.json` are identical at any value; a value that is not a positive whole number is exit 1 naming the variable |
+| `DYAK_STT_CONCURRENCY` | `stt/openai_compat.py` | chunk uploads the hosted STT route may have in flight at once when a wav is sliced (#356). Default `1`, because the provider's rate limit is unknown; the chunks are spliced in order whatever order they return in, and the `chunks n/N` line counts completed uploads. A value that is not a positive whole number is exit 1 naming the variable |
 
 Every row above except `DYAK_SETTINGS` is also a flat key in the settings file — the variable
 name lowercased (`llm_endpoint`, `whispercpp_url`, ...) — and is read through `settings.resolve`
@@ -104,6 +106,8 @@ written `$HOME`/`$TMPDIR` here, because this document has to read the same on an
 | `DYAK_OUTPUT_DIR` | `output_dir` | none |
 | `DYAK_BBOX_SOURCE` | `bbox_source` | `geometric` |
 | `DYAK_SERIAL` | `serial` | `0` |
+| `DYAK_FFMPEG_JOBS` | `ffmpeg_jobs` | `4` |
+| `DYAK_STT_CONCURRENCY` | `stt_concurrency` | `1` |
 | `DYAK_STT` | `stt` | `auto` |
 | `DYAK_WHISPERCPP_URL` | `whispercpp_url` | none |
 | `DYAK_WHISPERCPP_LANGUAGE` | `whispercpp_language` | none |

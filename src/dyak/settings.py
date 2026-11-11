@@ -55,6 +55,10 @@ BBOX_SOURCE_ENV = "DYAK_BBOX_SOURCE"
 #: #115's kill-switch: run the pre-caption branches in sequence instead of concurrently.
 SERIAL_ENV = "DYAK_SERIAL"
 STT_BACKEND_ENV = "DYAK_STT"
+#: Hosted STT chunk uploads in flight at once (#356).
+STT_CONCURRENCY_ENV = "DYAK_STT_CONCURRENCY"
+#: Per-frame ffmpeg processes stages 4 and 5 may run at once (#355).
+FFMPEG_JOBS_ENV = "DYAK_FFMPEG_JOBS"
 WHISPERCPP_URL_ENV = "DYAK_WHISPERCPP_URL"
 WHISPERCPP_LANGUAGE_ENV = "DYAK_WHISPERCPP_LANGUAGE"
 OPENAI_URL_ENV = "DYAK_OPENAI_URL"
@@ -117,6 +121,8 @@ NUMERIC_SETTINGS: frozenset[str] = frozenset(
         settings_key(OPENAI_MAX_UPLOAD_BYTES_ENV),
         settings_key(LLM_CONCURRENCY_ENV),
         settings_key(VLM_CONCURRENCY_ENV),
+        settings_key(FFMPEG_JOBS_ENV),
+        settings_key(STT_CONCURRENCY_ENV),
     }
 )
 
@@ -166,6 +172,20 @@ def _concurrency_default() -> str:
     return str(llm.DEFAULT_CONCURRENCY)
 
 
+def _ffmpeg_jobs_default() -> str:
+    """`parallel.DEFAULT_FFMPEG_JOBS`, for the reason `_vault_default` gives (#355)."""
+    from . import parallel
+
+    return str(parallel.DEFAULT_FFMPEG_JOBS)
+
+
+def _stt_concurrency_default() -> str:
+    """`stt.openai_compat.DEFAULT_STT_CONCURRENCY`, for the reason `_vault_default` gives (#356)."""
+    from .stt import openai_compat
+
+    return str(openai_compat.DEFAULT_STT_CONCURRENCY)
+
+
 def _vision_concurrency_default() -> str:
     """`llm.DEFAULT_VISION_CONCURRENCY`, the stage-6 half of the same rule (#339)."""
     from . import llm
@@ -189,6 +209,7 @@ def _vision_concurrency_default() -> str:
 #: comfortable lie -- the drift `NUMERIC_SETTINGS` above exists to avoid.
 SETTING_DEFAULTS: dict[str, Callable[[], str | None]] = {
     settings_key(BBOX_SOURCE_ENV): lambda: "geometric",
+    settings_key(FFMPEG_JOBS_ENV): _ffmpeg_jobs_default,
     settings_key(LLM_CONCURRENCY_ENV): _concurrency_default,
     settings_key(LLM_ENDPOINT_ENV): _no_default,
     settings_key(LLM_KEY_ENV): _no_default,
@@ -200,6 +221,7 @@ SETTING_DEFAULTS: dict[str, Callable[[], str | None]] = {
     settings_key(OUTPUT_DIR_ENV): _no_default,
     settings_key(SERIAL_ENV): lambda: "0",
     settings_key(STT_BACKEND_ENV): lambda: "auto",
+    settings_key(STT_CONCURRENCY_ENV): _stt_concurrency_default,
     settings_key(TERMS_DIR_ENV): _no_default,
     settings_key(VAULT_ENV): _vault_default,
     settings_key(VLM_CONCURRENCY_ENV): _vision_concurrency_default,
@@ -581,6 +603,9 @@ def describe(flags: Mapping[str, str | None] | None = None) -> list[Setting]:
             BBOX_SOURCE_ENV, flag=flags.get(BBOX_SOURCE_ENV), default=default_for(BBOX_SOURCE_ENV)
         ),
         resolve(
+            FFMPEG_JOBS_ENV, flag=flags.get(FFMPEG_JOBS_ENV), default=default_for(FFMPEG_JOBS_ENV)
+        ),
+        resolve(
             LLM_CONCURRENCY_ENV,
             flag=flags.get(LLM_CONCURRENCY_ENV),
             default=default_for(LLM_CONCURRENCY_ENV),
@@ -614,6 +639,11 @@ def describe(flags: Mapping[str, str | None] | None = None) -> list[Setting]:
         resolve(SERIAL_ENV, flag=flags.get(SERIAL_ENV), default=default_for(SERIAL_ENV)),
         resolve(
             STT_BACKEND_ENV, flag=flags.get(STT_BACKEND_ENV), default=default_for(STT_BACKEND_ENV)
+        ),
+        resolve(
+            STT_CONCURRENCY_ENV,
+            flag=flags.get(STT_CONCURRENCY_ENV),
+            default=default_for(STT_CONCURRENCY_ENV),
         ),
         resolve(TERMS_DIR_ENV, flag=flags.get(TERMS_DIR_ENV), default=default_for(TERMS_DIR_ENV)),
         resolve(VAULT_ENV, flag=flags.get(VAULT_ENV), default=default_for(VAULT_ENV)),

@@ -27,7 +27,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from . import exitcodes as ec
-from . import runner
+from . import parallel, runner
 
 REMEDIATION = "install: pacman -S ffmpeg"
 
@@ -335,7 +335,13 @@ def run(
     for old in out.glob(f"{FRAME_PREFIX}*{FRAME_SUFFIX}"):
         old.unlink()
 
-    rows = [(pts, extract_at(source, pts, out, settings)) for pts in times]
+    # One ffmpeg seek per timestamp, independent of each other, so they run `ffmpeg_jobs()` at a
+    # time (#355). `map_ordered` keeps the rows in pts order, so the manifest is identical to a
+    # sequential run.
+    extracted = parallel.map_ordered(
+        lambda pts: extract_at(source, pts, out, settings), times, parallel.ffmpeg_jobs()
+    )
+    rows = list(zip(times, extracted))
     write_manifest(rows, manifest)
     provenance(out, settings, reused)
 
