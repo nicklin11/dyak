@@ -415,18 +415,23 @@ def run(
             for f in payload.get("findings", [])
         ]
 
-    glossary = (
-        audit_mod.Glossary.parse(glossary_path.read_text(encoding="utf-8"))
-        if glossary_path and glossary_path.is_file()
-        else audit_mod.Glossary()
-    )
+    glossary, glossary_facts = audit_mod.load_glossary(glossary_path)
 
     repaired, report = repair(markdown, areport, glossary, lreport)
     (destination / REPAIRED_NOTE).write_text(repaired, encoding="utf-8")
     (destination / REPORT_NAME).write_text(
         json.dumps(report.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    (destination / PROVENANCE_NAME).write_text(provenance(report, config) + "\n", encoding="utf-8")
+    (destination / PROVENANCE_NAME).write_text(
+        provenance(report, config, glossary=glossary_facts) + "\n", encoding="utf-8"
+    )
+
+    # The same line stage 9 prints, from the shared loader and narrator (#267, #270): stage 10
+    # substitutes the canonical term from this glossary (`:323`), so it has the same blind spot
+    # and must not be the only stage that stays quiet about it.
+    line = audit_mod.glossary_note(glossary_facts)
+    if line is not None:
+        out.write(f"           {line}\n")
 
     for change in report.changes[:8]:
         out.write(f"           fixed {change.rule} line {change.line}\n")
@@ -436,7 +441,9 @@ def run(
     return report
 
 
-def provenance(report: Report, config: llm.Config | None = None) -> str:
+def provenance(
+    report: Report, config: llm.Config | None = None, glossary: dict | None = None
+) -> str:
     return json.dumps(
         {
             "stage": 10,
@@ -457,6 +464,13 @@ def provenance(report: Report, config: llm.Config | None = None) -> str:
             "declined_reasons": DECLINED,
             "idempotent": True,
             "changes": len(report.changes),
+            # `None` when no glossary was supplied, and otherwise the four-key state stage 9
+            # records too (#267, #270): `path`, `is_file`, `entries`, `error`. This stage reads
+            # the same file through the same loader (`audit.load_glossary`), so a reader who
+            # compares the two provenances must not find the states collapsed on one side --
+            # the identity of "not configured" and "supplied and unusable" is the defect both
+            # issues name. `endpoint` above is the same null-when-absent convention.
+            "glossary": glossary,
         },
         indent=2,
         ensure_ascii=False,
